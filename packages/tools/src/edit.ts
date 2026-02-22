@@ -56,10 +56,15 @@ export function createEditTool(): ToolDefinition {
 
       await Bun.write(input.file_path, newContent);
 
+      const replacements = input.replace_all
+        ? content.split(input.old_string).length - 1
+        : 1;
+
       return {
         filePath: input.file_path,
-        oldString: input.old_string,
-        newString: input.new_string,
+        oldString: input.old_string.slice(0, 100),
+        newString: input.new_string.slice(0, 100),
+        replacements,
         originalFile: content,
         // Structured patch left as empty array; diff can be computed downstream if needed
         structuredPatch: [] as any[],

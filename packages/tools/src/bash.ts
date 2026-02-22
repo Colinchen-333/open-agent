@@ -1,13 +1,18 @@
 import type { ToolDefinition, ToolContext, BashInput, BashOutput } from './types.js';
+import { getBackgroundTasks } from './task-management.js';
 
 const MAX_OUTPUT_LENGTH = 30000;
 const MAX_TIMEOUT_MS = 600_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
 
+// Persistent CWD state across consecutive Bash calls (per module instance)
+let persistentCwd: string | null = null;
+
 export function createBashTool(): ToolDefinition {
   return {
     name: 'Bash',
-    description: 'Execute a bash command in the current working directory. Stdout is captured and returned. Output exceeding 30 000 characters is truncated.',
+    description:
+      'Execute a bash command in the current working directory. Stdout is captured and returned. Output exceeding 30 000 characters is truncated. Working directory persists between commands; shell state (everything else) does not.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -27,18 +32,77 @@ export function createBashTool(): ToolDefinition {
           type: 'boolean',
           description: 'Run the command in the background (fire-and-forget)',
         },
+        dangerouslyDisableSandbox: {
+          type: 'boolean',
+          description: 'Bypass sandbox restrictions for this command (requires explicit user approval)',
+        },
       },
       required: ['command'],
     },
 
-    async execute(input: BashInput, ctx: ToolContext): Promise<BashOutput> {
+    async execute(input: BashInput & { dangerouslyDisableSandbox?: boolean }, ctx: ToolContext): Promise<BashOutput> {
       const timeout = Math.min(input.timeout ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
 
-      const proc = Bun.spawn(['bash', '-c', input.command], {
-        cwd: ctx.cwd,
+      // Determine effective working directory (persistent across calls)
+      const effectiveCwd = persistentCwd ?? ctx.cwd;
+
+      // Wrap command to capture final CWD after execution
+      // Append a sentinel + pwd so we can extract the final directory
+      const CWD_SENTINEL = '___CWD___';
+      const wrappedCommand = `cd "${effectiveCwd}" && ${input.command} ; echo "${CWD_SENTINEL}" ; pwd`;
+
+      // Handle background execution
+      if (input.run_in_background) {
+        const taskId = `bg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const backgroundTasks = getBackgroundTasks();
+
+        const proc = Bun.spawn(['bash', '-c', wrappedCommand], {
+          cwd: effectiveCwd,
+          stdout: 'pipe',
+          stderr: 'pipe',
+          env: { ...process.env, TERM: 'dumb' } as Record<string, string>,
+        });
+
+        backgroundTasks.set(taskId, {
+          process: proc,
+          output: '',
+          status: 'running',
+          startTime: Date.now(),
+        });
+
+        // Async collection of output
+        (async () => {
+          const task = backgroundTasks.get(taskId)!;
+          try {
+            const [stdout, stderr] = await Promise.all([
+              new Response(proc.stdout).text(),
+              new Response(proc.stderr).text(),
+            ]);
+            // Strip CWD sentinel from output and update persistentCwd
+            const { cleanOutput, finalCwd } = extractCwd(stdout, CWD_SENTINEL);
+            if (finalCwd) persistentCwd = finalCwd;
+            task.output =
+              truncate(cleanOutput) + (stderr ? '\nSTDERR:\n' + truncate(stderr) : '');
+            task.status = 'completed';
+          } catch {
+            task.status = 'error';
+          }
+        })();
+
+        return {
+          stdout: '',
+          stderr: '',
+          interrupted: false,
+          backgroundTaskId: taskId,
+        };
+      }
+
+      // Foreground execution
+      const proc = Bun.spawn(['bash', '-c', wrappedCommand], {
+        cwd: effectiveCwd,
         stdout: 'pipe',
         stderr: 'pipe',
-        env: process.env as Record<string, string>,
+        env: { ...process.env, TERM: 'dumb' } as Record<string, string>,
       });
 
       let killed = false;
@@ -47,18 +111,7 @@ export function createBashTool(): ToolDefinition {
         proc.kill();
       }, timeout);
 
-      // If running in background, detach immediately
-      if (input.run_in_background) {
-        clearTimeout(timer);
-        return {
-          stdout: '',
-          stderr: '',
-          interrupted: false,
-          backgroundTaskId: `bg_${Date.now()}`,
-        };
-      }
-
-      const [stdout, stderr] = await Promise.all([
+      const [rawStdout, rawStderr] = await Promise.all([
         new Response(proc.stdout).text(),
         new Response(proc.stderr).text(),
       ]);
@@ -66,20 +119,56 @@ export function createBashTool(): ToolDefinition {
       clearTimeout(timer);
       await proc.exited;
 
-      // Truncate long output
-      const truncate = (s: string) =>
-        s.length > MAX_OUTPUT_LENGTH
-          ? s.slice(0, MAX_OUTPUT_LENGTH) + '\n... (output truncated)'
-          : s;
+      // Extract final CWD from stdout and update persistent state
+      const { cleanOutput: stdout, finalCwd } = extractCwd(rawStdout, CWD_SENTINEL);
+      if (finalCwd) persistentCwd = finalCwd;
+
+      // Truncate long output with informative message
+      const truncatedStdout = truncate(stdout);
+      const truncatedStderr = truncate(rawStderr);
 
       // interrupted = killed by our timer OR non-zero exit with a signal
       const interrupted = killed || (proc.exitCode !== 0 && proc.signalCode !== null);
 
       return {
-        stdout: truncate(stdout),
-        stderr: truncate(stderr),
+        stdout: truncatedStdout,
+        stderr: truncatedStderr,
         interrupted,
       };
     },
   };
+}
+
+/**
+ * Extract the final CWD from stdout that contains the sentinel line.
+ * Returns the cleaned output (sentinel + pwd line removed) and the parsed CWD.
+ */
+function extractCwd(
+  stdout: string,
+  sentinel: string
+): { cleanOutput: string; finalCwd: string | null } {
+  const sentinelIdx = stdout.lastIndexOf(sentinel);
+  if (sentinelIdx === -1) {
+    return { cleanOutput: stdout, finalCwd: null };
+  }
+
+  // Everything before the sentinel is the real output
+  const cleanOutput = stdout.slice(0, sentinelIdx).replace(/\n$/, '');
+
+  // The line after the sentinel is the pwd result
+  const afterSentinel = stdout.slice(sentinelIdx + sentinel.length).trim();
+  const pwdLine = afterSentinel.split('\n')[0]?.trim() ?? null;
+  const finalCwd = pwdLine && pwdLine.length > 0 ? pwdLine : null;
+
+  return { cleanOutput, finalCwd };
+}
+
+function truncate(s: string): string {
+  if (s.length > MAX_OUTPUT_LENGTH) {
+    return (
+      s.slice(0, MAX_OUTPUT_LENGTH) +
+      '\n\n[Output truncated. Use head/tail/grep for large outputs.]'
+    );
+  }
+  return s;
 }

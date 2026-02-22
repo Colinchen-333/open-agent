@@ -10,3 +10,10 @@ export { REPL } from './repl.js';
 export { emitStreamJson } from './stream-json.js';
 
 export { TerminalPermissionPrompter } from './permission-prompter.js';
+
+export {
+  handleSlashCommand,
+  getSlashCommands,
+  type SlashCommandContext,
+  type SlashCommandResult,
+} from './slash-commands.js';

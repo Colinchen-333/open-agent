@@ -8,6 +8,10 @@ import { createGrepTool } from './grep.js';
 import { createWebFetchTool } from './web-fetch.js';
 import { createNotebookEditTool } from './notebook-edit.js';
 import { createAskUserTool } from './ask-user.js';
+import { createWebSearchTool } from './web-search.js';
+import { createConfigTool } from './config-tool.js';
+import { createTaskOutputTool, createTaskStopTool } from './task-management.js';
+import { createEnterWorktreeTool } from './worktree.js';
 
 /**
  * Central registry for all available tools.
@@ -60,5 +64,10 @@ export function createDefaultToolRegistry(_cwd: string): ToolRegistry {
   registry.register(createWebFetchTool());
   registry.register(createNotebookEditTool());
   registry.register(createAskUserTool());
+  registry.register(createWebSearchTool());
+  registry.register(createConfigTool());
+  registry.register(createTaskOutputTool());
+  registry.register(createTaskStopTool());
+  registry.register(createEnterWorktreeTool());
   return registry;
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
-import { parseArgs, TerminalRenderer, REPL, emitStreamJson, TerminalPermissionPrompter } from '@open-agent/cli';
-import { ConversationLoop, SessionManager, ConfigLoader, AutoMemory } from '@open-agent/core';
+import { parseArgs, TerminalRenderer, REPL, emitStreamJson, TerminalPermissionPrompter, handleSlashCommand } from '@open-agent/cli';
+import { ConversationLoop, SessionManager, ConfigLoader, AutoMemory, buildSystemPrompt, isGitRepository } from '@open-agent/core';
 import { createProvider, autoDetectProvider, calculateCost } from '@open-agent/providers';
 import { createDefaultToolRegistry, createTaskTool } from '@open-agent/tools';
 import { AgentLoader, AgentRunner } from '@open-agent/agents';
@@ -157,7 +157,16 @@ async function main(): Promise<void> {
     // Pass the full tool map; ConversationLoop expects Map<name, ToolDefinition>.
     tools: new Map(toolRegistry.list().map((t) => [t.name, t])),
     model,
-    systemPrompt: getSystemPrompt(cwd, agentInstructions, memoryContent),
+    systemPrompt: buildSystemPrompt({
+      cwd,
+      model,
+      tools: toolRegistry.list().map(t => t.name),
+      permissionMode: (args.permissionMode as string) ?? 'default',
+      agentInstructions,
+      memoryContent,
+      memoryDir: autoMemory.getDir(),
+      isGitRepo: isGitRepository(cwd),
+    }),
     maxTurns: args.maxTurns,
     thinking: { type: 'adaptive' },
     effort: 'high',
@@ -199,11 +208,19 @@ async function main(): Promise<void> {
 
     if (input === '') continue;
 
-    // Built-in slash commands
-    if (input === '/exit' || input === '/quit') break;
-    if (input === '/clear') {
-      console.clear();
-      continue;
+    if (input.startsWith('/')) {
+      const result = await handleSlashCommand(input, {
+        loop,
+        cwd,
+        model,
+        sessionId,
+      });
+      if (result) {
+        if (result.shouldExit) break;
+        if (result.shouldClear) { console.clear(); continue; }
+        if (result.output) console.log(result.output);
+        continue;
+      }
     }
 
     await executePrompt(loop, input, renderer, isStreamJson, sessionMgr, cwd, sessionId);
@@ -264,25 +281,6 @@ function getDefaultModel(providerName: string): string {
   }
 }
 
-function getSystemPrompt(cwd: string, agentInstructions?: string[], memoryContent?: string): string {
-  let prompt = `You are OpenAgent, an AI coding assistant. You help users with software engineering tasks.
-
-Current working directory: ${cwd}
-
-You have access to tools for reading files, writing files, editing files, executing shell commands, searching files by name patterns, and searching file contents.
-
-Be concise and helpful. When asked to modify code, read the relevant files first to understand the context.`;
-
-  if (agentInstructions && agentInstructions.length > 0) {
-    prompt += '\n\n# User Instructions\n\n' + agentInstructions.join('\n\n---\n\n');
-  }
-
-  if (memoryContent) {
-    prompt += `\n\n# Auto Memory\n\nYou have a persistent memory directory. Current MEMORY.md contents:\n\n${memoryContent}`;
-  }
-
-  return prompt;
-}
 
 function printHelp(): void {
   console.log(`
