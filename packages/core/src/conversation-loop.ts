@@ -393,6 +393,15 @@ export class ConversationLoop {
               content: `Permission denied: ${reason}`,
               is_error: true,
             });
+            yield {
+              type: 'tool_result' as const,
+              tool_name: toolUse.name,
+              tool_use_id: toolUse.id,
+              result: `Permission denied: ${reason}`,
+              is_error: true,
+              uuid: randomUUID(),
+              session_id: sessionId,
+            };
             continue;
           }
 
@@ -407,6 +416,15 @@ export class ConversationLoop {
                 content: `Permission denied: ${reason}`,
                 is_error: true,
               });
+              yield {
+                type: 'tool_result' as const,
+                tool_name: toolUse.name,
+                tool_use_id: toolUse.id,
+                result: `Permission denied: ${reason}`,
+                is_error: true,
+                uuid: randomUUID(),
+                session_id: sessionId,
+              };
               continue;
             }
 
@@ -425,6 +443,15 @@ export class ConversationLoop {
                 content: `Permission denied: ${reason}`,
                 is_error: true,
               });
+              yield {
+                type: 'tool_result' as const,
+                tool_name: toolUse.name,
+                tool_use_id: toolUse.id,
+                result: `Permission denied: ${reason}`,
+                is_error: true,
+                uuid: randomUUID(),
+                session_id: sessionId,
+              };
               continue;
             }
 
@@ -471,11 +498,21 @@ export class ConversationLoop {
 
         try {
           const result = await tool.execute(toolUse.input, toolCtx);
+          const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
           toolResults.push({
             type: 'tool_result',
             tool_use_id: toolUse.id,
-            content: typeof result === 'string' ? result : JSON.stringify(result),
+            content: resultStr,
           });
+          yield {
+            type: 'tool_result' as const,
+            tool_name: toolUse.name,
+            tool_use_id: toolUse.id,
+            result: resultStr.slice(0, 500),
+            is_error: false,
+            uuid: randomUUID(),
+            session_id: sessionId,
+          };
 
           // ── PostToolUse hook (success) ────────────────────────────────────
           if (this.options.hookExecutor) {
@@ -484,7 +521,7 @@ export class ConversationLoop {
               {
                 tool_name: toolUse.name,
                 tool_input: toolUse.input,
-                tool_result: typeof result === 'string' ? result : JSON.stringify(result),
+                tool_result: resultStr,
               },
               toolUse.id,
             );
@@ -498,6 +535,15 @@ export class ConversationLoop {
             content: `Error: ${msg}`,
             is_error: true,
           });
+          yield {
+            type: 'tool_result' as const,
+            tool_name: toolUse.name,
+            tool_use_id: toolUse.id,
+            result: msg,
+            is_error: true,
+            uuid: randomUUID(),
+            session_id: sessionId,
+          };
         }
       }
 

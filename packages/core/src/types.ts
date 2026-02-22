@@ -198,13 +198,24 @@ export interface SDKPartialAssistantMessage {
   session_id: string;
 }
 
+export interface SDKToolResultMessage {
+  type: 'tool_result';
+  tool_name: string;
+  tool_use_id: string;
+  result: string;
+  is_error: boolean;
+  uuid: string;
+  session_id: string;
+}
+
 export type SDKMessage =
   | SDKAssistantMessage
   | SDKUserMessage
   | SDKResultMessage
   | SDKSystemMessage
   | SDKStatusMessage
-  | SDKPartialAssistantMessage;
+  | SDKPartialAssistantMessage
+  | SDKToolResultMessage;
 
 // Slash command definition
 export interface SlashCommand {

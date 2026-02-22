@@ -1,92 +1,457 @@
 import type { StreamEvent } from '@open-agent/providers';
 
-// ANSI escape codes
-const COLORS = {
-  reset: '\x1b[0m',
-  dim: '\x1b[2m',
-  bold: '\x1b[1m',
-  red: '\x1b[31m',
-  green: '\x1b[32m',
-  yellow: '\x1b[33m',
-  blue: '\x1b[34m',
-  magenta: '\x1b[35m',
-  cyan: '\x1b[36m',
-  gray: '\x1b[90m',
+// ── ANSI escape codes ─────────────────────────────────────────────────
+const ESC = '\x1b';
+const C = {
+  reset: `${ESC}[0m`,
+  bold: `${ESC}[1m`,
+  dim: `${ESC}[2m`,
+  italic: `${ESC}[3m`,
+  underline: `${ESC}[4m`,
+  inverse: `${ESC}[7m`,
+  strikethrough: `${ESC}[9m`,
+
+  red: `${ESC}[31m`,
+  green: `${ESC}[32m`,
+  yellow: `${ESC}[33m`,
+  blue: `${ESC}[34m`,
+  magenta: `${ESC}[35m`,
+  cyan: `${ESC}[36m`,
+  white: `${ESC}[37m`,
+  gray: `${ESC}[90m`,
+
+  bgRed: `${ESC}[41m`,
+  bgGreen: `${ESC}[42m`,
+  bgYellow: `${ESC}[43m`,
+  bgBlue: `${ESC}[44m`,
+  bgCyan: `${ESC}[46m`,
+  bgGray: `${ESC}[100m`,
+
+  // Cursor control
+  hide: `${ESC}[?25l`,
+  show: `${ESC}[?25h`,
+  clearLine: `${ESC}[2K`,
+  moveUp: (n: number) => `${ESC}[${n}A`,
+  moveToCol: (n: number) => `${ESC}[${n}G`,
 } as const;
+
+// ── Box drawing ───────────────────────────────────────────────────────
+const BOX = {
+  topLeft: '╭',
+  topRight: '╮',
+  bottomLeft: '╰',
+  bottomRight: '╯',
+  horizontal: '─',
+  vertical: '│',
+  teeRight: '├',
+  teeLeft: '┤',
+} as const;
+
+// ── Spinner frames ────────────────────────────────────────────────────
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/**
+ * Get terminal width, clamped to a reasonable range.
+ */
+function getWidth(): number {
+  return Math.min(process.stdout.columns ?? 80, 120);
+}
+
+/**
+ * Draw a horizontal line with optional label.
+ */
+function hline(label?: string, color: string = C.gray): string {
+  const w = getWidth();
+  if (!label) return color + BOX.horizontal.repeat(w) + C.reset;
+  const padded = ` ${label} `;
+  const remaining = Math.max(0, w - padded.length - 2);
+  return (
+    color +
+    BOX.topLeft +
+    BOX.horizontal +
+    C.reset +
+    color +
+    C.bold +
+    padded +
+    C.reset +
+    color +
+    BOX.horizontal.repeat(remaining) +
+    BOX.topRight +
+    C.reset
+  );
+}
+
+function bottomLine(color: string = C.gray): string {
+  const w = getWidth();
+  return color + BOX.bottomLeft + BOX.horizontal.repeat(w - 2) + BOX.bottomRight + C.reset;
+}
+
+/**
+ * Render basic Markdown to ANSI terminal output.
+ * Handles: **bold**, *italic*, `inline code`, ```code blocks```,
+ * # headers, - lists, > blockquotes
+ */
+function renderMarkdown(text: string): string {
+  const lines = text.split('\n');
+  const result: string[] = [];
+  let inCodeBlock = false;
+  let codeBlockLang = '';
+
+  for (const line of lines) {
+    // Code block toggle
+    if (line.trimStart().startsWith('```')) {
+      if (!inCodeBlock) {
+        codeBlockLang = line.trimStart().slice(3).trim();
+        const label = codeBlockLang || 'code';
+        result.push(
+          `${C.gray}${BOX.topLeft}${BOX.horizontal} ${label} ${BOX.horizontal.repeat(Math.max(0, 40 - label.length))}${C.reset}`,
+        );
+        inCodeBlock = true;
+      } else {
+        result.push(`${C.gray}${BOX.bottomLeft}${BOX.horizontal.repeat(44)}${C.reset}`);
+        inCodeBlock = false;
+        codeBlockLang = '';
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      result.push(`${C.gray}${BOX.vertical}${C.reset} ${C.cyan}${line}${C.reset}`);
+      continue;
+    }
+
+    let processed = line;
+
+    // Headers
+    const headerMatch = processed.match(/^(#{1,6})\s+(.*)$/);
+    if (headerMatch) {
+      const level = headerMatch[1].length;
+      const content = headerMatch[2];
+      if (level === 1) {
+        result.push(`\n${C.bold}${C.white}${content}${C.reset}`);
+        result.push(`${C.gray}${'═'.repeat(Math.min(content.length, getWidth()))}${C.reset}`);
+      } else if (level === 2) {
+        result.push(`\n${C.bold}${content}${C.reset}`);
+        result.push(`${C.gray}${'─'.repeat(Math.min(content.length, getWidth()))}${C.reset}`);
+      } else {
+        result.push(`${C.bold}${content}${C.reset}`);
+      }
+      continue;
+    }
+
+    // Blockquotes
+    if (processed.startsWith('>')) {
+      const content = processed.replace(/^>\s*/, '');
+      result.push(`${C.gray}${BOX.vertical}${C.reset} ${C.italic}${content}${C.reset}`);
+      continue;
+    }
+
+    // List items
+    if (processed.match(/^\s*[-*]\s/)) {
+      processed = processed.replace(/^(\s*)[-*]\s/, '$1• ');
+    }
+
+    // Inline formatting
+    // Bold **text**
+    processed = processed.replace(/\*\*([^*]+)\*\*/g, `${C.bold}$1${C.reset}`);
+    // Italic *text*
+    processed = processed.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, `${C.italic}$1${C.reset}`);
+    // Inline code `text`
+    processed = processed.replace(/`([^`]+)`/g, `${C.bgGray}${C.white} $1 ${C.reset}`);
+    // Strikethrough ~~text~~
+    processed = processed.replace(/~~([^~]+)~~/g, `${C.strikethrough}$1${C.reset}`);
+
+    result.push(processed);
+  }
+
+  // Close unclosed code block
+  if (inCodeBlock) {
+    result.push(`${C.gray}${BOX.bottomLeft}${BOX.horizontal.repeat(44)}${C.reset}`);
+  }
+
+  return result.join('\n');
+}
 
 export class TerminalRenderer {
   private inThinking = false;
   private inToolUse = false;
   private currentToolName = '';
+  private currentToolInput = '';
+  private spinnerInterval: ReturnType<typeof setInterval> | null = null;
+  private spinnerFrame = 0;
+  private textBuffer = '';
 
+  // ── Spinner ───────────────────────────────────────────────────────
+  startSpinner(label = 'Thinking'): void {
+    if (this.spinnerInterval) return;
+    process.stdout.write(C.hide);
+    this.spinnerInterval = setInterval(() => {
+      const frame = SPINNER_FRAMES[this.spinnerFrame % SPINNER_FRAMES.length];
+      process.stdout.write(`${C.clearLine}\r${C.cyan}${frame}${C.reset} ${C.dim}${label}...${C.reset}`);
+      this.spinnerFrame++;
+    }, 80);
+  }
+
+  stopSpinner(): void {
+    if (this.spinnerInterval) {
+      clearInterval(this.spinnerInterval);
+      this.spinnerInterval = null;
+      process.stdout.write(`${C.clearLine}\r${C.show}`);
+    }
+  }
+
+  // ── Stream events ─────────────────────────────────────────────────
   renderStreamEvent(event: StreamEvent): void {
     switch (event.type) {
       case 'text_delta': {
-        // Close any open thinking block before emitting regular text.
+        this.stopSpinner();
         if (this.inThinking) {
-          process.stdout.write(COLORS.reset + '\n');
+          process.stdout.write(`${C.reset}\n\n`);
           this.inThinking = false;
         }
-        process.stdout.write(event.text);
+        this.textBuffer += event.text;
+        // Flush complete lines for markdown rendering
+        const lastNewline = this.textBuffer.lastIndexOf('\n');
+        if (lastNewline !== -1) {
+          const toRender = this.textBuffer.slice(0, lastNewline);
+          this.textBuffer = this.textBuffer.slice(lastNewline + 1);
+          const rendered = renderMarkdown(toRender);
+          process.stdout.write(rendered + '\n');
+        }
         break;
       }
 
       case 'thinking_delta': {
+        this.stopSpinner();
         if (!this.inThinking) {
-          process.stdout.write(COLORS.dim + '💭 ');
+          process.stdout.write(`\n${C.gray}${C.dim}`);
           this.inThinking = true;
         }
-        process.stdout.write(COLORS.dim + event.thinking);
+        // Thinking content in dim gray
+        process.stdout.write(event.thinking);
         break;
       }
 
       case 'tool_use_start': {
+        this.stopSpinner();
+        // Flush remaining text buffer
+        if (this.textBuffer) {
+          process.stdout.write(renderMarkdown(this.textBuffer));
+          this.textBuffer = '';
+        }
         if (this.inThinking) {
-          process.stdout.write(COLORS.reset + '\n');
+          process.stdout.write(`${C.reset}\n`);
           this.inThinking = false;
         }
         this.currentToolName = event.name;
+        this.currentToolInput = '';
         this.inToolUse = true;
-        process.stdout.write(`\n${COLORS.cyan}⚡ ${event.name}${COLORS.reset} `);
+
+        // Draw tool call header
+        const icon = this.getToolIcon(event.name);
+        process.stdout.write(`\n${hline(`${icon} ${event.name}`, C.cyan)}\n`);
+        break;
+      }
+
+      case 'tool_use_delta': {
+        if (this.inToolUse) {
+          this.currentToolInput += event.partial_json;
+        }
         break;
       }
 
       case 'tool_use_end': {
         if (this.inToolUse) {
-          process.stdout.write('\n');
+          // Show input summary
+          const summary = this.formatToolInput(this.currentToolName, this.currentToolInput);
+          if (summary) {
+            for (const line of summary.split('\n')) {
+              process.stdout.write(`${C.gray}${BOX.vertical}${C.reset} ${line}\n`);
+            }
+          }
+          process.stdout.write(`${bottomLine(C.cyan)}\n`);
           this.inToolUse = false;
+          this.startSpinner('Running');
         }
         break;
       }
 
       case 'error': {
+        this.stopSpinner();
         process.stderr.write(
-          `${COLORS.red}Error: ${JSON.stringify(event.error)}${COLORS.reset}\n`,
+          `\n${C.red}${C.bold}Error:${C.reset} ${C.red}${JSON.stringify(event.error)}${C.reset}\n`,
         );
         break;
       }
-
-      // Other events (message_start, message_end, content_block_*, tool_use_delta)
-      // carry no displayable content for a human-readable stream, so they are
-      // intentionally left unhandled here.
     }
   }
 
+  // ── Tool result (called from ConversationLoop integration) ────────
   renderToolResult(toolName: string, result: unknown, isError: boolean): void {
+    this.stopSpinner();
     if (isError) {
-      const detail =
-        typeof result === 'string' ? result : JSON.stringify(result).slice(0, 200);
-      process.stdout.write(
-        `${COLORS.red}  ✗ ${toolName} failed: ${detail}${COLORS.reset}\n`,
-      );
+      const detail = typeof result === 'string' ? result : JSON.stringify(result).slice(0, 200);
+      process.stdout.write(`  ${C.red}✗ ${detail}${C.reset}\n`);
     } else {
       const summary = this.summarizeToolResult(toolName, result);
-      process.stdout.write(`${COLORS.green}  ✓ ${summary}${COLORS.reset}\n`);
+      process.stdout.write(`  ${C.green}✓ ${summary}${C.reset}\n`);
     }
   }
 
+  // ── Final result ──────────────────────────────────────────────────
+  renderResult(result: Record<string, any>): void {
+    this.stopSpinner();
+    // Flush remaining text
+    if (this.textBuffer) {
+      process.stdout.write(renderMarkdown(this.textBuffer) + '\n');
+      this.textBuffer = '';
+    }
+
+    process.stdout.write('\n');
+
+    if (result.is_error) {
+      const detail = Array.isArray(result.errors) ? result.errors.join(', ') : result.subtype;
+      process.stdout.write(`${C.red}${C.bold}Error:${C.reset} ${C.red}${detail}${C.reset}\n`);
+    }
+
+    const usage = result.usage as Record<string, number> | undefined;
+    if (usage) {
+      const cost = result.total_cost_usd as number | undefined;
+      const costStr = cost && cost > 0 ? ` ${C.yellow}$${cost.toFixed(4)}${C.gray}` : '';
+      const tokIn = usage.input_tokens ?? 0;
+      const tokOut = usage.output_tokens ?? 0;
+      const duration = result.duration_ms ?? 0;
+      const durationStr = duration >= 1000 ? `${(duration / 1000).toFixed(1)}s` : `${duration}ms`;
+
+      process.stdout.write(
+        `${C.gray}${C.dim}` +
+          `${tokIn.toLocaleString()} → ${tokOut.toLocaleString()} tokens` +
+          ` · ${result.num_turns ?? 0} turns` +
+          ` · ${durationStr}` +
+          `${costStr}` +
+          `${C.reset}\n`,
+      );
+    }
+  }
+
+  // ── Welcome message ───────────────────────────────────────────────
+  renderWelcome(model: string): void {
+    const w = getWidth();
+    const line = C.cyan + BOX.horizontal.repeat(w) + C.reset;
+
+    process.stdout.write('\n' + line + '\n');
+    process.stdout.write(`  ${C.bold}${C.cyan}◆ OpenAgent${C.reset} ${C.dim}v0.1.0${C.reset}\n`);
+    process.stdout.write(`  ${C.dim}Model: ${model}${C.reset}\n`);
+    process.stdout.write(
+      `  ${C.dim}Type your message. Ctrl+C to interrupt, Ctrl+D to exit.${C.reset}\n`,
+    );
+    process.stdout.write(`  ${C.dim}Type /help for available commands.${C.reset}\n`);
+    process.stdout.write(line + '\n\n');
+  }
+
+  // ── Tool icons ────────────────────────────────────────────────────
+  private getToolIcon(toolName: string): string {
+    const icons: Record<string, string> = {
+      Read: '📄',
+      Write: '✏️',
+      Edit: '🔧',
+      Bash: '⚡',
+      Glob: '🔍',
+      Grep: '🔎',
+      WebFetch: '🌐',
+      WebSearch: '🔍',
+      NotebookEdit: '📓',
+      Task: '🚀',
+      AskUserQuestion: '❓',
+      EnterPlanMode: '📋',
+      ExitPlanMode: '✅',
+      Config: '⚙️',
+      EnterWorktree: '🌳',
+      TeamCreate: '👥',
+      SendMessage: '💬',
+      TaskCreate: '📝',
+      TaskUpdate: '🔄',
+      TaskList: '📋',
+      Skill: '⭐',
+      ToolSearch: '🔧',
+    };
+    return icons[toolName] ?? '⚡';
+  }
+
+  // ── Tool input formatting ─────────────────────────────────────────
+  private formatToolInput(toolName: string, rawJson: string): string {
+    let input: Record<string, unknown>;
+    try {
+      input = JSON.parse(rawJson || '{}');
+    } catch {
+      return '';
+    }
+
+    switch (toolName) {
+      case 'Bash': {
+        const cmd = String(input.command ?? '');
+        const desc = input.description ? `${C.dim}# ${input.description}${C.reset}\n` : '';
+        return desc + `${C.yellow}$ ${cmd}${C.reset}`;
+      }
+      case 'Read':
+        return (
+          `${C.dim}path:${C.reset} ${input.file_path}` +
+          (input.offset ? ` ${C.dim}offset:${C.reset} ${input.offset}` : '') +
+          (input.limit ? ` ${C.dim}limit:${C.reset} ${input.limit}` : '')
+        );
+      case 'Write':
+        return `${C.dim}path:${C.reset} ${input.file_path} ${C.dim}(${String(input.content ?? '').length} chars)${C.reset}`;
+      case 'Edit': {
+        const old = String(input.old_string ?? '')
+          .slice(0, 60)
+          .replace(/\n/g, '↵');
+        const _new = String(input.new_string ?? '')
+          .slice(0, 60)
+          .replace(/\n/g, '↵');
+        return (
+          `${C.dim}path:${C.reset} ${input.file_path}\n` +
+          `${C.red}- ${old}${C.reset}\n` +
+          `${C.green}+ ${_new}${C.reset}`
+        );
+      }
+      case 'Glob':
+        return (
+          `${C.dim}pattern:${C.reset} ${input.pattern}` +
+          (input.path ? ` ${C.dim}in:${C.reset} ${input.path}` : '')
+        );
+      case 'Grep':
+        return (
+          `${C.dim}pattern:${C.reset} /${input.pattern}/` +
+          (input.path ? ` ${C.dim}in:${C.reset} ${input.path}` : '') +
+          (input.glob ? ` ${C.dim}glob:${C.reset} ${input.glob}` : '')
+        );
+      case 'Task':
+        return `${C.dim}type:${C.reset} ${input.subagent_type}\n${C.dim}prompt:${C.reset} ${String(input.prompt ?? '').slice(0, 100)}`;
+      case 'WebSearch':
+        return `${C.dim}query:${C.reset} ${input.query}`;
+      case 'WebFetch':
+        return `${C.dim}url:${C.reset} ${input.url}`;
+      default: {
+        // Generic: show key-value pairs
+        const entries = Object.entries(input).slice(0, 5);
+        return entries
+          .map(([k, v]) => {
+            const val =
+              typeof v === 'string' ? v.slice(0, 80) : JSON.stringify(v).slice(0, 80);
+            return `${C.dim}${k}:${C.reset} ${val}`;
+          })
+          .join('\n');
+      }
+    }
+  }
+
+  // ── Tool result summary ───────────────────────────────────────────
   private summarizeToolResult(toolName: string, result: unknown): string {
-    if (typeof result === 'string') return result.slice(0, 100);
+    if (typeof result === 'string') {
+      // Truncate long results
+      if (result.length > 120) return result.slice(0, 120) + '…';
+      return result;
+    }
     const r = result as Record<string, any>;
     switch (toolName) {
       case 'Read':
@@ -94,44 +459,18 @@ export class TerminalRenderer {
       case 'Write':
         return `Wrote ${r?.filePath ?? 'file'}`;
       case 'Edit':
-        return `Edited ${r?.filePath ?? 'file'}`;
+        return `Edited ${r?.filePath ?? 'file'} (${r?.replacements ?? 1} replacement${(r?.replacements ?? 1) > 1 ? 's' : ''})`;
       case 'Bash':
-        return (r?.stdout as string | undefined)?.slice(0, 80) ?? '(no output)';
+        return (r?.stdout as string | undefined)?.slice(0, 100)?.split('\n')[0] ?? '(no output)';
       case 'Glob':
         return `Found ${r?.numFiles ?? 0} files`;
       case 'Grep':
         return `Found ${r?.numFiles ?? 0} matches`;
       default:
-        return JSON.stringify(result).slice(0, 100);
+        return JSON.stringify(result).slice(0, 120);
     }
-  }
-
-  renderResult(result: Record<string, any>): void {
-    process.stdout.write('\n');
-    if (result.is_error) {
-      const detail =
-        Array.isArray(result.errors) ? result.errors.join(', ') : result.subtype;
-      process.stdout.write(
-        `${COLORS.red}Session ended with error: ${detail}${COLORS.reset}\n`,
-      );
-    }
-    const usage = result.usage as Record<string, number> | undefined;
-    if (usage) {
-      const cost = result.total_cost_usd as number | undefined;
-      const costStr = cost && cost > 0 ? ` | Cost: $${cost.toFixed(4)}` : '';
-      process.stdout.write(
-        `${COLORS.dim}Tokens: ${usage.input_tokens ?? 0} in / ${usage.output_tokens ?? 0} out` +
-          ` | Turns: ${result.num_turns} | ${result.duration_ms}ms${costStr}${COLORS.reset}\n`,
-      );
-    }
-  }
-
-  renderWelcome(model: string): void {
-    process.stdout.write(
-      `${COLORS.bold}OpenAgent${COLORS.reset} ${COLORS.dim}(${model})${COLORS.reset}\n`,
-    );
-    process.stdout.write(
-      `${COLORS.dim}Type your message. Press Ctrl+C to interrupt, Ctrl+D to exit.${COLORS.reset}\n\n`,
-    );
   }
 }
+
+// Export for use by other modules
+export { renderMarkdown, C as ANSI_COLORS };

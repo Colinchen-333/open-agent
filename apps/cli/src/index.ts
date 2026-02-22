@@ -224,6 +224,7 @@ async function main(): Promise<void> {
     }
 
     await executePrompt(loop, input, renderer, isStreamJson, sessionMgr, cwd, sessionId);
+    repl.renderTurnSeparator();
   }
 
   repl.close();
@@ -241,6 +242,7 @@ async function executePrompt(
   cwd: string,
   sessionId: string,
 ): Promise<void> {
+  renderer.startSpinner('Thinking');
   for await (const message of loop.run(prompt)) {
     if (isStreamJson) {
       emitStreamJson(message);
@@ -250,12 +252,20 @@ async function executePrompt(
     // Persist every message to the on-disk transcript.
     sessionMgr.appendToTranscript(cwd, sessionId, message);
   }
+  renderer.stopSpinner();
 }
 
 function renderMessage(renderer: TerminalRenderer, message: SDKMessage): void {
   switch (message.type) {
     case 'stream_event':
       renderer.renderStreamEvent(message.event);
+      break;
+    case 'tool_result':
+      renderer.renderToolResult(
+        (message as any).tool_name,
+        (message as any).result,
+        (message as any).is_error,
+      );
       break;
     case 'result':
       renderer.renderResult(message as Record<string, any>);
@@ -307,6 +317,11 @@ Options:
 Slash commands (REPL mode):
   /exit, /quit                Exit the REPL
   /clear                      Clear the terminal screen
+  /help                       Show available commands
+  /model [name]               Show or change model
+  /compact                    Compact conversation history
+  /status                     Show session status
+  /memory                     Show auto-memory status
   `);
 }
 
