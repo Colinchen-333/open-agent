@@ -179,7 +179,7 @@ export class ConversationLoop {
       let messageUsage: any = null;
 
       try {
-        for await (const event of this.options.provider.chat(this.messages, chatOptions)) {
+        for await (const event of this.chatWithRetry(this.messages, chatOptions)) {
           // Honour abort requests as promptly as possible.
           if (this.options.abortSignal?.aborted) {
             yield {
@@ -348,6 +348,30 @@ export class ConversationLoop {
         session_id: sessionId,
       };
 
+      // Emit a per-turn cost/token summary so the renderer can display it.
+      if (messageUsage) {
+        const turnCost = this.options.costCalculator
+          ? this.options.costCalculator(
+              this.options.model,
+              messageUsage.input_tokens ?? 0,
+              messageUsage.output_tokens ?? 0,
+            )
+          : 0;
+        yield {
+          type: 'system' as const,
+          subtype: 'status' as const,
+          status: null,
+          uuid: randomUUID(),
+          session_id: sessionId,
+          // Extra fields for the per-turn cost display (carried as extra properties
+          // and consumed by the renderer via type-cast).
+          turn_cost: turnCost,
+          turn_input_tokens: messageUsage.input_tokens ?? 0,
+          turn_output_tokens: messageUsage.output_tokens ?? 0,
+          cumulative_cost: this._totalCostUsd,
+        } as any;
+      }
+
       // Determine whether the model requested any tool calls.
       const toolUses = cleanContent.filter((b) => b.type === 'tool_use');
 
@@ -387,12 +411,20 @@ export class ConversationLoop {
         return;
       }
 
-      // Execute all requested tool calls sequentially and collect results.
-      // Sequential execution avoids ordering ambiguity when tools share state
-      // (e.g., file-system tools writing then reading the same path).
+      // Execute all requested tool calls with a two-phase approach:
+      //   Phase 1 — Permission checks run serially so the user approves one
+      //             tool at a time (avoids interleaved permission prompts).
+      //   Phase 2 — All approved tools execute concurrently via Promise.all
+      //             for performance, matching Claude Code behaviour.
+      //   Phase 3 — Yield results in original call order for determinism.
       const toolResults: ContentBlock[] = [];
       const permissionDenials: string[] = [];
 
+      // Approved tools collected during Phase 1, preserving call order.
+      type ApprovedEntry = { toolUse: ContentBlock & { id: string; name: string; input: any }; tool: ToolDefinition };
+      const approvedTools: ApprovedEntry[] = [];
+
+      // ── Phase 1: Serial permission checks ────────────────────────────────
       for (const toolUse of toolUses) {
         const tool = this.options.tools.get(toolUse.name);
 
@@ -406,7 +438,7 @@ export class ConversationLoop {
           continue;
         }
 
-        // ── Permission check ────────────────────────────────────────────────
+        // ── Permission check ───────────────────────────────────────────────
         const { permissionEngine, permissionPrompter } = this.options;
         if (permissionEngine) {
           const decision = permissionEngine.evaluate({
@@ -489,46 +521,114 @@ export class ConversationLoop {
               // Persist an allow rule so this tool is pre-approved in future turns.
               permissionEngine.addRule('allow', { toolName: toolUse.name });
             }
-            // 'allow' or 'always' — fall through to execute the tool.
+            // 'allow' or 'always' — fall through to queue the tool.
           }
         }
-        // ── End permission check ────────────────────────────────────────────
+        // ── End permission check ───────────────────────────────────────────
 
-        // ── PreToolUse hook ─────────────────────────────────────────────────
-        if (this.options.hookExecutor) {
-          const hookResult = await this.options.hookExecutor.execute(
-            'PreToolUse',
-            { tool_name: toolUse.name, tool_input: toolUse.input },
-            toolUse.id,
-          );
+        approvedTools.push({ toolUse: toolUse as ApprovedEntry['toolUse'], tool });
+      }
+      // ── End Phase 1 ───────────────────────────────────────────────────────
 
-          if (hookResult.continue === false) {
-            // Hook blocked the tool execution.
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: toolUse.id,
-              content: hookResult.decision ?? 'Blocked by hook',
-              is_error: true,
-            });
-            continue;
+      // ── Phase 2: Parallel execution of all approved tools ─────────────────
+      type ExecutionResult = {
+        toolUse: ApprovedEntry['toolUse'];
+        resultStr: string;
+        isError: boolean;
+        blocked: boolean;
+        blockReason?: string;
+      };
+
+      const parallelResults: ExecutionResult[] = await Promise.all(
+        approvedTools.map(async ({ toolUse, tool }): Promise<ExecutionResult> => {
+          const toolCtx: ToolContext = {
+            cwd: this.options.cwd,
+            abortSignal: this.options.abortSignal,
+            sessionId: this.options.sessionId,
+          };
+
+          // ── PreToolUse hook ──────────────────────────────────────────────
+          if (this.options.hookExecutor) {
+            const hookResult = await this.options.hookExecutor.execute(
+              'PreToolUse',
+              { tool_name: toolUse.name, tool_input: toolUse.input },
+              toolUse.id,
+            );
+
+            if (hookResult.continue === false) {
+              return {
+                toolUse,
+                resultStr: hookResult.decision ?? 'Blocked by hook',
+                isError: true,
+                blocked: true,
+                blockReason: hookResult.decision ?? 'Blocked by hook',
+              };
+            }
+
+            // Allow the hook to mutate the tool input before execution.
+            if (hookResult.updatedInput) {
+              toolUse.input = { ...(toolUse.input as Record<string, unknown>), ...hookResult.updatedInput };
+            }
           }
+          // ── End PreToolUse hook ──────────────────────────────────────────
 
-          // Allow the hook to mutate the tool input before execution.
-          if (hookResult.updatedInput) {
-            toolUse.input = { ...(toolUse.input as Record<string, unknown>), ...hookResult.updatedInput };
+          try {
+            const result = await tool.execute(toolUse.input, toolCtx);
+            const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+
+            // ── PostToolUse hook (success) ───────────────────────────────
+            if (this.options.hookExecutor) {
+              await this.options.hookExecutor.execute(
+                'PostToolUse',
+                {
+                  tool_name: toolUse.name,
+                  tool_input: toolUse.input,
+                  tool_result: resultStr,
+                },
+                toolUse.id,
+              );
+            }
+            // ── End PostToolUse hook ─────────────────────────────────────
+
+            return { toolUse, resultStr, isError: false, blocked: false };
+          } catch (error: unknown) {
+            const msg = error instanceof Error ? error.message : String(error);
+            return { toolUse, resultStr: msg, isError: true, blocked: false };
           }
+        }),
+      );
+      // ── End Phase 2 ───────────────────────────────────────────────────────
+
+      // ── Phase 3: Yield results in original call order ─────────────────────
+      for (const { toolUse, resultStr, isError, blocked } of parallelResults) {
+        if (blocked) {
+          // Pre-hook blocked execution — surface as an error result.
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: resultStr,
+            is_error: true,
+          });
+          continue;
         }
-        // ── End PreToolUse hook ─────────────────────────────────────────────
 
-        const toolCtx: ToolContext = {
-          cwd: this.options.cwd,
-          abortSignal: this.options.abortSignal,
-          sessionId: this.options.sessionId,
-        };
-
-        try {
-          const result = await tool.execute(toolUse.input, toolCtx);
-          const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+        if (isError) {
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: `Error: ${resultStr}`,
+            is_error: true,
+          });
+          yield {
+            type: 'tool_result' as const,
+            tool_name: toolUse.name,
+            tool_use_id: toolUse.id,
+            result: resultStr,
+            is_error: true,
+            uuid: randomUUID(),
+            session_id: sessionId,
+          };
+        } else {
           toolResults.push({
             type: 'tool_result',
             tool_use_id: toolUse.id,
@@ -543,39 +643,9 @@ export class ConversationLoop {
             uuid: randomUUID(),
             session_id: sessionId,
           };
-
-          // ── PostToolUse hook (success) ────────────────────────────────────
-          if (this.options.hookExecutor) {
-            await this.options.hookExecutor.execute(
-              'PostToolUse',
-              {
-                tool_name: toolUse.name,
-                tool_input: toolUse.input,
-                tool_result: resultStr,
-              },
-              toolUse.id,
-            );
-          }
-          // ── End PostToolUse hook ──────────────────────────────────────────
-        } catch (error: unknown) {
-          const msg = error instanceof Error ? error.message : String(error);
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: toolUse.id,
-            content: `Error: ${msg}`,
-            is_error: true,
-          });
-          yield {
-            type: 'tool_result' as const,
-            tool_name: toolUse.name,
-            tool_use_id: toolUse.id,
-            result: msg,
-            is_error: true,
-            uuid: randomUUID(),
-            session_id: sessionId,
-          };
         }
       }
+      // ── End Phase 3 ───────────────────────────────────────────────────────
 
       // Accumulate permission denials across all turns for the final result.
       allPermissionDenials.push(...permissionDenials);
@@ -607,6 +677,64 @@ export class ConversationLoop {
     this.options.thinking = thinking;
   }
 
+  /**
+   * Replace the abort signal used for the next (and subsequent) LLM calls.
+   * Call this before each user prompt in REPL mode so that a prior Ctrl+C
+   * abort does not permanently poison the loop.
+   */
+  setAbortSignal(signal: AbortSignal): void {
+    this.options.abortSignal = signal;
+  }
+
+  /**
+   * Wrap provider.chat() with exponential backoff retry logic.
+   *
+   * Retries up to 5 times on transient network/rate-limit errors.
+   * Each successive delay doubles (1 s → 2 s → 4 s → … up to 60 s),
+   * with ±50 % random jitter to prevent thundering-herd reconnections.
+   */
+  private async *chatWithRetry(
+    messages: Message[],
+    options: ChatOptions,
+  ): AsyncGenerator<import('@open-agent/providers').StreamEvent> {
+    const maxRetries = 5;
+    let delay = 1000;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        yield* this.options.provider.chat(messages, options);
+        return;
+      } catch (error: unknown) {
+        const isRetryable = this.isRetryableError(error);
+        if (!isRetryable || attempt === maxRetries) throw error;
+
+        // Jitter: uniform random in [0, delay * 0.5]
+        const jitter = Math.random() * delay * 0.5;
+        await new Promise<void>((resolve) => setTimeout(resolve, delay + jitter));
+        delay = Math.min(delay * 2, 60_000);
+      }
+    }
+  }
+
+  /**
+   * Return true when the error is a transient condition that can be safely
+   * retried (rate limits, server overload, network resets, timeouts).
+   */
+  private isRetryableError(error: unknown): boolean {
+    if (!(error instanceof Error)) return false;
+    const msg = error.message.toLowerCase();
+    return (
+      msg.includes('429') ||
+      msg.includes('rate limit') ||
+      msg.includes('529') ||
+      msg.includes('overloaded') ||
+      msg.includes('503') ||
+      msg.includes('timeout') ||
+      msg.includes('econnreset') ||
+      msg.includes('network')
+    );
+  }
+
   /** 估算消息列表的总 token 数（按字符数/4粗略估算） */
   private estimateTokens(): number {
     let chars = 0;
@@ -625,36 +753,61 @@ export class ConversationLoop {
     return Math.ceil(chars / 4);
   }
 
-  /** 压缩对话历史：用 LLM 生成摘要替换旧消息 */
+  /** Compact conversation history by summarising older messages with the LLM. */
   private async compact(): Promise<void> {
-    if (this.messages.length <= 4) return; // 太短不压缩
+    // Keep the last 6 messages (3 turns) — enough to preserve immediate context
+    // while still meaningfully reducing the window size.
+    if (this.messages.length <= 6) return;
 
-    // 保留最后 2 轮（4 条消息）
-    const keepCount = 4;
+    const keepCount = 6;
     const toSummarize = this.messages.slice(0, -keepCount);
     const toKeep = this.messages.slice(-keepCount);
 
-    // 用 LLM 生成摘要
-    const summaryPrompt = `Summarize the following conversation history in a concise manner, preserving key decisions, code changes, and context:\n\n${toSummarize.map(m => `[${m.role}]: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content).slice(0, 500)}`).join('\n\n')}`;
+    // Build the summarisation prompt with the messages we are compacting.
+    const historyText = toSummarize
+      .map(m => `[${m.role}]: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content).slice(0, 800)}`)
+      .join('\n\n');
+
+    const summaryPrompt =
+      `Summarize this conversation history concisely. Preserve:\n` +
+      `- All file paths that were read, created, or modified\n` +
+      `- Key technical decisions and their rationale\n` +
+      `- Current task status and what remains to be done\n` +
+      `- Any errors encountered and how they were resolved\n` +
+      `Be factual and specific. Do not add commentary.\n\n` +
+      `Conversation history:\n\n${historyText}`;
 
     let summaryText = '';
     try {
       for await (const event of this.options.provider.chat(
         [{ role: 'user', content: summaryPrompt }],
-        { model: this.options.model, maxTokens: 2048, systemPrompt: 'You are a conversation summarizer. Be concise but preserve important details.' }
+        {
+          model: this.options.model,
+          maxTokens: 2048,
+          systemPrompt: 'You are a conversation summarizer. Be concise but preserve important technical details.',
+        },
       )) {
         if (event.type === 'text_delta') {
           summaryText += event.text;
         }
       }
     } catch {
-      // If summarization fails, just truncate without summary
-      summaryText = '[Previous conversation history was compacted]';
+      // If summarisation fails, fall back to a minimal placeholder so the loop
+      // can continue without losing the kept messages entirely.
+      summaryText = '[Previous conversation history was compacted due to context length.]';
     }
 
+    // Inject the summary as a user message so that the assistant turn that
+    // follows (the first of toKeep) has a consistent role alternation.
     this.messages = [
-      { role: 'user', content: `[Conversation Summary]\n${summaryText}` },
-      { role: 'assistant', content: [{ type: 'text', text: 'I understand the context. Let me continue helping you.' }] },
+      {
+        role: 'user',
+        content: `[Conversation context was compacted. Summary of prior conversation:]\n\n${summaryText}`,
+      },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Understood. I have the context from our previous conversation. How can I continue helping?' }],
+      },
       ...toKeep,
     ];
   }

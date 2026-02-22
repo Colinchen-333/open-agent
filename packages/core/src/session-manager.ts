@@ -221,6 +221,15 @@ export class SessionManager {
   }
 
   /**
+   * Return the on-disk project directory for the given CWD.
+   * Useful for callers that need to store session-scoped artefacts (e.g.
+   * checkpoints) alongside the session metadata and transcript files.
+   */
+  getSessionDir(cwd: string, _sessionId: string): string {
+    return this.getProjectDir(cwd);
+  }
+
+  /**
    * Return a single session by ID, or `null` if not found.
    */
   getSession(cwd: string, sessionId: string): SessionInfo | null {

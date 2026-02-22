@@ -181,6 +181,27 @@ export class TerminalRenderer {
   private spinnerFrame = 0;
   private textBuffer = '';
 
+  // ── Flush timer (streaming partial lines) ────────────────────────
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private startFlushTimer(): void {
+    if (this.flushTimer) return;
+    this.flushTimer = setTimeout(() => {
+      if (this.textBuffer) {
+        process.stdout.write(this.textBuffer);
+        this.textBuffer = '';
+      }
+      this.flushTimer = null;
+    }, 50);
+  }
+
+  private cancelFlushTimer(): void {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+  }
+
   // ── Spinner ───────────────────────────────────────────────────────
   startSpinner(label = 'Thinking'): void {
     if (this.spinnerInterval) return;
@@ -198,6 +219,7 @@ export class TerminalRenderer {
       this.spinnerInterval = null;
       process.stdout.write(`${C.clearLine}\r${C.show}`);
     }
+    this.cancelFlushTimer();
   }
 
   // ── Stream events ─────────────────────────────────────────────────
@@ -210,14 +232,18 @@ export class TerminalRenderer {
           this.inThinking = false;
         }
         this.textBuffer += event.text;
-        // Flush complete lines for markdown rendering
+
+        // Flush complete lines with markdown rendering
         const lastNewline = this.textBuffer.lastIndexOf('\n');
         if (lastNewline !== -1) {
           const toRender = this.textBuffer.slice(0, lastNewline);
           this.textBuffer = this.textBuffer.slice(lastNewline + 1);
-          const rendered = renderMarkdown(toRender);
-          process.stdout.write(rendered + '\n');
+          process.stdout.write(renderMarkdown(toRender) + '\n');
+          this.cancelFlushTimer();
         }
+
+        // Start a flush timer for partial lines (streaming feel)
+        this.startFlushTimer();
         break;
       }
 
@@ -234,6 +260,7 @@ export class TerminalRenderer {
 
       case 'tool_use_start': {
         this.stopSpinner();
+        this.cancelFlushTimer();
         // Flush remaining text buffer
         if (this.textBuffer) {
           process.stdout.write(renderMarkdown(this.textBuffer));
@@ -271,7 +298,10 @@ export class TerminalRenderer {
           }
           process.stdout.write(`${bottomLine(C.cyan)}\n`);
           this.inToolUse = false;
-          this.startSpinner('Running');
+
+          // Use contextual spinner label based on the tool being executed
+          const spinnerLabel = this.getSpinnerLabel(this.currentToolName, this.currentToolInput);
+          this.startSpinner(spinnerLabel);
         }
         break;
       }
@@ -293,8 +323,89 @@ export class TerminalRenderer {
       const detail = typeof result === 'string' ? result : JSON.stringify(result).slice(0, 200);
       process.stdout.write(`  ${C.red}✗ ${detail}${C.reset}\n`);
     } else {
-      const summary = this.summarizeToolResult(toolName, result);
-      process.stdout.write(`  ${C.green}✓ ${summary}${C.reset}\n`);
+      this.renderSuccessToolResult(toolName, result);
+    }
+  }
+
+  private renderSuccessToolResult(toolName: string, result: unknown): void {
+    const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+
+    switch (toolName) {
+      case 'Bash': {
+        // Show first 3 lines of stdout
+        const lines = resultStr.split('\n').filter((l) => l.trim() !== '');
+        const preview = lines.slice(0, 3);
+        const remaining = lines.length - preview.length;
+        if (preview.length === 0) {
+          process.stdout.write(`  ${C.green}✓${C.reset} ${C.dim}(no output)${C.reset}\n`);
+        } else {
+          process.stdout.write(`  ${C.green}✓${C.reset}\n`);
+          for (const line of preview) {
+            process.stdout.write(`  ${C.dim}${line}${C.reset}\n`);
+          }
+          if (remaining > 0) {
+            process.stdout.write(`  ${C.dim}… ${remaining} more line${remaining > 1 ? 's' : ''}${C.reset}\n`);
+          }
+        }
+        break;
+      }
+
+      case 'Read': {
+        // Try structured result first, then fall back to raw string
+        let filePath = '';
+        let numLines = 0;
+        if (typeof result === 'object' && result !== null) {
+          const r = result as Record<string, any>;
+          filePath = r?.file?.filePath ?? r?.filePath ?? '';
+          numLines = r?.file?.numLines ?? r?.numLines ?? 0;
+        } else {
+          // Raw string result — count lines and derive filename from tool input
+          numLines = resultStr.split('\n').length;
+          filePath = this.basename(
+            (() => {
+              try { return JSON.parse(this.currentToolInput || '{}').file_path ?? ''; } catch { return ''; }
+            })()
+          );
+        }
+        const name = filePath ? this.basename(filePath) : 'file';
+        process.stdout.write(`  ${C.green}✓ Read ${name} (${numLines} lines)${C.reset}\n`);
+        break;
+      }
+
+      case 'Write': {
+        const r = (typeof result === 'object' && result !== null) ? result as Record<string, any> : {};
+        const filePath = r?.filePath ?? '';
+        const name = filePath ? this.basename(filePath) : 'file';
+        process.stdout.write(`  ${C.green}✓ Wrote ${name}${C.reset}\n`);
+        break;
+      }
+
+      case 'Edit': {
+        const r = (typeof result === 'object' && result !== null) ? result as Record<string, any> : {};
+        const filePath = r?.filePath ?? '';
+        const name = filePath ? this.basename(filePath) : 'file';
+        const reps = r?.replacements ?? 1;
+        // Try to show a mini diff from the tool input
+        let oldStr = '';
+        let newStr = '';
+        try {
+          const inp = JSON.parse(this.currentToolInput || '{}');
+          oldStr = String(inp.old_string ?? '').split('\n')[0]?.slice(0, 60) ?? '';
+          newStr = String(inp.new_string ?? '').split('\n')[0]?.slice(0, 60) ?? '';
+        } catch { /* ignore */ }
+        process.stdout.write(`  ${C.green}✓ Edited ${name} (${reps} replacement${reps > 1 ? 's' : ''})${C.reset}\n`);
+        if (oldStr || newStr) {
+          if (oldStr) process.stdout.write(`  ${C.red}- ${oldStr}${C.reset}\n`);
+          if (newStr) process.stdout.write(`  ${C.green}+ ${newStr}${C.reset}\n`);
+        }
+        break;
+      }
+
+      default: {
+        const summary = this.summarizeToolResult(toolName, result);
+        process.stdout.write(`  ${C.green}✓ ${summary}${C.reset}\n`);
+        break;
+      }
     }
   }
 
@@ -334,19 +445,74 @@ export class TerminalRenderer {
     }
   }
 
-  // ── Welcome message ───────────────────────────────────────────────
-  renderWelcome(model: string): void {
-    const w = getWidth();
-    const line = C.cyan + BOX.horizontal.repeat(w) + C.reset;
-
-    process.stdout.write('\n' + line + '\n');
-    process.stdout.write(`  ${C.bold}${C.cyan}◆ OpenAgent${C.reset} ${C.dim}v0.1.0${C.reset}\n`);
-    process.stdout.write(`  ${C.dim}Model: ${model}${C.reset}\n`);
+  // ── Per-turn cost line ────────────────────────────────────────────
+  renderTurnCost(inputTokens: number, outputTokens: number, cumulativeCost: number): void {
+    const costStr = cumulativeCost > 0 ? ` · ${C.yellow}$${cumulativeCost.toFixed(4)}${C.reset}` : '';
     process.stdout.write(
-      `  ${C.dim}Type your message. Ctrl+C to interrupt, Ctrl+D to exit.${C.reset}\n`,
+      `  ${C.dim}${C.gray}↳ ${inputTokens.toLocaleString()} in · ${outputTokens.toLocaleString()} out${costStr}${C.dim}${C.gray}${C.reset}\n`,
     );
-    process.stdout.write(`  ${C.dim}Type /help for available commands.${C.reset}\n`);
-    process.stdout.write(line + '\n\n');
+  }
+
+  // ── Welcome message ───────────────────────────────────────────────
+  renderWelcome(model: string, cwd?: string): void {
+    const VERSION = '0.1.0';
+    const cwdDisplay = cwd ?? process.cwd();
+
+    // Lines to display inside the box (without padding)
+    const innerLines = [
+      `${C.bold}${C.cyan}✻ OpenAgent v${VERSION}${C.reset}`,
+      '',
+      `${C.dim}/help for help${C.reset}`,
+      '',
+      `${C.dim}cwd: ${cwdDisplay}${C.reset}`,
+      `${C.dim}model: ${model}${C.reset}`,
+    ];
+
+    // Calculate visible width of each line (strip ANSI codes for measurement)
+    const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
+    const visibleLengths = innerLines.map((l) => stripAnsi(l).length);
+    const maxVisible = Math.max(...visibleLengths);
+    // Box inner width = maxVisible + 2 padding on each side
+    const innerWidth = maxVisible + 4;
+
+    const top = `${C.gray}${BOX.topLeft}${BOX.horizontal.repeat(innerWidth)}${BOX.topRight}${C.reset}`;
+    const bottom = `${C.gray}${BOX.bottomLeft}${BOX.horizontal.repeat(innerWidth)}${BOX.bottomRight}${C.reset}`;
+
+    process.stdout.write('\n' + top + '\n');
+    for (let i = 0; i < innerLines.length; i++) {
+      const line = innerLines[i];
+      const visible = visibleLengths[i];
+      const pad = innerWidth - visible - 2; // 2 for left "│ " prefix
+      process.stdout.write(`${C.gray}${BOX.vertical}${C.reset}  ${line}${' '.repeat(Math.max(0, pad))}${C.gray}${BOX.vertical}${C.reset}\n`);
+    }
+    process.stdout.write(bottom + '\n\n');
+  }
+
+  // ── Contextual spinner label ──────────────────────────────────────
+  private getSpinnerLabel(toolName: string, rawJson: string): string {
+    try {
+      const input = JSON.parse(rawJson || '{}');
+      switch (toolName) {
+        case 'Read':    return `Reading ${this.basename(input.file_path ?? '')}`;
+        case 'Write':   return `Writing ${this.basename(input.file_path ?? '')}`;
+        case 'Edit':    return `Editing ${this.basename(input.file_path ?? '')}`;
+        case 'Bash':    return 'Running command';
+        case 'Glob':    return 'Searching files';
+        case 'Grep':    return 'Searching content';
+        case 'WebFetch':  return 'Fetching URL';
+        case 'WebSearch': return 'Searching web';
+        case 'Task':    return `Running ${input.subagent_type ?? 'agent'}`;
+        default:        return `Running ${toolName}`;
+      }
+    } catch {
+      return `Running ${toolName}`;
+    }
+  }
+
+  private basename(filePath: string): string {
+    if (!filePath) return 'file';
+    const parts = filePath.split('/');
+    return parts[parts.length - 1] || filePath;
   }
 
   // ── Tool icons ────────────────────────────────────────────────────

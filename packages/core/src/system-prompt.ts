@@ -1,5 +1,6 @@
 import { existsSync } from 'fs';
 import { join, basename } from 'path';
+import { release as osRelease } from 'os';
 
 export interface SystemPromptOptions {
   cwd: string;
@@ -28,7 +29,10 @@ IMPORTANT: You must NEVER generate or guess URLs for the user unless you are con
  - All text you output outside of tool use is displayed to the user. Output text to communicate with the user.
  - You can use Github-flavored markdown for formatting.
  - Tools are executed in a user-selected permission mode. When you attempt to call a tool that is not automatically allowed, the user will be prompted to approve or deny.
- - Do not re-attempt the exact same tool call if the user denies it. Adjust your approach.`);
+ - Do not re-attempt the exact same tool call if the user denies it. Adjust your approach.
+ - Prior messages in your conversation may have been summarized/compacted. This is normal system behavior to manage context length.
+ - NEVER fabricate tool results. If a tool call fails, report the actual error. Do not pretend operations succeeded.
+ - You MUST use the Read tool to read files before editing them. Never assume file contents.`);
 
   // ── Doing tasks ─────────────────────────────────────────────────────
   parts.push(`# Doing tasks
@@ -58,8 +62,13 @@ Only create commits when requested by the user. When asked:
 1. Run git status and git diff to see changes
 2. Run git log to see recent commit message style
 3. Draft a concise commit message focusing on "why" not "what"
-4. Create the commit with:
+4. Create the commit passing the message via a HEREDOC to preserve formatting:
+   git commit -m "$(cat <<'EOF'
+   Your commit message here.
+
    Co-Authored-By: OpenAgent <noreply@open-agent.dev>
+   EOF
+   )"
 5. NEVER push unless explicitly asked
 6. NEVER amend commits unless explicitly asked
 7. NEVER use --force, --no-verify, or destructive git commands without explicit user request`);
@@ -73,15 +82,19 @@ Only create commits when requested by the user. When asked:
   // ── Environment ─────────────────────────────────────────────────────
   const platform = options.platform ?? process.platform;
   const shell = options.shell ?? (process.env.SHELL ? basename(process.env.SHELL) : 'bash');
+  const osVersion = `${platform} ${osRelease()}`;
+  const currentDate = new Date().toISOString().slice(0, 10);
 
   parts.push(`# Environment
  - Working directory: ${options.cwd}
  - Is git repository: ${options.isGitRepo ?? false}
  - Platform: ${platform}
+ - OS version: ${osVersion}
  - Shell: ${shell}
  - Model: ${options.model}
  - Available tools: ${options.tools.join(', ')}
- - Permission mode: ${options.permissionMode}`);
+ - Permission mode: ${options.permissionMode}
+ - Current date: ${currentDate}`);
 
   // ── User instructions (AGENT.md) ────────────────────────────────────
   if (options.agentInstructions && options.agentInstructions.length > 0) {

@@ -1,4 +1,4 @@
-import type { ConversationLoop } from '@open-agent/core';
+import type { ConversationLoop, FileCheckpoint } from '@open-agent/core';
 
 export interface SlashCommandContext {
   loop: ConversationLoop;
@@ -7,6 +7,8 @@ export interface SlashCommandContext {
   sessionId: string;
   /** Names of all registered tools available to the agent. */
   tools?: string[];
+  /** File checkpoint instance for /rewind support. */
+  checkpoint?: FileCheckpoint;
 }
 
 export interface SlashCommandResult {
@@ -137,6 +139,54 @@ const SLASH_COMMANDS: Record<
         handled: true,
         output: `Registered tools (${tools.length}):\n${lines.join('\n')}`,
       };
+    },
+  },
+  '/rewind': {
+    description: 'List checkpoints or restore a prior file state (/rewind <number>)',
+    handler: async (args, ctx) => {
+      const checkpoints = ctx.checkpoint?.list() ?? [];
+      if (checkpoints.length === 0) {
+        return { handled: true, output: 'No checkpoints available.' };
+      }
+
+      const n = args.trim() ? parseInt(args.trim(), 10) : NaN;
+
+      // No argument — list available checkpoints.
+      if (isNaN(n)) {
+        const lines = checkpoints.map((cp, i) =>
+          `  ${i + 1}. [${cp.toolUseId.slice(0, 8)}] ${cp.filePath} (${new Date(cp.timestamp).toLocaleTimeString()})`,
+        );
+        return {
+          handled: true,
+          output: `Checkpoints:\n${lines.join('\n')}\n\nUse /rewind <number> to restore.`,
+        };
+      }
+
+      // Argument provided — restore to the selected checkpoint.
+      if (n < 1 || n > checkpoints.length) {
+        return {
+          handled: true,
+          output: `Invalid checkpoint number. Must be between 1 and ${checkpoints.length}.`,
+        };
+      }
+
+      const target = checkpoints[n - 1];
+      const { restored, errors } = ctx.checkpoint!.rewindTo(target.toolUseId);
+
+      const lines: string[] = [];
+      if (restored.length > 0) {
+        lines.push(`Restored ${restored.length} file(s):`);
+        for (const f of restored) lines.push(`  - ${f}`);
+      }
+      if (errors.length > 0) {
+        lines.push(`Errors (${errors.length}):`);
+        for (const e of errors) lines.push(`  - ${e}`);
+      }
+      if (lines.length === 0) {
+        lines.push('Nothing to restore.');
+      }
+
+      return { handled: true, output: lines.join('\n') };
     },
   },
 };

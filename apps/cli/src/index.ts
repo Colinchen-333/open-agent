@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { parseArgs, TerminalRenderer, REPL, emitStreamJson, TerminalPermissionPrompter, handleSlashCommand } from '@open-agent/cli';
-import { ConversationLoop, SessionManager, ConfigLoader, AutoMemory, buildSystemPrompt, isGitRepository } from '@open-agent/core';
+import { ConversationLoop, SessionManager, ConfigLoader, AutoMemory, buildSystemPrompt, isGitRepository, FileCheckpoint } from '@open-agent/core';
 import { createProvider, autoDetectProvider, calculateCost } from '@open-agent/providers';
 import {
   createDefaultToolRegistry,
@@ -299,11 +299,24 @@ async function main(): Promise<void> {
   }
 
   // ------------------------------------------------------------------
-  // Abort handling (Ctrl+C)
+  // Abort handling (Ctrl+C) — two-level:
+  //   First Ctrl+C  → abort the current LLM/tool operation gracefully.
+  //   Second Ctrl+C within 2 s → force-exit immediately.
   // ------------------------------------------------------------------
-  const abortController = new AbortController();
+  let abortController = new AbortController();
+  let lastSigint = 0;
   process.on('SIGINT', () => {
-    abortController.abort();
+    const now = Date.now();
+    if (now - lastSigint < 2000) {
+      // Double Ctrl+C — force exit.
+      console.log('\nForce exit.');
+      process.exit(1);
+    }
+    lastSigint = now;
+    if (!abortController.signal.aborted) {
+      abortController.abort();
+      console.log('\n\x1b[33mInterrupting... (press Ctrl+C again to force exit)\x1b[0m');
+    }
   });
 
   // ------------------------------------------------------------------
@@ -326,6 +339,12 @@ async function main(): Promise<void> {
   const agentInstructions = configLoader.loadAgentMd(cwd);
   const autoMemory = new AutoMemory(cwd);
   const memoryContent = autoMemory.readMemory();
+
+  // ------------------------------------------------------------------
+  // File checkpoint — records file states before Write/Edit operations
+  // so the user can /rewind to any prior state.
+  // ------------------------------------------------------------------
+  const checkpoint = new FileCheckpoint(sessionMgr.getSessionDir(cwd, sessionId));
 
   // ------------------------------------------------------------------
   // Hook system — load global then project-level hooks.json
@@ -354,8 +373,20 @@ async function main(): Promise<void> {
 
   // Adapter: bridge HookExecutor's strict HookInput signature to the loose
   // Record<string, unknown> interface expected by ConversationLoop.
+  // Also intercepts PreToolUse events for file-modifying tools to save
+  // checkpoints before any changes are applied.
   const hookExecutor = {
-    execute(event: string, input: Record<string, unknown>, toolUseId?: string) {
+    async execute(event: string, input: Record<string, unknown>, toolUseId?: string) {
+      // Auto-checkpoint before file-modifying tools so /rewind can restore.
+      if (event === 'PreToolUse' && toolUseId) {
+        const toolName = input.tool_name as string;
+        if (toolName === 'Write' || toolName === 'Edit') {
+          const filePath = (input.tool_input as any)?.file_path;
+          if (filePath) {
+            try { checkpoint.save(toolUseId, filePath); } catch { /* ignore checkpoint errors */ }
+          }
+        }
+      }
       return _hookExecutor.execute(event as any, input as any, toolUseId);
     },
   };
@@ -430,7 +461,7 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------
   // Interactive REPL mode
   // ------------------------------------------------------------------
-  renderer.renderWelcome(model);
+  renderer.renderWelcome(model, cwd);
   const repl = new REPL(model);
 
   // eslint-disable-next-line no-constant-condition
@@ -452,6 +483,7 @@ async function main(): Promise<void> {
         model,
         sessionId,
         tools: toolNames,
+        checkpoint,
       });
       if (result) {
         if (result.shouldExit) break;
@@ -460,6 +492,11 @@ async function main(): Promise<void> {
         continue;
       }
     }
+
+    // Create a fresh AbortController for each prompt so that a previous
+    // Ctrl+C abort does not carry over to the next turn.
+    abortController = new AbortController();
+    loop.setAbortSignal(abortController.signal);
 
     await executePrompt(loop, input, renderer, isStreamJson, sessionMgr, cwd, sessionId);
     repl.renderTurnSeparator();
@@ -508,7 +545,14 @@ function renderMessage(renderer: TerminalRenderer, message: SDKMessage): void {
     case 'result':
       renderer.renderResult(message as Record<string, any>);
       break;
-    // 'user', 'assistant', 'system' messages are informational only; no
+    case 'system':
+      // Per-turn cost/token summary emitted by the conversation loop.
+      if ((message as any).turn_cost !== undefined) {
+        const tc = message as any;
+        renderer.renderTurnCost(tc.turn_input_tokens, tc.turn_output_tokens, tc.cumulative_cost);
+      }
+      break;
+    // 'user', 'assistant' messages are informational only; no
     // terminal output is needed for them in the default renderer.
   }
 }
