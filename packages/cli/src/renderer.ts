@@ -188,6 +188,15 @@ export class TerminalRenderer {
   private spinnerInterval: ReturnType<typeof setInterval> | null = null;
   private spinnerFrame = 0;
   private textBuffer = '';
+  private noMarkdown = false;
+
+  constructor(options?: { noMarkdown?: boolean }) {
+    this.noMarkdown = options?.noMarkdown ?? false;
+  }
+
+  private render(text: string): string {
+    return this.noMarkdown ? text : renderMarkdown(text);
+  }
 
   // ── Flush timer (streaming partial lines) ────────────────────────
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -246,7 +255,7 @@ export class TerminalRenderer {
         if (lastNewline !== -1) {
           const toRender = this.textBuffer.slice(0, lastNewline);
           this.textBuffer = this.textBuffer.slice(lastNewline + 1);
-          process.stdout.write(renderMarkdown(toRender) + '\n');
+          process.stdout.write(this.render(toRender) + '\n');
           this.cancelFlushTimer();
         }
 
@@ -273,7 +282,7 @@ export class TerminalRenderer {
         this.cancelFlushTimer();
         // Flush remaining text buffer
         if (this.textBuffer) {
-          process.stdout.write(renderMarkdown(this.textBuffer));
+          process.stdout.write(this.render(this.textBuffer));
           this.textBuffer = '';
         }
         if (this.inThinking) {
@@ -434,7 +443,7 @@ export class TerminalRenderer {
     this.stopSpinner();
     // Flush remaining text
     if (this.textBuffer) {
-      process.stdout.write(renderMarkdown(this.textBuffer) + '\n');
+      process.stdout.write(this.render(this.textBuffer) + '\n');
       this.textBuffer = '';
     }
 

@@ -17,6 +17,8 @@ export interface AgentRunnerOptions {
   initialMessages?: import('@open-agent/providers').Message[];
   /** When set, all tool executions use this path as cwd instead of options.cwd */
   worktreePath?: string;
+  /** Callback to persist each message to a transcript file */
+  onMessage?: (message: unknown) => void;
 }
 
 export interface AgentResult {
@@ -93,6 +95,10 @@ export class AgentRunner {
     let numTurns = 0;
 
     for await (const msg of loop.run(prompt)) {
+      // Persist each message to transcript if callback provided
+      if (this.options.onMessage) {
+        this.options.onMessage(msg);
+      }
       if (msg.type === 'result') {
         if ('result' in msg) {
           resultText = (msg as any).result ?? '';
@@ -119,7 +125,9 @@ export class AgentRunner {
       case 'sonnet': return 'claude-sonnet-4-6';
       case 'opus': return 'claude-opus-4-6';
       case 'haiku': return 'claude-haiku-4-5-20251001';
-      default: return this.options.provider.name === 'anthropic' ? 'claude-sonnet-4-6' : 'gpt-4o';
+      default:
+        if (model && model.length > 0) return model;
+        return this.options.provider.name === 'anthropic' ? 'claude-sonnet-4-6' : 'gpt-4o';
     }
   }
 

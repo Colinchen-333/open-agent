@@ -478,8 +478,9 @@ async function main(): Promise<void> {
 
   if (args.resume) {
     // Resume an explicit session by ID — restore its conversation history.
+    // Uses cross-CWD fallback so --resume works even from a different directory.
     sessionId = args.resume;
-    initialMessages = sessionMgr.loadTranscript(cwd, sessionId);
+    initialMessages = sessionMgr.loadTranscriptAnyCwd(sessionId, cwd);
   } else if (args.continue) {
     // Continue from the most recent session for this CWD, or create one.
     const latest = sessionMgr.getLatestSession(cwd);
@@ -705,8 +706,38 @@ async function main(): Promise<void> {
     initialMessages: initialMessages.length > 0 ? initialMessages : undefined,
   });
 
-  const renderer = new TerminalRenderer();
+  const renderer = new TerminalRenderer({ noMarkdown: args.noMarkdown });
   const isStreamJson = args.outputFormat === 'stream-json' || args.json === true;
+
+  // ------------------------------------------------------------------
+  // Input format: stream-json reads prompt from stdin as NDJSON
+  // ------------------------------------------------------------------
+  if (args.inputFormat === 'stream-json' && !args.prompt) {
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) {
+      chunks.push(chunk);
+    }
+    const stdinText = Buffer.concat(chunks).toString('utf-8').trim();
+    if (stdinText) {
+      // Parse NDJSON lines — extract user messages to build the prompt
+      const lines = stdinText.split('\n').filter(l => l.trim());
+      const promptParts: string[] = [];
+      for (const line of lines) {
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed.type === 'user' && parsed.message?.content) {
+            const content = parsed.message.content;
+            promptParts.push(typeof content === 'string' ? content : JSON.stringify(content));
+          } else if (typeof parsed.content === 'string') {
+            promptParts.push(parsed.content);
+          }
+        } catch { /* skip malformed lines */ }
+      }
+      if (promptParts.length > 0) {
+        args.prompt = promptParts.join('\n');
+      }
+    }
+  }
 
   // ------------------------------------------------------------------
   // Print mode  (open-agent --print "…")
@@ -716,6 +747,9 @@ async function main(): Promise<void> {
   if (args.print && args.prompt) {
     // Print mode: one-shot with full tools, streams only text to stdout.
     // Matches Claude Code's `-p` behavior — runs agent loop then exits.
+    if (isStreamJson) {
+      emitStreamJsonInit({ tools: toolNames, model, cwd, permissionMode: effectivePermissionMode, sessionId });
+    }
     for await (const message of loop.run(args.prompt)) {
       if (isStreamJson) {
         emitStreamJson(message);

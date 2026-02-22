@@ -83,6 +83,9 @@ export class SessionManager {
     // Bun supports all Node.js `fs` APIs, so this works in both environments.
     writeFileSync(this.metaPath(projectDir, id), JSON.stringify(info, null, 2));
 
+    // Update global session index for cross-CWD resume support.
+    this.updateGlobalIndex(id, cwd);
+
     return info;
   }
 
@@ -271,13 +274,82 @@ export class SessionManager {
 
   /**
    * Return a single session by ID, or `null` if not found.
+   * Falls back to the global index for cross-CWD lookup when
+   * the session is not found in the specified CWD's project directory.
    */
   getSession(cwd: string, sessionId: string): SessionInfo | null {
     const projectDir = this.getProjectDir(cwd);
     const path = this.metaPath(projectDir, sessionId);
-    if (!existsSync(path)) return null;
+    if (existsSync(path)) {
+      try {
+        return JSON.parse(readFileSync(path, 'utf-8')) as SessionInfo;
+      } catch {
+        return null;
+      }
+    }
+
+    // Fall back to global index — the session may have been created from a different CWD.
+    const originalCwd = this.lookupGlobalIndex(sessionId);
+    if (originalCwd && originalCwd !== cwd) {
+      const altProjectDir = this.getProjectDir(originalCwd);
+      const altPath = this.metaPath(altProjectDir, sessionId);
+      if (existsSync(altPath)) {
+        try {
+          return JSON.parse(readFileSync(altPath, 'utf-8')) as SessionInfo;
+        } catch {
+          return null;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Load a transcript, with cross-CWD fallback via global index.
+   * If the session isn't found under the given CWD, checks the global
+   * index for the original CWD and loads from there.
+   */
+  loadTranscriptAnyCwd(sessionId: string, preferredCwd: string): Message[] {
+    // Try preferred CWD first
+    const transcript = this.loadTranscript(preferredCwd, sessionId);
+    if (transcript.length > 0) return transcript;
+
+    // Fall back to global index
+    const originalCwd = this.lookupGlobalIndex(sessionId);
+    if (originalCwd && originalCwd !== preferredCwd) {
+      return this.loadTranscript(originalCwd, sessionId);
+    }
+
+    return [];
+  }
+
+  // ---------------------------------------------------------------------------
+  // Global session index — maps sessionId → original CWD for cross-dir resume
+  // ---------------------------------------------------------------------------
+
+  private get globalIndexPath(): string {
+    return join(this.baseDir, 'sessions-index.json');
+  }
+
+  private updateGlobalIndex(sessionId: string, cwd: string): void {
     try {
-      return JSON.parse(readFileSync(path, 'utf-8')) as SessionInfo;
+      let index: Record<string, string> = {};
+      if (existsSync(this.globalIndexPath)) {
+        index = JSON.parse(readFileSync(this.globalIndexPath, 'utf-8'));
+      }
+      index[sessionId] = cwd;
+      writeFileSync(this.globalIndexPath, JSON.stringify(index));
+    } catch {
+      // Non-fatal — index is an optimization, not critical.
+    }
+  }
+
+  private lookupGlobalIndex(sessionId: string): string | null {
+    try {
+      if (!existsSync(this.globalIndexPath)) return null;
+      const index = JSON.parse(readFileSync(this.globalIndexPath, 'utf-8'));
+      return index[sessionId] ?? null;
     } catch {
       return null;
     }

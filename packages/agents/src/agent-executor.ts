@@ -118,6 +118,10 @@ export class AgentExecutor {
         initialMessages = this.loadTranscript(options.resume);
       }
 
+      // Prepare transcript file for persisting messages
+      const transcriptDir = this.getSessionDir(agentId);
+      const transcriptPath = join(transcriptDir, 'transcript.jsonl');
+
       const runner = new AgentRunner({
         definition: options.definition,
         provider: options.provider,
@@ -128,6 +132,9 @@ export class AgentExecutor {
         model: options.model,
         initialMessages,
         worktreePath: options.worktreePath,
+        onMessage: (msg) => {
+          try { appendFileSync(transcriptPath, JSON.stringify(msg) + '\n'); } catch { /* non-fatal */ }
+        },
       });
 
       const agentResult = await runner.run(options.prompt);
@@ -206,6 +213,9 @@ export class AgentExecutor {
           initialMessages = this.loadTranscript(options.resume);
         }
 
+        const bgTranscriptDir = this.getSessionDir(agentId);
+        const bgTranscriptPath = join(bgTranscriptDir, 'transcript.jsonl');
+
         const runner = new AgentRunner({
           definition: options.definition,
           provider: options.provider,
@@ -216,6 +226,9 @@ export class AgentExecutor {
           model: options.model,
           initialMessages,
           worktreePath: options.worktreePath,
+          onMessage: (msg) => {
+            try { appendFileSync(bgTranscriptPath, JSON.stringify(msg) + '\n'); } catch { /* non-fatal */ }
+          },
         });
 
         const agentResult = await runner.run(options.prompt);
