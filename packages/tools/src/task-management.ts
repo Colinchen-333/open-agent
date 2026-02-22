@@ -46,7 +46,7 @@ export function createTaskOutputTool(deps?: TaskManagementDeps): ToolDefinition 
           minimum: 0,
         },
       },
-      required: ['task_id', 'block', 'timeout'],
+      required: ['task_id'],
     },
     async execute(input: any, _ctx: ToolContext): Promise<string> {
       const taskId = input.task_id as string;
