@@ -239,17 +239,25 @@ export class AnthropicProvider implements LLMProvider {
         ...(options.stopSequences ? { stop_sequences: options.stopSequences } : {}),
       };
 
+      // Pass the caller's AbortSignal so Ctrl+C cancels the HTTP request.
+      const requestOptions = options.signal
+        ? { signal: options.signal }
+        : undefined;
+
       // Use the extended thinking beta when thinking is requested
       if (thinkingParam) {
-        const stream = await (this.client.beta.messages.stream as any)({
-          ...baseParams,
-          thinking: thinkingParam,
-          betas: ['interleaved-thinking-2025-05-14'],
-        });
+        const stream = await (this.client.beta.messages.stream as any)(
+          {
+            ...baseParams,
+            thinking: thinkingParam,
+            betas: ['interleaved-thinking-2025-05-14'],
+          },
+          requestOptions,
+        );
 
         yield* this.processStream(stream);
       } else {
-        const stream = await this.client.messages.stream(baseParams);
+        const stream = await this.client.messages.stream(baseParams, requestOptions);
         yield* this.processStream(stream);
       }
     } catch (err: unknown) {

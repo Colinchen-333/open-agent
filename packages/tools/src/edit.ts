@@ -90,6 +90,16 @@ export function createEditTool(): ToolDefinition {
     },
 
     async execute(input: FileEditInput, ctx: ToolContext) {
+      // Enforce read-before-edit safety: the LLM must have read the file
+      // at least once in this conversation before it can edit it.  This
+      // prevents blind edits that could silently corrupt files.
+      if (ctx.fileReadTracker && !ctx.fileReadTracker.hasBeenRead(input.file_path)) {
+        throw new Error(
+          `You must use the Read tool to read ${input.file_path} before editing it. ` +
+          `This ensures you have the current file contents and can make accurate edits.`
+        );
+      }
+
       const file = Bun.file(input.file_path);
       const exists = await file.exists();
       if (!exists) {

@@ -113,5 +113,12 @@ export function createNotebookEditTool(): ToolDefinition {
 }
 
 function randomId(): string {
-  return Math.random().toString(36).slice(2, 10);
+  // Use crypto.randomUUID() for proper uniqueness, then take 8 chars from the
+  // hex representation.  This is collision-resistant unlike Math.random().
+  try {
+    return require('crypto').randomUUID().replace(/-/g, '').slice(0, 8);
+  } catch {
+    // Fallback for environments without crypto
+    return Math.random().toString(36).slice(2, 10);
+  }
 }

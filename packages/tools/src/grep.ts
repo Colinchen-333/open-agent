@@ -98,6 +98,19 @@ export function createGrepTool(): ToolDefinition {
         }
       }
 
+      // Limit the number of results at the rg level for performance.
+      // For files_with_matches mode, --max-count=1 makes rg stop after the
+      // first match per file (it already does this with -l, but we use -m to
+      // cap the total output).  For content/count we don't limit via rg
+      // because head_limit applies to output lines, not matches.
+      // We do apply --max-count for content mode when head_limit is set to
+      // avoid reading entire large files when only a few matches are needed.
+      if (input.head_limit && input.head_limit > 0 && mode === 'content') {
+        // Over-fetch slightly to account for offset, then trim post-hoc.
+        const fetchCount = (input.offset ?? 0) + input.head_limit;
+        args.push('--max-count', String(fetchCount));
+      }
+
       // Pattern and path — always last
       args.push('--', input.pattern);
       args.push(input.path ?? ctx.cwd);

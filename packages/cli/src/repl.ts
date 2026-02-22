@@ -1,4 +1,7 @@
 import * as readline from 'readline/promises';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { join } from 'path';
+import { homedir } from 'os';
 
 const ESC = '\x1b';
 const C = {
@@ -10,6 +13,9 @@ const C = {
   white: `${ESC}[37m`,
 };
 
+const HISTORY_FILE = join(homedir(), '.open-agent', 'history');
+const MAX_HISTORY_ENTRIES = 500;
+
 export class REPL {
   private rl: readline.Interface;
   private model: string;
@@ -17,12 +23,17 @@ export class REPL {
 
   constructor(modelName: string) {
     this.model = modelName;
+
+    // Load persisted history from disk.
+    this.history = this.loadHistory();
+
     this.rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
       terminal: true,
       prompt: this.getPrompt(),
-      historySize: 100,
+      historySize: MAX_HISTORY_ENTRIES,
+      history: this.history.slice().reverse(), // readline expects newest-first
     });
 
     // Prevent readline from swallowing Ctrl+C — let the SIGINT handler in
@@ -30,6 +41,33 @@ export class REPL {
     this.rl.on('SIGINT', () => {
       process.emit('SIGINT');
     });
+  }
+
+  /** Load history from ~/.open-agent/history, one entry per line. */
+  private loadHistory(): string[] {
+    try {
+      if (existsSync(HISTORY_FILE)) {
+        return readFileSync(HISTORY_FILE, 'utf-8')
+          .split('\n')
+          .filter(l => l.length > 0)
+          .slice(-MAX_HISTORY_ENTRIES);
+      }
+    } catch {
+      // Non-fatal — start with empty history.
+    }
+    return [];
+  }
+
+  /** Persist history to disk. Called on close and after each input. */
+  private saveHistory(): void {
+    try {
+      const dir = join(homedir(), '.open-agent');
+      mkdirSync(dir, { recursive: true });
+      const entries = this.history.slice(-MAX_HISTORY_ENTRIES);
+      writeFileSync(HISTORY_FILE, entries.join('\n') + '\n');
+    } catch {
+      // Non-fatal — history persistence failure is not critical.
+    }
   }
 
   private getPrompt(): string {
@@ -63,6 +101,7 @@ export class REPL {
       // Add to history, avoiding consecutive duplicates
       if (trimmed && (this.history.length === 0 || this.history[this.history.length - 1] !== trimmed)) {
         this.history.push(trimmed);
+        this.saveHistory();
       }
 
       return trimmed;
@@ -84,6 +123,7 @@ export class REPL {
   }
 
   close(): void {
+    this.saveHistory();
     this.rl.close();
   }
 }

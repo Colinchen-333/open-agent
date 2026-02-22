@@ -6,8 +6,9 @@ const MAX_OUTPUT_LENGTH = 30000;
 const MAX_TIMEOUT_MS = 600_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
 
-// Persistent CWD state across consecutive Bash calls (per module instance)
-let persistentCwd: string | null = null;
+// Persistent CWD state across consecutive Bash calls, keyed by sessionId
+// to prevent multi-session conflicts.
+const persistentCwdBySession = new Map<string, string>();
 
 export function createBashTool(): ToolDefinition {
   return {
@@ -44,8 +45,8 @@ export function createBashTool(): ToolDefinition {
     async execute(input: BashInput & { dangerouslyDisableSandbox?: boolean }, ctx: ToolContext): Promise<string> {
       const timeout = Math.min(input.timeout ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
 
-      // Determine effective working directory (persistent across calls)
-      const effectiveCwd = persistentCwd ?? ctx.cwd;
+      // Determine effective working directory (persistent across calls, per session)
+      const effectiveCwd = persistentCwdBySession.get(ctx.sessionId) ?? ctx.cwd;
 
       // Use a UUID-based sentinel to avoid collisions with command output
       const CWD_SENTINEL = `___CWD_${randomUUID()}___`;
@@ -80,7 +81,7 @@ export function createBashTool(): ToolDefinition {
             ]);
             // Strip CWD sentinel from output and update persistentCwd
             const { cleanOutput, finalCwd } = extractCwd(stdout, CWD_SENTINEL);
-            if (finalCwd) persistentCwd = finalCwd;
+            if (finalCwd) persistentCwdBySession.set(ctx.sessionId, finalCwd);
             task.output =
               truncate(cleanOutput) + (stderr ? '\nSTDERR:\n' + truncate(stderr) : '');
             task.status = 'completed';
@@ -116,7 +117,7 @@ export function createBashTool(): ToolDefinition {
 
       // Extract final CWD from stdout and update persistent state
       const { cleanOutput: stdout, finalCwd } = extractCwd(rawStdout, CWD_SENTINEL);
-      if (finalCwd) persistentCwd = finalCwd;
+      if (finalCwd) persistentCwdBySession.set(ctx.sessionId, finalCwd);
 
       // Truncate long output with informative message
       const truncatedStdout = truncate(stdout);

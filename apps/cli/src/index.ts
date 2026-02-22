@@ -679,6 +679,39 @@ async function main(): Promise<void> {
   const isStreamJson = args.outputFormat === 'stream-json';
 
   // ------------------------------------------------------------------
+  // Print mode  (open-agent --print "…")
+  // Sends the prompt to the LLM with NO tools and prints the raw text
+  // output.  Useful for scripting and piping.
+  // ------------------------------------------------------------------
+  if (args.print && args.prompt) {
+    const printLoop = new ConversationLoop({
+      provider,
+      tools: new Map(), // No tools in print mode
+      model,
+      systemPrompt: loop['options'].systemPrompt, // reuse same system prompt
+      maxTurns: 1,
+      thinking: effectiveThinking,
+      effort: effectiveEffort,
+      cwd,
+      sessionId,
+      abortSignal: abortController.signal,
+      costCalculator: calculateCost,
+    });
+    for await (const message of printLoop.run(args.prompt)) {
+      if (message.type === 'result' && (message as any).result) {
+        process.stdout.write((message as any).result);
+      } else if (message.type === 'stream_event') {
+        const evt = (message as any).event;
+        if (evt?.type === 'text_delta') {
+          process.stdout.write(evt.text);
+        }
+      }
+    }
+    process.stdout.write('\n');
+    process.exit(0);
+  }
+
+  // ------------------------------------------------------------------
   // Single-prompt mode  (open-agent -p "…" or open-agent "…")
   // ------------------------------------------------------------------
   if (args.prompt) {

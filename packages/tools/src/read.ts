@@ -50,6 +50,9 @@ export function createReadTool(): ToolDefinition {
     },
 
     async execute(input: FileReadInput, ctx: ToolContext) {
+      // Track this file as "read" so Edit can enforce read-before-edit safety.
+      ctx.fileReadTracker?.markRead(input.file_path);
+
       const ext = getExtension(input.file_path);
 
       // Handle image files — return metadata only, not raw binary data.
@@ -113,29 +116,68 @@ export function createReadTool(): ToolDefinition {
         };
       }
 
-      // Handle PDF files — return metadata and extraction instructions rather
-      // than a raw base64 blob, which is useless as LLM text input.
+      // Handle PDF files — try to extract text via pdftotext if available,
+      // falling back to metadata + instructions if not installed.
       if (ext === '.pdf') {
         const file = Bun.file(input.file_path);
         const exists = await file.exists();
         if (!exists) {
           throw new Error(`File not found: ${input.file_path}`);
         }
+
+        // Try to extract text using pdftotext
+        try {
+          const pdfArgs = ['pdftotext'];
+
+          // Parse pages parameter (e.g. "1-5", "3", "10-20")
+          if (input.pages) {
+            const pageMatch = input.pages.match(/^(\d+)(?:-(\d+))?$/);
+            if (pageMatch) {
+              pdfArgs.push('-f', pageMatch[1]);
+              pdfArgs.push('-l', pageMatch[2] ?? pageMatch[1]);
+            }
+          }
+
+          pdfArgs.push(input.file_path, '-'); // output to stdout
+
+          const proc = Bun.spawn(pdfArgs, { stdout: 'pipe', stderr: 'pipe' });
+          const text = await new Response(proc.stdout).text();
+          await proc.exited;
+
+          if (proc.exitCode === 0 && text.trim().length > 0) {
+            const allLines = text.split('\n');
+            const startLine = Math.max(1, input.offset ?? 1);
+            const lineLimit = input.limit ?? DEFAULT_LINE_LIMIT;
+            const sliced = allLines.slice(startLine - 1, startLine - 1 + lineLimit);
+
+            return {
+              type: 'text' as const,
+              file: {
+                filePath: input.file_path,
+                content: formatWithLineNumbers(sliced, startLine),
+                numLines: sliced.length,
+                startLine,
+                totalLines: allLines.length,
+              },
+            };
+          }
+        } catch {
+          // pdftotext not available — fall through to instructions
+        }
+
         const stat = statSync(input.file_path);
         const sizeMb = (stat.size / (1024 * 1024)).toFixed(2);
-
         const pageHint = input.pages ? ` (requested pages: ${input.pages})` : '';
         const message = [
           `PDF file found: ${input.file_path}${pageHint}`,
           `Size: ${sizeMb} MB (${stat.size} bytes)`,
           '',
-          'PDF is a binary format. To extract readable text, use Bash with one of:',
-          '  pdftotext "' + input.file_path + '" -    # outputs text to stdout',
-          '  pdftotext -f 1 -l 5 "' + input.file_path + '" -  # pages 1-5 only',
-          '  mutool draw -F text "' + input.file_path + '"     # alternative (mutool)',
+          'PDF text extraction requires pdftotext. Install with:',
+          '  brew install poppler  (macOS)',
+          '  apt install poppler-utils  (Debian/Ubuntu)',
           '',
-          'If pdftotext is not installed: brew install poppler  (macOS)',
-          '                               apt install poppler-utils  (Debian/Ubuntu)',
+          'Then use Bash:',
+          '  pdftotext "' + input.file_path + '" -',
         ].join('\n');
 
         return {

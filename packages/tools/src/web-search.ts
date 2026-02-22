@@ -45,19 +45,65 @@ async function braveSearch(query: string, apiKey: string): Promise<SearchResult[
 }
 
 /**
- * DuckDuckGo Instant Answer JSON API.
- *
- * Endpoint: https://api.duckduckgo.com/?q=QUERY&format=json&no_html=1
- *
- * The API returns an `AbstractText` summary and a `RelatedTopics` array.
- * Each topic has a `Text` field and a `FirstURL`. Nested topics (those with
- * a `Topics` sub-array instead of `Text`) are flattened one level deep.
- *
- * Note: DDG's Instant Answer API is not a full web-search API — it returns
- * curated results (Wikipedia summaries, Wikidata facts, etc.) and may return
- * empty results for very specific or recent queries.
+ * SerpAPI Google Search — requires SERPAPI_KEY environment variable.
+ */
+async function serpApiSearch(query: string, apiKey: string): Promise<SearchResult[]> {
+  const params = new URLSearchParams({
+    q: query,
+    api_key: apiKey,
+    engine: 'google',
+    num: '10',
+  });
+  const resp = await fetch(`https://serpapi.com/search?${params}`);
+  if (!resp.ok) throw new Error(`SerpAPI error: ${resp.status} ${resp.statusText}`);
+  const data = (await resp.json()) as any;
+  return (data.organic_results ?? []).map((r: any) => ({
+    title: r.title ?? '',
+    url: r.link ?? '',
+    description: r.snippet ?? '',
+  }));
+}
+
+/**
+ * DuckDuckGo HTML search — scrapes the lite HTML page for actual web results.
+ * More reliable than the Instant Answer API which only returns curated results.
  */
 async function duckDuckGoSearch(query: string): Promise<SearchResult[]> {
+  // Try the lite HTML version first for actual web results
+  try {
+    const params = new URLSearchParams({ q: query });
+    const resp = await fetch(`https://lite.duckduckgo.com/lite/?${params}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; OpenAgent/0.1.0)',
+      },
+    });
+    if (resp.ok) {
+      const html = await resp.text();
+      const results: SearchResult[] = [];
+      // Parse result links from the lite HTML page
+      const linkRegex = /<a[^>]+class="result-link"[^>]*href="([^"]+)"[^>]*>([^<]*)<\/a>/g;
+      let match;
+      while ((match = linkRegex.exec(html)) !== null && results.length < 10) {
+        results.push({
+          title: match[2].trim(),
+          url: match[1],
+          description: '',
+        });
+      }
+      // Also try the snippet pattern
+      const snippetRegex = /<td[^>]*class="result-snippet"[^>]*>([\s\S]*?)<\/td>/g;
+      let snippetIdx = 0;
+      while ((match = snippetRegex.exec(html)) !== null && snippetIdx < results.length) {
+        results[snippetIdx].description = match[1].replace(/<[^>]+>/g, '').trim();
+        snippetIdx++;
+      }
+      if (results.length > 0) return results;
+    }
+  } catch {
+    // Fall through to JSON API
+  }
+
+  // Fallback: DuckDuckGo Instant Answer JSON API
   const params = new URLSearchParams({
     q: query,
     format: 'json',
@@ -75,7 +121,6 @@ async function duckDuckGoSearch(query: string): Promise<SearchResult[]> {
   const data = (await resp.json()) as any;
   const results: SearchResult[] = [];
 
-  // Top abstract (e.g. Wikipedia summary)
   if (data.AbstractText && data.AbstractURL) {
     results.push({
       title: data.Heading ?? query,
@@ -84,11 +129,9 @@ async function duckDuckGoSearch(query: string): Promise<SearchResult[]> {
     });
   }
 
-  // Flatten RelatedTopics (some entries have nested Topics arrays)
   const flatTopics: any[] = [];
   for (const topic of data.RelatedTopics ?? []) {
     if (Array.isArray(topic.Topics)) {
-      // Category group — flatten one level
       flatTopics.push(...topic.Topics);
     } else {
       flatTopics.push(topic);
@@ -138,16 +181,21 @@ export function createWebSearchTool(): ToolDefinition {
       };
 
       const braveKey = process.env.BRAVE_SEARCH_API_KEY;
+      const serpKey = process.env.SERPAPI_KEY;
 
       try {
         let rawResults: SearchResult[];
+        let engine: string;
 
         if (braveKey) {
-          // Preferred path: full web search via Brave
           rawResults = await braveSearch(query, braveKey);
+          engine = 'brave';
+        } else if (serpKey) {
+          rawResults = await serpApiSearch(query, serpKey);
+          engine = 'serpapi';
         } else {
-          // Fallback: DuckDuckGo Instant Answer JSON API (no key required)
           rawResults = await duckDuckGoSearch(query);
+          engine = 'duckduckgo';
         }
 
         const results = applyDomainFilters(rawResults, allowed_domains, blocked_domains);
@@ -156,14 +204,14 @@ export function createWebSearchTool(): ToolDefinition {
           return {
             results: [],
             durationSeconds: 0,
-            note: braveKey
-              ? 'Brave Search returned no results for this query.'
-              : 'DuckDuckGo returned no results. For full web search, set the ' +
-                'BRAVE_SEARCH_API_KEY environment variable.',
+            engine,
+            note: braveKey || serpKey
+              ? `${engine} returned no results for this query.`
+              : 'No results. For better web search, set BRAVE_SEARCH_API_KEY or SERPAPI_KEY.',
           };
         }
 
-        return { results, durationSeconds: 0 };
+        return { results, durationSeconds: 0, engine };
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         return {

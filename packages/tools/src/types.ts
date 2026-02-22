@@ -89,4 +89,20 @@ export interface ToolContext {
   cwd: string;
   abortSignal?: AbortSignal;
   sessionId: string;
+  /**
+   * Tracks which files have been read in this conversation.
+   * Edit/Write tools use this to enforce "read before edit" safety.
+   */
+  fileReadTracker?: FileReadTracker;
+}
+
+/**
+ * Tracks files that have been read so that Edit can enforce the
+ * "you must read a file before editing it" safety check.
+ */
+export interface FileReadTracker {
+  /** Mark a file as having been read. */
+  markRead(filePath: string): void;
+  /** Check if a file has been read in this conversation. */
+  hasBeenRead(filePath: string): boolean;
 }

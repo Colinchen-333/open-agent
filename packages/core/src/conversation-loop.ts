@@ -72,6 +72,12 @@ export class ConversationLoop {
   private _totalInputTokens = 0;
   private _totalOutputTokens = 0;
   private _totalCostUsd = 0;
+  // Tracks files read by the Read tool so Edit/Write can enforce read-before-edit.
+  private fileReadTracker = {
+    _readFiles: new Set<string>(),
+    markRead(filePath: string) { this._readFiles.add(filePath); },
+    hasBeenRead(filePath: string) { return this._readFiles.has(filePath); },
+  };
 
   constructor(options: ConversationLoopOptions) {
     this.options = options;
@@ -169,6 +175,7 @@ export class ConversationLoop {
         thinking: this.options.thinking,
         effort: this.options.effort,
         systemPrompt: this.options.systemPrompt,
+        signal: this.options.abortSignal,
       };
 
       // Accumulate content blocks as the stream arrives.
@@ -177,6 +184,9 @@ export class ConversationLoop {
       // being delivered via tool_use_delta events.
       let currentToolUse: { id: string; name: string; input: string } | null = null;
       let messageUsage: any = null;
+      // Signature from the most recent thinking content_block_start, used to
+      // attach the signature to the accumulated thinking block.
+      let pendingThinkingSignature: string | undefined;
 
       try {
         for await (const event of this.chatWithRetry(this.messages, chatOptions)) {
@@ -212,6 +222,15 @@ export class ConversationLoop {
 
           // Update the in-progress content accumulation based on the event type.
           switch (event.type) {
+            case 'content_block_start': {
+              // Capture the signature from thinking blocks so we can attach it
+              // to the accumulated thinking content later.
+              if (event.content_block?.type === 'thinking') {
+                pendingThinkingSignature = event.content_block.signature;
+              }
+              break;
+            }
+
             case 'text_delta': {
               // Append to the most recent open text block, or start a new one.
               let textBlock = assistantContent
@@ -232,10 +251,28 @@ export class ConversationLoop {
                 .reverse()
                 .find((b) => b.type === 'thinking' && !b._closed);
               if (!thinkBlock) {
-                thinkBlock = { type: 'thinking', thinking: '', _closed: false };
+                thinkBlock = {
+                  type: 'thinking',
+                  thinking: '',
+                  signature: pendingThinkingSignature ?? '',
+                  _closed: false,
+                };
                 assistantContent.push(thinkBlock);
+                pendingThinkingSignature = undefined;
               }
               (thinkBlock as any).thinking += event.thinking;
+              break;
+            }
+
+            case 'content_block_stop': {
+              // Close the most recent open text/thinking block so the next
+              // content_block_start creates a fresh one (supports interleaved
+              // thinking in Claude's extended thinking API).
+              for (const b of assistantContent) {
+                if ((b.type === 'text' || b.type === 'thinking') && !b._closed) {
+                  b._closed = true;
+                }
+              }
               break;
             }
 
@@ -546,6 +583,7 @@ export class ConversationLoop {
             cwd: this.options.cwd,
             abortSignal: this.options.abortSignal,
             sessionId: this.options.sessionId,
+            fileReadTracker: this.fileReadTracker,
           };
 
           // ── PreToolUse hook ──────────────────────────────────────────────
@@ -633,10 +671,14 @@ export class ConversationLoop {
         }
 
         if (isError) {
+          // Truncate large error messages (e.g. stack traces) to 10K chars.
+          const truncatedError = resultStr.length > 10_000
+            ? resultStr.slice(0, 10_000) + '\n[Error output truncated]'
+            : resultStr;
           toolResults.push({
             type: 'tool_result',
             tool_use_id: toolUse.id,
-            content: `Error: ${resultStr}`,
+            content: `Error: ${truncatedError}`,
             is_error: true,
           });
           yield {
@@ -682,10 +724,17 @@ export class ConversationLoop {
             session_id: sessionId,
           };
         } else {
+          // Truncate oversized tool results to 30K chars to prevent context
+          // bloat.  This matches Claude Code's truncation threshold.
+          const MAX_TOOL_RESULT = 30_000;
+          const truncatedResult = resultStr.length > MAX_TOOL_RESULT
+            ? resultStr.slice(0, MAX_TOOL_RESULT) + `\n\n[Output truncated: ${resultStr.length} chars total, showing first ${MAX_TOOL_RESULT}]`
+            : resultStr;
+
           toolResults.push({
             type: 'tool_result',
             tool_use_id: toolUse.id,
-            content: resultStr,
+            content: truncatedResult,
           });
           yield {
             type: 'tool_result' as const,
@@ -771,6 +820,9 @@ export class ConversationLoop {
         yield* this.options.provider.chat(messages, options);
         return;
       } catch (error: unknown) {
+        // Don't retry if the user aborted.
+        if (this.options.abortSignal?.aborted) throw error;
+
         const isRetryable = this.isRetryableError(error);
         if (!isRetryable || attempt === maxRetries) throw error;
 
@@ -785,10 +837,16 @@ export class ConversationLoop {
   /**
    * Return true when the error is a transient condition that can be safely
    * retried (rate limits, server overload, network resets, timeouts).
+   * Never retries abort/cancel errors from Ctrl+C.
    */
   private isRetryableError(error: unknown): boolean {
     if (!(error instanceof Error)) return false;
+
+    // Never retry abort-related errors
+    if (error.name === 'AbortError') return false;
     const msg = error.message.toLowerCase();
+    if (msg.includes('abort') || msg.includes('cancel')) return false;
+
     return (
       msg.includes('429') ||
       msg.includes('rate limit') ||
@@ -821,13 +879,36 @@ export class ConversationLoop {
 
   /** Compact conversation history by summarising older messages with the LLM. */
   async compact(): Promise<void> {
-    // Keep the last 6 messages (3 turns) — enough to preserve immediate context
-    // while still meaningfully reducing the window size.
-    if (this.messages.length <= 6) return;
+    if (this.messages.length <= 4) return;
 
-    const keepCount = 6;
-    const toSummarize = this.messages.slice(0, -keepCount);
-    const toKeep = this.messages.slice(-keepCount);
+    // Find the best split point: keep enough recent messages to preserve
+    // current working context.  We look for a clean turn boundary (a user
+    // message that is NOT a tool_result) and keep at least the last 3 turns
+    // (6 messages) but up to 5 turns (10 messages) if the conversation is
+    // long enough.
+    const targetKeep = Math.min(
+      Math.max(6, Math.ceil(this.messages.length * 0.3)),
+      10,
+    );
+    let keepFrom = this.messages.length - targetKeep;
+
+    // Walk forward to find a clean turn boundary (user text message, not
+    // a tool_result array).
+    while (keepFrom < this.messages.length - 2) {
+      const msg = this.messages[keepFrom];
+      if (msg.role === 'user' && typeof msg.content === 'string') break;
+      keepFrom++;
+    }
+
+    // If we couldn't find a good boundary, fall back to keeping last 6.
+    if (keepFrom >= this.messages.length - 2) {
+      keepFrom = Math.max(0, this.messages.length - 6);
+    }
+
+    if (keepFrom <= 0) return; // Nothing to compact.
+
+    const toSummarize = this.messages.slice(0, keepFrom);
+    const toKeep = this.messages.slice(keepFrom);
 
     // Build the summarisation prompt with the messages we are compacting.
     const historyText = toSummarize

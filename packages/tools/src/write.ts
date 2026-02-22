@@ -25,6 +25,15 @@ export function createWriteTool(): ToolDefinition {
       const file = Bun.file(input.file_path);
       const exists = await file.exists();
 
+      // Enforce read-before-overwrite safety for existing files:
+      // the LLM must have read the file before overwriting it.
+      if (exists && ctx.fileReadTracker && !ctx.fileReadTracker.hasBeenRead(input.file_path)) {
+        throw new Error(
+          `You must use the Read tool to read ${input.file_path} before overwriting it. ` +
+          `This ensures you have the current file contents. If this is a new file, it should not already exist.`
+        );
+      }
+
       let originalFile: string | null = null;
       if (exists) {
         originalFile = await file.text();

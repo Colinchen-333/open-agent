@@ -13,6 +13,7 @@ export type {
   GrepOutput,
   ToolDefinition,
   ToolContext,
+  FileReadTracker,
 } from './types.js';
 
 export { ToolRegistry, createDefaultToolRegistry } from './registry.js';

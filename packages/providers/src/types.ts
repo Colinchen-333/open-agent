@@ -39,6 +39,8 @@ export interface ChatOptions {
   effort?: 'low' | 'medium' | 'high' | 'max';
   systemPrompt?: string;
   stopSequences?: string[];
+  /** AbortSignal to cancel the in-flight HTTP request (Ctrl+C support). */
+  signal?: AbortSignal;
 }
 
 export interface ToolSpec {
