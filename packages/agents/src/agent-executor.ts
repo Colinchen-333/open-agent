@@ -123,6 +123,7 @@ export class AgentExecutor {
         cwd: options.cwd,
         maxTurns: options.maxTurns,
         mode: options.mode,
+        model: options.model,
         initialMessages,
         worktreePath: options.worktreePath,
       });
@@ -210,6 +211,7 @@ export class AgentExecutor {
           cwd: options.cwd,
           maxTurns: options.maxTurns,
           mode: options.mode,
+          model: options.model,
           initialMessages,
           worktreePath: options.worktreePath,
         });

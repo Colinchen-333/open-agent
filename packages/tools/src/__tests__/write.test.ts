@@ -32,16 +32,18 @@ describe('Write tool', () => {
     expect(readFileSync(filePath, 'utf-8')).toBe('Hello, world!');
     expect(result.type).toBe('create');
     expect(result.filePath).toBe(filePath);
-    expect(result.originalFile).toBeNull();
+    expect(result.lineCount).toBe(1);
   });
 
-  it('returns the written content in the result', async () => {
+  it('returns terse metadata in the result', async () => {
     const filePath = join(tmpDir, 'content-check.txt');
     const content = 'Some specific content here';
 
     const result = await tool.execute({ file_path: filePath, content }, ctx) as any;
 
-    expect(result.content).toBe(content);
+    expect(result.type).toBe('create');
+    expect(result.filePath).toBe(filePath);
+    expect(result.lineCount).toBe(1);
   });
 
   // ---------------------------------------------------------------------------
@@ -62,10 +64,10 @@ describe('Write tool', () => {
 
     expect(readFileSync(filePath, 'utf-8')).toBe('Updated content');
     expect(result.type).toBe('update');
-    expect(result.originalFile).toBe('Original content');
+    expect(result.lineCount).toBe(1);
   });
 
-  it('preserves original file content in originalFile field on overwrite', async () => {
+  it('returns update type when overwriting', async () => {
     const filePath = join(tmpDir, 'original-preserved.txt');
     const originalContent = 'First version of the file\nWith two lines';
 
@@ -75,7 +77,8 @@ describe('Write tool', () => {
       ctx,
     ) as any;
 
-    expect(result.originalFile).toBe(originalContent);
+    expect(result.type).toBe('update');
+    expect(result.lineCount).toBe(1);
   });
 
   // ---------------------------------------------------------------------------
@@ -116,7 +119,7 @@ describe('Write tool', () => {
     expect(existsSync(filePath)).toBe(true);
     expect(readFileSync(filePath, 'utf-8')).toBe('');
     expect(result.type).toBe('create');
-    expect(result.content).toBe('');
+    expect(result.lineCount).toBe(1);
   });
 
   it('overwrites a file with empty content', async () => {
@@ -127,7 +130,7 @@ describe('Write tool', () => {
 
     expect(readFileSync(filePath, 'utf-8')).toBe('');
     expect(result.type).toBe('update');
-    expect(result.originalFile).toBe('Some content');
+    expect(result.lineCount).toBe(1);
   });
 
   // ---------------------------------------------------------------------------
@@ -143,11 +146,13 @@ describe('Write tool', () => {
     expect(readFileSync(filePath, 'utf-8')).toBe(content);
   });
 
-  it('result always includes a structuredPatch array', async () => {
+  it('result includes terse metadata (type, filePath, lineCount)', async () => {
     const filePath = join(tmpDir, 'patch-check.txt');
 
     const result = await tool.execute({ file_path: filePath, content: 'data' }, ctx) as any;
 
-    expect(Array.isArray(result.structuredPatch)).toBe(true);
+    expect(result.type).toBe('create');
+    expect(result.filePath).toBe(filePath);
+    expect(result.lineCount).toBe(1);
   });
 });

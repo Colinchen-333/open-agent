@@ -184,7 +184,41 @@ export class SessionManager {
         // Reconstruct a proper assistant Message with content blocks.
         messages.push({ role: 'assistant', content: normalised });
       }
-      // All other types (stream_event, tool_result, result, system) are skipped.
+      // Reconstruct tool_result user messages from transcript entries.
+      // When the LLM uses tools, the conversation loop appends tool_result
+      // blocks as a user message.  These must be restored for the conversation
+      // to remain coherent on resume (the model expects tool results after
+      // tool_use blocks).
+      if (entry.type === 'tool_result') {
+        const toolUseId = (entry as any).tool_use_id;
+        const result = (entry as any).result ?? '';
+        const isError = (entry as any).is_error === true;
+
+        // Check if the previous message is already a user message with
+        // tool_result content blocks — if so, append to it; otherwise
+        // create a new user message.
+        const lastMsg = messages[messages.length - 1];
+        const toolResultBlock = {
+          type: 'tool_result' as const,
+          tool_use_id: toolUseId,
+          content: typeof result === 'string' ? result : JSON.stringify(result),
+          ...(isError ? { is_error: true } : {}),
+        };
+
+        if (
+          lastMsg?.role === 'user' &&
+          Array.isArray(lastMsg.content) &&
+          lastMsg.content.length > 0 &&
+          (lastMsg.content[0] as any)?.type === 'tool_result'
+        ) {
+          // Append to existing tool_result user message
+          (lastMsg.content as any[]).push(toolResultBlock);
+        } else {
+          // Create a new user message with tool_result content
+          messages.push({ role: 'user', content: [toolResultBlock] as any });
+        }
+      }
+      // stream_event, result, system messages are skipped (informational only).
     }
 
     return messages;
@@ -225,8 +259,12 @@ export class SessionManager {
    * Useful for callers that need to store session-scoped artefacts (e.g.
    * checkpoints) alongside the session metadata and transcript files.
    */
-  getSessionDir(cwd: string, _sessionId: string): string {
-    return this.getProjectDir(cwd);
+  getSessionDir(cwd: string, sessionId: string): string {
+    const dir = join(this.getProjectDir(cwd), sessionId);
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
+    return dir;
   }
 
   /**

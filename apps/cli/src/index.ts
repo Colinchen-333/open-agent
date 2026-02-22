@@ -246,10 +246,12 @@ async function main(): Promise<void> {
       try {
         const mcpTools = mcpManager.getAllTools();
         for (const mcpTool of mcpTools) {
-          // Avoid overwriting built-in tools with same name.
-          if (toolRegistry.get(mcpTool.name)) continue;
+          // Namespace MCP tools as mcp__<server>__<tool> to match Claude Code convention.
+          const namespacedName = `mcp__${mcpTool.serverName}__${mcpTool.name}`;
+          // Avoid overwriting built-in or already-registered tools.
+          if (toolRegistry.get(namespacedName)) continue;
           toolRegistry.register({
-            name: mcpTool.name,
+            name: namespacedName,
             description: mcpTool.description ?? '',
             inputSchema: mcpTool.inputSchema ?? { type: 'object', properties: {} },
             execute: async (input: any) => {
@@ -382,12 +384,14 @@ async function main(): Promise<void> {
 
       // Also search MCP tools that may not yet be in the registry
       const mcpTools = mcpManager.getAllTools()
-        .filter(t =>
-          t.name.toLowerCase().includes(q) ||
-          (t.description ?? '').toLowerCase().includes(q)
-        )
-        .filter(t => !toolRegistry.get(t.name)) // exclude already-registered ones
-        .map(t => ({ name: t.name, description: t.description ?? `MCP tool from ${t.serverName}` }));
+        .filter(t => {
+          const namespacedName = `mcp__${t.serverName}__${t.name}`;
+          return namespacedName.toLowerCase().includes(q) ||
+            t.name.toLowerCase().includes(q) ||
+            (t.description ?? '').toLowerCase().includes(q);
+        })
+        .filter(t => !toolRegistry.get(`mcp__${t.serverName}__${t.name}`))
+        .map(t => ({ name: `mcp__${t.serverName}__${t.name}`, description: t.description ?? `MCP tool from ${t.serverName}` }));
 
       return [...registered, ...mcpTools];
     },
@@ -396,11 +400,15 @@ async function main(): Promise<void> {
       const existing = toolRegistry.get(name);
       if (existing) return existing;
 
-      // Fall back: find in MCP tools and dynamically create a ToolDefinition
-      const mcpTool = mcpManager.getAllTools().find(t => t.name === name);
+      // Fall back: find in MCP tools and dynamically create a ToolDefinition.
+      // Accept both namespaced (mcp__server__tool) and raw tool names.
+      const mcpTool = mcpManager.getAllTools().find(t =>
+        `mcp__${t.serverName}__${t.name}` === name || t.name === name
+      );
       if (mcpTool) {
+        const namespacedName = `mcp__${mcpTool.serverName}__${mcpTool.name}`;
         const tool = {
-          name: mcpTool.name,
+          name: namespacedName,
           description: mcpTool.description ?? '',
           inputSchema: mcpTool.inputSchema ?? { type: 'object', properties: {} },
           execute: async (input: any) => {

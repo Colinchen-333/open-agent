@@ -34,24 +34,17 @@ export function createWriteTool(): ToolDefinition {
         );
       }
 
-      let originalFile: string | null = null;
-      if (exists) {
-        originalFile = await file.text();
-      }
-
       // Ensure parent directory exists
       const dir = dirname(input.file_path);
       await mkdir(dir, { recursive: true });
 
       await Bun.write(input.file_path, input.content);
 
+      const lineCount = input.content.split('\n').length;
       return {
         type: exists ? ('update' as const) : ('create' as const),
         filePath: input.file_path,
-        content: input.content,
-        // Structured patch left as empty array; diff can be computed downstream if needed
-        structuredPatch: [] as any[],
-        originalFile,
+        lineCount,
       };
     },
   };

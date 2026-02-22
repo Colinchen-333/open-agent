@@ -12,6 +12,8 @@ export interface AgentRunnerOptions {
   parentSessionId?: string;
   maxTurns?: number;
   mode?: string;
+  /** Runtime model override — takes precedence over definition.model */
+  model?: string;
   initialMessages?: import('@open-agent/providers').Message[];
   /** When set, all tool executions use this path as cwd instead of options.cwd */
   worktreePath?: string;
@@ -76,7 +78,7 @@ export class AgentRunner {
     const loop = new ConversationLoop({
       provider: this.options.provider,
       tools,
-      model: this.resolveModel(def.model),
+      model: this.resolveModel(this.options.model ?? def.model),
       systemPrompt,
       maxTurns: this.options.maxTurns ?? def.maxTurns ?? 30,
       thinking: { type: 'adaptive' },

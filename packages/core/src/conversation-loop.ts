@@ -120,6 +120,35 @@ export class ConversationLoop {
     let totalCostUsd = 0;
     const allPermissionDenials: string[] = [];
 
+    // ── UserPromptSubmit hook ─────────────────────────────────────────
+    // Allows hooks to inspect/reject/modify the user's prompt before processing.
+    if (this.options.hookExecutor) {
+      const hookResult = await this.options.hookExecutor.execute(
+        'UserPromptSubmit',
+        { user_prompt: userMessage, session_id: sessionId },
+      );
+      if (hookResult.continue === false) {
+        yield {
+          type: 'result',
+          subtype: 'error_during_execution',
+          duration_ms: 0,
+          duration_api_ms: 0,
+          is_error: true,
+          num_turns: 0,
+          stop_reason: 'hook_blocked',
+          total_cost_usd: 0,
+          usage: { input_tokens: 0, output_tokens: 0 },
+          modelUsage: {},
+          permission_denials: [],
+          errors: [hookResult.decision ?? 'Blocked by UserPromptSubmit hook'],
+          uuid: randomUUID(),
+          session_id: sessionId,
+        };
+        return;
+      }
+    }
+    // ── End UserPromptSubmit hook ──────────────────────────────────────
+
     // Append the user message to local history and emit it as an SDKUserMessage.
     this.messages.push({ role: 'user', content: userMessage });
     yield {
@@ -664,6 +693,21 @@ export class ConversationLoop {
             return { toolUse, resultStr, isError: false, blocked: false, isImageResult };
           } catch (error: unknown) {
             const msg = error instanceof Error ? error.message : String(error);
+
+            // ── PostToolUseFailure hook ────────────────────────────────
+            if (this.options.hookExecutor) {
+              await this.options.hookExecutor.execute(
+                'PostToolUseFailure',
+                {
+                  tool_name: toolUse.name,
+                  tool_input: toolUse.input,
+                  error: msg,
+                },
+                toolUse.id,
+              );
+            }
+            // ── End PostToolUseFailure hook ────────────────────────────
+
             return { toolUse, resultStr: msg, isError: true, blocked: false, isImageResult: false };
           }
         }),
@@ -893,6 +937,15 @@ export class ConversationLoop {
   /** Compact conversation history by summarising older messages with the LLM. */
   async compact(): Promise<void> {
     if (this.messages.length <= 4) return;
+
+    // ── PreCompact hook ───────────────────────────────────────────────
+    if (this.options.hookExecutor) {
+      await this.options.hookExecutor.execute('PreCompact', {
+        message_count: this.messages.length,
+        estimated_tokens: this.estimateTokens(),
+      });
+    }
+    // ── End PreCompact hook ───────────────────────────────────────────
 
     // Find the best split point: keep enough recent messages to preserve
     // current working context.  We look for a clean turn boundary (a user

@@ -100,10 +100,20 @@ export class ConfigLoader {
   loadAgentMd(cwd: string): string[] {
     const instructions: string[] = [];
 
-    // 1. User-level instruction file
-    const userPath = join(homedir(), '.open-agent', 'AGENT.md');
-    if (existsSync(userPath)) {
-      instructions.push(readFileSync(userPath, 'utf-8'));
+    // 1. User-level instruction file — check both .open-agent/ and .claude/ (compat)
+    for (const configDir of ['.open-agent', '.claude']) {
+      const userAgentMd = join(homedir(), configDir, 'AGENT.md');
+      if (existsSync(userAgentMd)) {
+        instructions.push(readFileSync(userAgentMd, 'utf-8'));
+        break; // only load from one user-level dir
+      }
+    }
+    // Also check ~/.claude/CLAUDE.md (Claude Code compat)
+    if (instructions.length === 0) {
+      const claudeMd = join(homedir(), '.claude', 'CLAUDE.md');
+      if (existsSync(claudeMd)) {
+        instructions.push(readFileSync(claudeMd, 'utf-8'));
+      }
     }
 
     // 2. Walk from cwd upward, collecting project-level instruction files.
@@ -116,16 +126,23 @@ export class ConfigLoader {
     while (dir && !visited.has(dir)) {
       visited.add(dir);
 
-      // <dir>/AGENT.md
-      const projectPath = join(dir, 'AGENT.md');
-      if (existsSync(projectPath)) {
-        projectInstructions.push(readFileSync(projectPath, 'utf-8'));
+      // Check AGENT.md, CLAUDE.md at project root
+      for (const mdName of ['AGENT.md', 'CLAUDE.md']) {
+        const projectPath = join(dir, mdName);
+        if (existsSync(projectPath)) {
+          projectInstructions.push(readFileSync(projectPath, 'utf-8'));
+        }
       }
 
-      // <dir>/.open-agent/AGENT.md
-      const dotPath = join(dir, '.open-agent', 'AGENT.md');
-      if (existsSync(dotPath)) {
-        projectInstructions.push(readFileSync(dotPath, 'utf-8'));
+      // Check .open-agent/AGENT.md and .claude/CLAUDE.md in config dirs
+      for (const [configDir, mdName] of [
+        ['.open-agent', 'AGENT.md'],
+        ['.claude', 'CLAUDE.md'],
+      ] as const) {
+        const dotPath = join(dir, configDir, mdName);
+        if (existsSync(dotPath)) {
+          projectInstructions.push(readFileSync(dotPath, 'utf-8'));
+        }
       }
 
       const parent = resolve(dir, '..');
@@ -156,9 +173,15 @@ export class ConfigLoader {
     let merged: Settings = {};
 
     const sources = [
-      join(homedir(), '.open-agent', 'settings.json'),     // 1. user-level
-      join(cwd, '.open-agent', 'settings.json'),            // 2. project-level
-      join(cwd, '.open-agent', 'settings.local.json'),      // 3. local override
+      // User-level: .open-agent/ then .claude/ (compat)
+      join(homedir(), '.open-agent', 'settings.json'),
+      join(homedir(), '.claude', 'settings.json'),
+      // Project-level: .open-agent/ then .claude/ (compat)
+      join(cwd, '.open-agent', 'settings.json'),
+      join(cwd, '.claude', 'settings.json'),
+      // Local override (git-ignored)
+      join(cwd, '.open-agent', 'settings.local.json'),
+      join(cwd, '.claude', 'settings.local.json'),
     ];
 
     for (const src of sources) {

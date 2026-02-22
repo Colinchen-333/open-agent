@@ -320,9 +320,13 @@ export class PermissionEngine {
    *   2. allowedPaths — deny if allowedPaths is non-empty and path is outside all of them
    */
   private checkPathRestrictions(request: PermissionRequest): PermissionDecision | null {
+    const inp = request.input as Record<string, unknown>;
+    // For Grep, the search directory is `path`, NOT `pattern` (which is the regex).
+    // For Glob, the directory is also `path`.
     const filePath = String(
-      (request.input as Record<string, unknown>)?.file_path ??
-      (request.input as Record<string, unknown>)?.pattern ??
+      inp?.file_path ??
+      inp?.path ??
+      inp?.notebook_path ??
       ''
     );
 

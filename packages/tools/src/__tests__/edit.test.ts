@@ -47,7 +47,7 @@ describe('Edit tool', () => {
 
     expect(result.replacements).toBe(2);
     expect(result.filePath).toBe(filePath);
-    expect(result.replaceAll).toBe(true);
+    expect(result.patch).toBeDefined();
   });
 
   it('throws when old_string is not found in the file', async () => {

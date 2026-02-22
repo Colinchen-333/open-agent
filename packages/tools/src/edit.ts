@@ -141,16 +141,14 @@ export function createEditTool(): ToolDefinition {
       // Generate a human-readable unified diff for terminal display.
       const patch = generateSimplePatch(input.file_path, content, newContent);
 
+      // Return a concise result to avoid sending full file contents back to the
+      // LLM.  The patch is included for the terminal renderer but is much smaller
+      // than the original file.  `originalFile` is deliberately omitted to prevent
+      // massive token waste on large files.
       return {
         filePath: input.file_path,
-        oldString: input.old_string.slice(0, 100),
-        newString: input.new_string.slice(0, 100),
         replacements,
         patch,
-        originalFile: content,
-        structuredPatch: [] as any[],
-        userModified: false,
-        replaceAll: input.replace_all ?? false,
       };
     },
   };

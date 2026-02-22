@@ -131,11 +131,12 @@ describe('SessionManager', () => {
     }
 
     const messages = sm.loadTranscript(cwd, session.id);
-    // Only user + assistant should be included
-    expect(messages).toHaveLength(2);
+    // user + assistant + tool_result (reconstructed as user message) should be included
+    expect(messages).toHaveLength(3);
     expect(messages[0].role).toBe('user');
     expect(messages[0].content).toBe('what is 2+2?');
     expect(messages[1].role).toBe('assistant');
+    expect(messages[2].role).toBe('user'); // tool_result becomes a user message
   });
 
   it('listSessions returns all sessions for a CWD sorted by lastActiveAt desc', () => {
