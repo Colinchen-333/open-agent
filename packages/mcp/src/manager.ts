@@ -6,10 +6,11 @@ import type {
 } from '@open-agent/core';
 import { McpStdioClient } from './stdio-transport';
 import { McpHttpClient } from './http-transport';
+import { McpSseClient } from './sse-transport';
 import type { McpServerConnection, McpToolInfo, McpResourceInfo } from './types';
 
 // Union type of all client types we maintain
-type AnyMcpClient = McpStdioClient | McpHttpClient;
+type AnyMcpClient = McpStdioClient | McpHttpClient | McpSseClient;
 
 export class McpManager {
   private connections: Map<string, McpServerConnection> = new Map();
@@ -264,10 +265,8 @@ export class McpManager {
     }
 
     if (type === 'sse') {
-      // SSE servers use the same HTTP JSON-RPC discovery protocol.
-      // Streaming notifications are not proxied — only tool/resource calls matter.
       const sseConfig = config as McpSSEServerConfig;
-      return new McpHttpClient(name, sseConfig.url, sseConfig.headers);
+      return new McpSseClient(name, sseConfig.url, sseConfig.headers);
     }
 
     if (type === 'sdk') {

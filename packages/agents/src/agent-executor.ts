@@ -339,12 +339,41 @@ export class AgentExecutor {
     const path = join(this.getSessionDir(agentId), 'transcript.jsonl');
     if (!existsSync(path)) return [];
     try {
-      return readFileSync(path, 'utf-8')
+      const entries = readFileSync(path, 'utf-8')
         .split('\n')
         .filter(line => line.trim())
-        .map(line => JSON.parse(line))
-        .filter((entry: any) => entry.type === 'user' || entry.type === 'assistant')
-        .map((entry: any) => entry.message);
+        .map(line => JSON.parse(line));
+
+      const messages: import('@open-agent/providers').Message[] = [];
+      // Accumulate tool_result blocks to group them into a single user message
+      let pendingToolResults: any[] = [];
+
+      const flushToolResults = () => {
+        if (pendingToolResults.length > 0) {
+          messages.push({ role: 'user', content: pendingToolResults });
+          pendingToolResults = [];
+        }
+      };
+
+      for (const entry of entries) {
+        if (entry.type === 'user') {
+          flushToolResults();
+          messages.push(entry.message);
+        } else if (entry.type === 'assistant') {
+          flushToolResults();
+          messages.push(entry.message);
+        } else if (entry.type === 'tool_result') {
+          const result = (entry as any)._fullResult ?? (entry as any).result ?? '';
+          pendingToolResults.push({
+            type: 'tool_result',
+            tool_use_id: entry.tool_use_id,
+            content: result,
+            is_error: entry.is_error ?? false,
+          });
+        }
+      }
+      flushToolResults();
+      return messages;
     } catch {
       return [];
     }

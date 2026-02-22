@@ -5,4 +5,5 @@ export type { McpServerConfig, McpStdioServerConfig, McpSSEServerConfig, McpHttp
 export * from './types';
 export { McpStdioClient } from './stdio-transport';
 export { McpHttpClient } from './http-transport';
+export { McpSseClient } from './sse-transport';
 export { McpManager } from './manager';

@@ -61,13 +61,39 @@ export class AgentLoader {
     const [, frontmatter, body] = frontmatterMatch;
     const meta: Record<string, unknown> = {};
 
-    // Simple YAML parsing (key: value pairs and inline arrays)
-    for (const line of frontmatter.split('\n')) {
-      const match = line.match(/^(\w+):\s*(.+)$/);
-      if (match) {
-        const [, key, value] = match;
-        // Handle inline arrays: [a, b, c]
-        if (value.startsWith('[') && value.endsWith(']')) {
+    // Simple YAML parsing (key: value pairs, inline arrays, block sequences)
+    const fmLines = frontmatter.split('\n');
+    let currentKey: string | null = null;
+    let blockList: string[] | null = null;
+
+    const flushBlockList = () => {
+      if (currentKey && blockList) {
+        meta[currentKey] = blockList;
+        blockList = null;
+        currentKey = null;
+      }
+    };
+
+    for (const line of fmLines) {
+      // Block sequence item: "  - value"
+      const listItemMatch = line.match(/^\s+-\s+(.+)$/);
+      if (listItemMatch && currentKey) {
+        if (!blockList) blockList = [];
+        blockList.push(listItemMatch[1].replace(/['"]/g, '').trim());
+        continue;
+      }
+
+      // Key-value pair
+      const kvMatch = line.match(/^(\w+):\s*(.*)$/);
+      if (kvMatch) {
+        flushBlockList();
+        const [, key, value] = kvMatch;
+        if (!value.trim()) {
+          // Empty value — expect block sequence on subsequent lines
+          currentKey = key;
+          blockList = [];
+        } else if (value.startsWith('[') && value.endsWith(']')) {
+          // Inline array: [a, b, c]
           meta[key] = value
             .slice(1, -1)
             .split(',')
@@ -77,6 +103,7 @@ export class AgentLoader {
         }
       }
     }
+    flushBlockList();
 
     return {
       description: (meta.description as string) || '',
