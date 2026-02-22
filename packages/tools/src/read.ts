@@ -240,6 +240,27 @@ export function createReadTool(): ToolDefinition {
         throw new Error(`File not found: ${input.file_path}`);
       }
 
+      // Binary file detection: read a small sample and check for null bytes.
+      // This prevents garbled UTF-8 from being sent to the LLM.
+      const stat = statSync(input.file_path);
+      const sampleSize = Math.min(8192, stat.size);
+      if (sampleSize > 0) {
+        const sampleBuf = readFileSync(input.file_path, { flag: 'r' }).subarray(0, sampleSize);
+        if (sampleBuf.includes(0)) {
+          const sizeKb = (stat.size / 1024).toFixed(1);
+          return {
+            type: 'text' as const,
+            file: {
+              filePath: input.file_path,
+              content: `Binary file detected: ${input.file_path} (${sizeKb} KB). Use appropriate tools to process binary files.`,
+              numLines: 1,
+              startLine: 1,
+              totalLines: 1,
+            },
+          };
+        }
+      }
+
       const raw = await file.text();
 
       // Empty file detection

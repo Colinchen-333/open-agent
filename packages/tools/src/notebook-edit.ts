@@ -98,15 +98,14 @@ export function createNotebookEditTool(): ToolDefinition {
       const updatedFile = JSON.stringify(notebook, null, 1);
       writeFileSync(input.notebook_path, updatedFile, 'utf-8');
 
+      // Return terse metadata only — never send full notebook JSON back to the LLM.
       return {
-        new_source: input.new_source,
-        cell_id: input.cell_id,
-        cell_type: cellType,
-        language: notebook.metadata?.kernelspec?.language || 'python',
-        edit_mode: editMode,
         notebook_path: input.notebook_path,
-        original_file: originalFile,
-        updated_file: updatedFile,
+        cell_id: newCell.id ?? input.cell_id,
+        cell_type: cellType,
+        edit_mode: editMode,
+        source_lines: sourceLines.length,
+        language: notebook.metadata?.kernelspec?.language || 'python',
       };
     },
   };

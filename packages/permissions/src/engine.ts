@@ -11,7 +11,7 @@ import type {
 const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion'];
 
 // Tools allowed automatically in acceptEdits mode
-const EDIT_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit'];
+const EDIT_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit', 'WebSearch', 'WebFetch', 'AskUserQuestion'];
 
 // Tools that are always safe regardless of mode (never destructive)
 const SAFE_TOOLS = ['Read', 'Glob', 'Grep', 'AskUserQuestion'];

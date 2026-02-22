@@ -110,7 +110,7 @@ export class ConversationLoop {
    *   - The abort signal fires, or
    *   - The provider throws an error.
    */
-  async *run(userMessage: string): AsyncGenerator<SDKMessage> {
+  async *run(userMessage: string | ContentBlock[]): AsyncGenerator<SDKMessage> {
     const sessionId = this.options.sessionId;
     const startTime = Date.now();
     // Per-run counters track only this invocation; instance-level counters
@@ -448,9 +448,14 @@ export class ConversationLoop {
         // rather than treating it as a final response. This matches Claude
         // Code's behaviour of seamlessly continuing truncated output.
         if (stopReason === 'max_tokens') {
+          // Inject a transient continuation prompt so the LLM picks up where
+          // it left off. We push it to this.messages for the next API call but
+          // mark it so it can be stripped from persistent transcripts.
           this.messages.push({
             role: 'user',
-            content: 'Continue from where you left off. Do not repeat what you already said.',
+            content: 'Continue.',
+            // @ts-expect-error - transient marker, not part of the Message type
+            _transient: true,
           });
           continue; // Loop back to call the LLM again
         }

@@ -13,6 +13,11 @@ export interface CliArgs {
   provider?: string;
   apiKey?: string;
   baseURL?: string;
+  systemPrompt?: string;
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  dangerouslySkipPermissions?: boolean;
+  json?: boolean;
 }
 
 /**
@@ -95,7 +100,7 @@ export function parseArgs(argv: string[]): CliArgs {
 
 /** Flags that are purely boolean and never consume the next token. */
 function isBooleanFlag(key: string): boolean {
-  return ['continue', 'print', 'help', 'version', 'verbose', 'debug'].includes(key);
+  return ['continue', 'print', 'help', 'version', 'verbose', 'debug', 'dangerouslySkipPermissions', 'json'].includes(key);
 }
 
 function isBooleanShort(key: string): boolean {
@@ -150,6 +155,23 @@ function applyLongFlag(result: CliArgs, key: string, value: string | undefined):
       break;
     case 'base-url':
       result.baseURL = value;
+      break;
+    case 'system-prompt':
+      result.systemPrompt = value;
+      break;
+    case 'allowedTools':
+    case 'allowed-tools':
+      result.allowedTools = value?.split(',').map(s => s.trim()).filter(Boolean);
+      break;
+    case 'disallowedTools':
+    case 'disallowed-tools':
+      result.disallowedTools = value?.split(',').map(s => s.trim()).filter(Boolean);
+      break;
+    case 'dangerouslySkipPermissions':
+      result.dangerouslySkipPermissions = value !== 'false';
+      break;
+    case 'json':
+      result.json = value !== 'false';
       break;
     // Unknown flags are silently ignored
   }

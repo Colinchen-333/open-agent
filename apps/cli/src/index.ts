@@ -519,6 +519,7 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------
   // CLI flag > settings.json > 'default'
   const effectivePermissionMode: PermissionMode =
+    args.dangerouslySkipPermissions ? 'bypassPermissions' :
     (args.permissionMode as PermissionMode | undefined) ??
     (settings.permissionMode as PermissionMode | undefined) ??
     'default';
@@ -647,6 +648,23 @@ async function main(): Promise<void> {
   const customInstructions = settings.customInstructions as string | undefined;
   const customInstructionsList: string[] =
     customInstructions ? [customInstructions] : [];
+  // --system-prompt CLI flag appends to custom instructions
+  if (args.systemPrompt) {
+    customInstructionsList.push(args.systemPrompt);
+  }
+
+  // Apply --allowedTools / --disallowedTools filtering
+  if (args.allowedTools && args.allowedTools.length > 0) {
+    const allowed = new Set(args.allowedTools);
+    for (const t of toolRegistry.list()) {
+      if (!allowed.has(t.name)) toolRegistry.unregister(t.name);
+    }
+  }
+  if (args.disallowedTools && args.disallowedTools.length > 0) {
+    for (const name of args.disallowedTools) {
+      toolRegistry.unregister(name);
+    }
+  }
 
   const toolNames = toolRegistry.list().map(t => t.name);
 

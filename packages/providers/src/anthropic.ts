@@ -224,12 +224,28 @@ export class AnthropicProvider implements LLMProvider {
         ? Math.max(options.maxTokens ?? 16384, budgetTokens + 4096)
         : (options.maxTokens ?? 8096);
 
+      // Enable prompt caching on system prompt and tool definitions.
+      // This can reduce costs by up to 90% and latency by 85% on long conversations
+      // where the system prompt and tool specs repeat every turn.
+      const systemParam = system
+        ? [{ type: 'text' as const, text: system, cache_control: { type: 'ephemeral' as const } }]
+        : undefined;
+
+      // Mark the last tool definition for caching so the entire tool list is cached.
+      const cachedTools = tools && tools.length > 0
+        ? tools.map((t, i) =>
+            i === tools.length - 1
+              ? { ...t, cache_control: { type: 'ephemeral' as const } }
+              : t
+          )
+        : undefined;
+
       const baseParams = {
         model: options.model,
         max_tokens: effectiveMaxTokens,
         messages: anthropicMessages,
-        ...(system ? { system } : {}),
-        ...(tools ? { tools } : {}),
+        ...(systemParam ? { system: systemParam } : {}),
+        ...(cachedTools ? { tools: cachedTools } : {}),
         ...(options.temperature !== undefined && !thinkingParam
           ? { temperature: options.temperature }
           : {}),
@@ -341,7 +357,12 @@ export class AnthropicProvider implements LLMProvider {
         }
 
         case 'message_delta':
-          // Carries stop_reason and usage
+          // Carries stop_reason and usage (including cache token counts).
+          yield {
+            type: 'message_delta',
+            delta: (event as any).delta,
+            usage: (event as any).usage,
+          };
           break;
 
         case 'message_stop': {

@@ -27,6 +27,7 @@ export type StreamEvent =
   | { type: 'content_block_start'; index: number; content_block: any }
   | { type: 'content_block_delta'; index: number; delta: any }
   | { type: 'content_block_stop'; index: number }
+  | { type: 'message_delta'; delta: any; usage?: any }
   | { type: 'error'; error: any };
 
 export interface ChatOptions {
