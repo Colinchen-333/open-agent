@@ -206,30 +206,51 @@ export function createReadTool(): ToolDefinition {
         } catch {
           throw new Error(`Failed to parse Jupyter notebook: ${input.file_path}`);
         }
-        const cells = ((notebook.cells ?? []) as any[]).map((cell: any, i: number) => ({
-          index: i,
-          cell_type: cell.cell_type as string,
-          source: Array.isArray(cell.source) ? (cell.source as string[]).join('') : (cell.source as string),
-          outputs: ((cell.outputs ?? []) as any[]).map((o: any) => {
+        // Render notebook cells as human-readable text
+        const parts: string[] = [];
+        const language = notebook.metadata?.kernelspec?.language || 'python';
+        parts.push(`Jupyter Notebook: ${input.file_path} (${language})`);
+        parts.push('');
+
+        const rawCells = (notebook.cells ?? []) as any[];
+        for (let i = 0; i < rawCells.length; i++) {
+          const cell = rawCells[i];
+          const cellType = cell.cell_type as string;
+          const source = Array.isArray(cell.source) ? (cell.source as string[]).join('') : (cell.source as string);
+
+          parts.push(`--- Cell ${i + 1} [${cellType}] ---`);
+          parts.push(source);
+
+          // Render outputs for code cells
+          const outputs = (cell.outputs ?? []) as any[];
+          for (const o of outputs) {
+            let text = '';
             if (o.text) {
-              return {
-                type: 'text' as const,
-                text: Array.isArray(o.text) ? (o.text as string[]).join('') : (o.text as string),
-              };
-            }
-            if (o.data?.['text/plain']) {
+              text = Array.isArray(o.text) ? (o.text as string[]).join('') : (o.text as string);
+            } else if (o.data?.['text/plain']) {
               const plain = o.data['text/plain'];
-              return {
-                type: 'text' as const,
-                text: Array.isArray(plain) ? (plain as string[]).join('') : (plain as string),
-              };
+              text = Array.isArray(plain) ? (plain as string[]).join('') : (plain as string);
             }
-            return { type: o.output_type as string };
-          }),
-        }));
+            if (text) {
+              parts.push(`[Output]`);
+              parts.push(text);
+            } else if (o.output_type === 'error') {
+              parts.push(`[Error: ${o.ename ?? 'Unknown'}] ${o.evalue ?? ''}`);
+            }
+          }
+          parts.push('');
+        }
+
+        const nbContent = parts.join('\n');
         return {
-          type: 'notebook' as const,
-          file: { filePath: input.file_path, cells },
+          type: 'text' as const,
+          file: {
+            filePath: input.file_path,
+            content: nbContent,
+            numLines: nbContent.split('\n').length,
+            startLine: 1,
+            totalLines: nbContent.split('\n').length,
+          },
         };
       }
 

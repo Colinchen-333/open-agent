@@ -381,6 +381,19 @@ export class ConversationLoop {
             // are forwarded via stream_event above but require no content accumulation.
           }
         }
+
+        // Force-close any dangling tool_use if the stream was truncated mid-tool.
+        if (currentToolUse) {
+          let parsedInput: Record<string, unknown> = {};
+          try { parsedInput = JSON.parse(currentToolUse.input || '{}'); } catch { /* partial JSON */ }
+          assistantContent.push({
+            type: 'tool_use',
+            id: currentToolUse.id,
+            name: currentToolUse.name,
+            input: parsedInput,
+          });
+          currentToolUse = null;
+        }
       } catch (error: unknown) {
         const msg = error instanceof Error ? error.message : String(error);
         yield {
@@ -809,6 +822,7 @@ export class ConversationLoop {
             tool_name: toolUse.name,
             tool_use_id: toolUse.id,
             result: `[Image: ${parsed.file_path ?? 'unknown'}]`,
+            _fullResult: resultStr,
             is_error: false,
             uuid: randomUUID(),
             session_id: sessionId,

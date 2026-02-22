@@ -37,14 +37,19 @@ export function convertMessages(
           converted.push({ type: 'text', text: block.text as string });
           break;
 
-        case 'thinking':
-          // Anthropic thinking blocks in assistant messages
-          converted.push({
-            type: 'thinking',
-            thinking: block.thinking as string,
-            signature: (block.signature as string) ?? '',
-          } as Anthropic.Messages.ThinkingBlockParam);
+        case 'thinking': {
+          // Anthropic thinking blocks require a valid cryptographic signature.
+          // Skip blocks with missing/empty signature to avoid API 400 errors.
+          const sig = block.signature as string;
+          if (sig) {
+            converted.push({
+              type: 'thinking',
+              thinking: block.thinking as string,
+              signature: sig,
+            } as Anthropic.Messages.ThinkingBlockParam);
+          }
           break;
+        }
 
         case 'tool_use':
           converted.push({
