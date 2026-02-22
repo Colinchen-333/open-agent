@@ -403,6 +403,30 @@ export class ConversationLoop {
           currentToolUse = null;
         }
       } catch (error: unknown) {
+        // Abort errors should stop the loop immediately and yield a clean result.
+        if (
+          (error instanceof DOMException && error.name === 'AbortError') ||
+          this.options.abortSignal?.aborted
+        ) {
+          yield {
+            type: 'result',
+            subtype: 'error_during_execution',
+            duration_ms: Date.now() - startTime,
+            duration_api_ms: 0,
+            is_error: false,
+            num_turns: this.turnCount,
+            stop_reason: 'interrupted',
+            total_cost_usd: totalCostUsd,
+            usage: { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
+            modelUsage: {},
+            permission_denials: allPermissionDenials,
+            errors: [],
+            uuid: randomUUID(),
+            session_id: sessionId,
+          };
+          return;
+        }
+
         const msg = error instanceof Error ? error.message : String(error);
 
         // If the error is a context-length exceeded error, try to compact and retry.
@@ -773,6 +797,10 @@ export class ConversationLoop {
 
             return { toolUse, resultStr, isError: false, blocked: false, isImageResult };
           } catch (error: unknown) {
+            // Re-throw abort errors so the loop stops immediately on Ctrl+C
+            if (error instanceof DOMException && error.name === 'AbortError') throw error;
+            if (this.options.abortSignal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
             const msg = error instanceof Error ? error.message : String(error);
 
             // ── PostToolUseFailure hook ────────────────────────────────
