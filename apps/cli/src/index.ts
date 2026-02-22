@@ -486,6 +486,8 @@ async function main(): Promise<void> {
         sessionId,
         tools: toolNames,
         checkpoint,
+        sessionMgr,
+        permissionMode: effectivePermissionMode,
       });
       if (result) {
         if (result.shouldExit) break;

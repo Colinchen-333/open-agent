@@ -131,9 +131,10 @@ export function query(params: {
     options.abortController?.abort();
   };
 
-  queryObj.setPermissionMode = async (_mode) => {
-    // Dynamic permission-mode changes are not yet implemented in the core loop.
-    // Documented as a no-op stub for forward compatibility.
+  queryObj.setPermissionMode = async (mode) => {
+    if (mode !== undefined) {
+      loop.setPermissionMode(mode);
+    }
   };
 
   queryObj.setModel = async (newModel) => {

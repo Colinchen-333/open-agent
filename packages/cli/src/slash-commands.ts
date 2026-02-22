@@ -1,4 +1,4 @@
-import type { ConversationLoop, FileCheckpoint } from '@open-agent/core';
+import type { ConversationLoop, FileCheckpoint, SessionManager } from '@open-agent/core';
 
 export interface SlashCommandContext {
   loop: ConversationLoop;
@@ -9,6 +9,10 @@ export interface SlashCommandContext {
   tools?: string[];
   /** File checkpoint instance for /rewind support. */
   checkpoint?: FileCheckpoint;
+  /** Session manager for /sessions listing. */
+  sessionMgr?: SessionManager;
+  /** Current effective permission mode. */
+  permissionMode?: string;
 }
 
 export interface SlashCommandResult {
@@ -56,13 +60,29 @@ const SLASH_COMMANDS: Record<
   '/help': {
     description: 'Show available slash commands',
     handler: async () => {
-      const lines = Object.entries(SLASH_COMMANDS)
-        .filter(([name]) => name !== '/quit') // dedupe quit/exit
-        .map(([name, cmd]) => `  ${name.padEnd(12)} ${cmd.description}`);
-      return {
-        handled: true,
-        output: `Available commands:\n${lines.join('\n')}`,
-      };
+      const output = [
+        'Available commands:',
+        '',
+        '  Session',
+        '    /status          Show session status',
+        '    /sessions        List recent sessions',
+        '    /cost            Show session cost',
+        '    /compact         Compact conversation history',
+        '    /rewind [n]      Rewind file changes',
+        '',
+        '  Tools & Config',
+        '    /tools           List registered tools',
+        '    /model [name]    Show or change model',
+        '    /config          Show current configuration',
+        '    /permissions     Show permission rules',
+        '    /memory          Show auto-memory status',
+        '',
+        '  General',
+        '    /help            Show this help',
+        '    /clear           Clear the terminal',
+        '    /exit, /quit     Exit the REPL',
+      ].join('\n');
+      return { handled: true, output };
     },
   },
   '/status': {
@@ -73,6 +93,32 @@ const SLASH_COMMANDS: Record<
         handled: true,
         output: `Session: ${ctx.sessionId}\nModel: ${ctx.model}\nTurns: ${turns}\nCWD: ${ctx.cwd}`,
       };
+    },
+  },
+  '/sessions': {
+    description: 'List recent sessions for the current directory',
+    handler: async (_args, ctx) => {
+      const sessions = ctx.sessionMgr?.listSessions(ctx.cwd) ?? [];
+      if (sessions.length === 0) return { handled: true, output: 'No sessions found.' };
+      const lines = sessions.slice(0, 10).map((s, i) =>
+        `  ${i + 1}. ${s.id.slice(0, 8)}… | ${s.model} | ${new Date(s.lastActiveAt).toLocaleString()}`
+      );
+      return {
+        handled: true,
+        output: `Recent sessions:\n${lines.join('\n')}\n\nUse --resume <id> to resume.`,
+      };
+    },
+  },
+  '/config': {
+    description: 'Show current effective configuration',
+    handler: async (_args, ctx) => {
+      const lines = [
+        `  Model:           ${ctx.model}`,
+        `  Permission mode: ${ctx.permissionMode ?? 'default'}`,
+        `  CWD:             ${ctx.cwd}`,
+        `  Session:         ${ctx.sessionId}`,
+      ];
+      return { handled: true, output: `Current configuration:\n${lines.join('\n')}` };
     },
   },
   '/memory': {

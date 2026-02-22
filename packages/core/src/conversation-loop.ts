@@ -731,6 +731,14 @@ export class ConversationLoop {
   }
 
   /**
+   * Update the permission mode on the underlying permission engine.
+   * Has no effect if no permissionEngine was supplied at construction time.
+   */
+  setPermissionMode(mode: string): void {
+    (this.options.permissionEngine as any)?.setMode?.(mode);
+  }
+
+  /**
    * Replace the abort signal used for the next (and subsequent) LLM calls.
    * Call this before each user prompt in REPL mode so that a prior Ctrl+C
    * abort does not permanently poison the loop.
