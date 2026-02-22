@@ -735,6 +735,7 @@ async function main(): Promise<void> {
           name: s.name,
           status: s.status,
         })),
+        permissionEngine,
       });
       if (result) {
         if (result.shouldExit) break;
