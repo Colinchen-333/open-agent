@@ -2,8 +2,25 @@
 import { parseArgs, TerminalRenderer, REPL, emitStreamJson, TerminalPermissionPrompter, handleSlashCommand } from '@open-agent/cli';
 import { ConversationLoop, SessionManager, ConfigLoader, AutoMemory, buildSystemPrompt, isGitRepository } from '@open-agent/core';
 import { createProvider, autoDetectProvider, calculateCost } from '@open-agent/providers';
-import { createDefaultToolRegistry, createTaskTool } from '@open-agent/tools';
-import { AgentLoader, AgentRunner } from '@open-agent/agents';
+import {
+  createDefaultToolRegistry,
+  createTaskTool,
+  createEnterPlanModeTool,
+  createExitPlanModeTool,
+  createListMcpResourcesTool,
+  createReadMcpResourceTool,
+  createTaskCreateTool,
+  createTaskUpdateTool,
+  createTaskGetTool,
+  createTaskListTool,
+  createTeamCreateTool,
+  createTeamDeleteTool,
+  createSendMessageTool,
+  createToolSearchTool,
+  createSkillTool,
+} from '@open-agent/tools';
+import { AgentLoader, AgentRunner, TaskManager, TeamManager } from '@open-agent/agents';
+import { McpManager } from '@open-agent/mcp';
 import { PermissionEngine } from '@open-agent/permissions';
 import { HookExecutor } from '@open-agent/hooks';
 import type { SDKMessage } from '@open-agent/core';
@@ -76,18 +93,202 @@ async function main(): Promise<void> {
   toolRegistry.register(taskTool);
 
   // ------------------------------------------------------------------
+  // Plan mode tools
+  // ------------------------------------------------------------------
+  let _planMode = false;
+  const planModeDeps = {
+    enterPlanMode: () => { _planMode = true; },
+    exitPlanMode: (_allowedPrompts?: { tool: string; prompt: string }[]) => { _planMode = false; },
+    isPlanMode: () => _planMode,
+  };
+  toolRegistry.register(createEnterPlanModeTool(planModeDeps));
+  toolRegistry.register(createExitPlanModeTool(planModeDeps));
+
+  // ------------------------------------------------------------------
+  // MCP tools
+  // ------------------------------------------------------------------
+  const configLoader = new ConfigLoader();
+  const settings = configLoader.loadSettings(cwd);
+  const mcpManager = new McpManager();
+
+  // Load MCP server configs from settings (key: mcpServers)
+  const mcpServers = (settings.mcpServers ?? {}) as Record<string, any>;
+  if (Object.keys(mcpServers).length > 0) {
+    // Fire-and-forget: connection errors are recorded on the manager but
+    // should not prevent the CLI from starting.
+    mcpManager.setServers(mcpServers).catch(() => {});
+  }
+
+  toolRegistry.register(createListMcpResourcesTool({
+    listResources: async (server?: string) => {
+      const all = await mcpManager.getAllResources();
+      return server ? all.filter(r => r.server === server) : all;
+    },
+    readResource: async (server: string, uri: string) => {
+      const result = await mcpManager.readResource(server, uri);
+      return typeof result === 'string' ? result : JSON.stringify(result);
+    },
+  }));
+
+  toolRegistry.register(createReadMcpResourceTool({
+    listResources: async (server?: string) => {
+      const all = await mcpManager.getAllResources();
+      return server ? all.filter(r => r.server === server) : all;
+    },
+    readResource: async (server: string, uri: string) => {
+      const result = await mcpManager.readResource(server, uri);
+      return typeof result === 'string' ? result : JSON.stringify(result);
+    },
+  }));
+
+  // ------------------------------------------------------------------
+  // Task management tools (TaskCreate / TaskUpdate / TaskGet / TaskList)
+  // ------------------------------------------------------------------
+  // Use a stable default team name scoped to this session's cwd so tasks
+  // persist across --continue invocations.
+  const defaultTeamName = 'default';
+  const taskManager = new TaskManager(defaultTeamName);
+
+  const taskToolsDeps = {
+    createTask: async (params: { subject: string; description: string; activeForm?: string; metadata?: Record<string, unknown> }) => {
+      const item = taskManager.create(params.subject, params.description, params.activeForm, params.metadata);
+      return { id: item.id, subject: item.subject };
+    },
+    updateTask: async (params: { taskId: string; [key: string]: unknown }) => {
+      taskManager.update(params.taskId, params as any);
+      return { success: true };
+    },
+    getTask: async (taskId: string) => taskManager.get(taskId),
+    listTasks: async () => taskManager.listAll(),
+  };
+
+  toolRegistry.register(createTaskCreateTool(taskToolsDeps));
+  toolRegistry.register(createTaskUpdateTool(taskToolsDeps));
+  toolRegistry.register(createTaskGetTool(taskToolsDeps));
+  toolRegistry.register(createTaskListTool(taskToolsDeps));
+
+  // ------------------------------------------------------------------
+  // Team tools (TeamCreate / TeamDelete / SendMessage)
+  // ------------------------------------------------------------------
+  const teamManager = new TeamManager();
+  const teamToolsDeps = {
+    createTeam: async (name: string, description?: string) => {
+      teamManager.createTeam(name, description);
+      const configPath = join(homedir(), '.open-agent', 'teams', name, 'config.json');
+      return { teamName: name, configPath };
+    },
+    deleteTeam: async (name: string) => {
+      teamManager.deleteTeam(name);
+      return { success: true };
+    },
+    sendMessage: async (params: {
+      type: 'message' | 'broadcast' | 'shutdown_request' | 'shutdown_response' | 'plan_approval_response';
+      recipient?: string;
+      content?: string;
+      summary?: string;
+      approve?: boolean;
+      request_id?: string;
+    }) => {
+      // In standalone CLI mode there is no active team context, so we write
+      // to a default team inbox so that actual teammate processes can pick it up.
+      const activeTeam = (settings.activeTeam as string) ?? defaultTeamName;
+      teamManager.sendMessage(activeTeam, {
+        type: params.type,
+        from: 'cli',
+        to: params.recipient,
+        content: params.content ?? '',
+        summary: params.summary,
+        timestamp: new Date().toISOString(),
+        requestId: params.request_id,
+        approve: params.approve,
+      });
+      return { success: true, message: 'Message sent' };
+    },
+  };
+
+  toolRegistry.register(createTeamCreateTool(teamToolsDeps));
+  toolRegistry.register(createTeamDeleteTool(teamToolsDeps));
+  toolRegistry.register(createSendMessageTool(teamToolsDeps));
+
+  // ------------------------------------------------------------------
+  // ToolSearch tool — enables deferred/lazy tool loading
+  // ------------------------------------------------------------------
+  toolRegistry.register(createToolSearchTool({
+    searchTools: async (query: string) => {
+      const q = query.toLowerCase();
+      return toolRegistry.list()
+        .filter(t => t.name.toLowerCase().includes(q) || t.description.toLowerCase().includes(q))
+        .map(t => ({ name: t.name, description: t.description }));
+    },
+    selectTool: async (name: string) => {
+      return toolRegistry.get(name) ?? null;
+    },
+  }));
+
+  // ------------------------------------------------------------------
+  // Skill tool — execute named slash-command skills
+  // ------------------------------------------------------------------
+  toolRegistry.register(createSkillTool({
+    executeSkill: async (name: string, skillArgs?: string) => {
+      // Skills are stored as markdown files under ~/.open-agent/skills/ or
+      // <cwd>/.open-agent/skills/.  For now we return a stub so the tool is
+      // registered and the LLM can call it; a full executor can be wired later.
+      const skillDirs = [
+        join(homedir(), '.open-agent', 'skills'),
+        join(cwd, '.open-agent', 'skills'),
+      ];
+      for (const dir of skillDirs) {
+        const skillPath = join(dir, `${name}.md`);
+        if (existsSync(skillPath)) {
+          const content = readFileSync(skillPath, 'utf-8');
+          return `Skill "${name}" loaded. Content:\n\n${content}\nArgs: ${skillArgs ?? '(none)'}`;
+        }
+      }
+      return `Skill "${name}" not found. Searched: ${skillDirs.join(', ')}`;
+    },
+    listSkills: () => {
+      const skills: { name: string; description: string }[] = [];
+      const skillDirs = [
+        join(homedir(), '.open-agent', 'skills'),
+        join(cwd, '.open-agent', 'skills'),
+      ];
+      for (const dir of skillDirs) {
+        if (existsSync(dir)) {
+          try {
+            const { readdirSync: readDir } = require('fs') as typeof import('fs');
+            const files = readDir(dir).filter((f: string) => f.endsWith('.md'));
+            for (const f of files) {
+              skills.push({ name: f.replace(/\.md$/, ''), description: `Skill from ${dir}` });
+            }
+          } catch {
+            // Directory unreadable — skip
+          }
+        }
+      }
+      return skills;
+    },
+  }));
+
+  // ------------------------------------------------------------------
   // Session management
   // ------------------------------------------------------------------
   const sessionMgr = new SessionManager();
   let sessionId: string;
+  let initialMessages: import('@open-agent/providers').Message[] = [];
 
   if (args.resume) {
-    // Resume an explicit session by ID.
+    // Resume an explicit session by ID — restore its conversation history.
     sessionId = args.resume;
+    initialMessages = sessionMgr.loadTranscript(cwd, sessionId);
   } else if (args.continue) {
     // Continue from the most recent session for this CWD, or create one.
     const latest = sessionMgr.getLatestSession(cwd);
-    sessionId = latest ? latest.id : sessionMgr.createSession(cwd, model).id;
+    if (latest) {
+      sessionId = latest.id;
+      initialMessages = sessionMgr.loadTranscript(cwd, sessionId);
+    } else {
+      sessionId = sessionMgr.createSession(cwd, model).id;
+    }
   } else {
     sessionId = sessionMgr.createSession(cwd, model).id;
   }
@@ -111,7 +312,7 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------
   // AGENT.md config and Auto-Memory
   // ------------------------------------------------------------------
-  const configLoader = new ConfigLoader();
+  // Note: configLoader was already instantiated above for MCP settings.
   const agentInstructions = configLoader.loadAgentMd(cwd);
   const autoMemory = new AutoMemory(cwd);
   const memoryContent = autoMemory.readMemory();
@@ -177,6 +378,7 @@ async function main(): Promise<void> {
     permissionPrompter,
     hookExecutor,
     costCalculator: calculateCost,
+    initialMessages: initialMessages.length > 0 ? initialMessages : undefined,
   });
 
   const renderer = new TerminalRenderer();

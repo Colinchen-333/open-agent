@@ -9,6 +9,8 @@ import {
 } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
+import type { SDKMessage } from './types.js';
+import type { Message } from '@open-agent/providers';
 
 export interface SessionInfo {
   id: string;
@@ -127,6 +129,41 @@ export class SessionManager {
       .split('\n')
       .filter((line) => line.trim().length > 0)
       .map((line) => JSON.parse(line));
+  }
+
+  /**
+   * Read the transcript for a session and reconstruct conversation history as
+   * provider-compatible `Message` objects suitable for passing as `initialMessages`
+   * to `ConversationLoop`.
+   *
+   * Only 'user' and 'assistant' SDKMessages are included — stream_event,
+   * tool_result, result, and system messages are skipped because they are
+   * informational records, not conversation turns.
+   *
+   * For assistant messages the content blocks (text, thinking, tool_use) are
+   * pulled from `message.message.content`.  For user messages the raw string
+   * prompt is used when `message.message.content` is a string, or the content
+   * block array otherwise.
+   */
+  loadTranscript(cwd: string, sessionId: string): Message[] {
+    const raw = this.readTranscript(cwd, sessionId) as SDKMessage[];
+    const messages: Message[] = [];
+
+    for (const entry of raw) {
+      if (entry.type === 'user') {
+        const content = (entry as any).message?.content;
+        if (content === undefined || content === null) continue;
+        messages.push({ role: 'user', content });
+      } else if (entry.type === 'assistant') {
+        const content = (entry as any).message?.content;
+        if (!content) continue;
+        // Reconstruct a proper assistant Message with content blocks.
+        messages.push({ role: 'assistant', content });
+      }
+      // All other types (stream_event, tool_result, result, system) are skipped.
+    }
+
+    return messages;
   }
 
   /**

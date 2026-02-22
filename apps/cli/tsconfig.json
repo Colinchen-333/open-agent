@@ -10,6 +10,10 @@
     "../../packages/cli/src",
     "../../packages/core/src",
     "../../packages/providers/src",
-    "../../packages/tools/src"
+    "../../packages/tools/src",
+    "../../packages/agents/src",
+    "../../packages/mcp/src",
+    "../../packages/permissions/src",
+    "../../packages/hooks/src"
   ]
 }

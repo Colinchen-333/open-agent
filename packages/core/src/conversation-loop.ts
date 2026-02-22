@@ -56,6 +56,8 @@ export interface ConversationLoopOptions {
   hookExecutor?: LoopHookExecutor;
   compactThreshold?: number; // 触发压缩的估算 token 数，默认 100000
   costCalculator?: (model: string, inputTokens: number, outputTokens: number) => number;
+  /** Pre-populate conversation history when resuming a session. */
+  initialMessages?: Message[];
 }
 
 // Internal marker type for tracking open content blocks during accumulation.
@@ -69,6 +71,10 @@ export class ConversationLoop {
 
   constructor(options: ConversationLoopOptions) {
     this.options = options;
+    // Restore prior conversation history when resuming a session.
+    if (options.initialMessages && options.initialMessages.length > 0) {
+      this.messages = [...options.initialMessages];
+    }
   }
 
   /**
