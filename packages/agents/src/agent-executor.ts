@@ -43,6 +43,8 @@ export interface ExecuteOptions {
   resume?: string;
   /** Pre-created worktree path — when set, agent runs inside this worktree */
   worktreePath?: string;
+  /** Callback to clean up the worktree after background agent completes */
+  onWorktreeCleanup?: (worktreePath: string, hasChanges: boolean) => Promise<void>;
 }
 
 /**
@@ -245,6 +247,22 @@ export class AgentExecutor {
         // Fire SubagentStop hook on failure
         await this.fireSubagentStop(agentId, agentType, session.error, options.cwd);
       }
+
+      // Clean up worktree for background agents
+      if (options.worktreePath && options.onWorktreeCleanup) {
+        try {
+          // Determine if worktree has changes (conservatively assume yes on error)
+          let hasChanges = true;
+          try {
+            const result = Bun.spawnSync(['git', 'status', '--porcelain'], { cwd: options.worktreePath });
+            hasChanges = (new TextDecoder().decode(result.stdout)).trim().length > 0;
+          } catch { /* assume changes */ }
+          await options.onWorktreeCleanup(options.worktreePath, hasChanges);
+        } catch {
+          // Non-fatal — worktree cleanup failure shouldn't crash the agent
+        }
+      }
+
       this.saveSession(session);
     })();
 
