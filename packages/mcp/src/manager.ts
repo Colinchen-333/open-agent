@@ -1,46 +1,54 @@
 import type {
   McpServerConfig,
   McpStdioServerConfig,
+  McpSSEServerConfig,
+  McpHttpServerConfig,
 } from '@open-agent/core';
 import { McpStdioClient } from './stdio-transport';
+import { McpHttpClient } from './http-transport';
 import type { McpServerConnection, McpToolInfo, McpResourceInfo } from './types';
+
+// Union type of all client types we maintain
+type AnyMcpClient = McpStdioClient | McpHttpClient;
 
 export class McpManager {
   private connections: Map<string, McpServerConnection> = new Map();
-  private clients: Map<string, McpStdioClient> = new Map();
+  private clients: Map<string, AnyMcpClient> = new Map();
 
-  // 添加并连接服务器
+  // ── Server lifecycle ──────────────────────────────────────────────────────
+
+  /**
+   * Add a single server by name and config, then attempt to connect.
+   * Returns the resulting connection record.
+   */
   async addServer(name: string, config: McpServerConfig): Promise<McpServerConnection> {
     const connection: McpServerConnection = {
       name,
       config,
-      status: 'pending',
+      status: 'connecting',
       tools: [],
+      enabled: true,
     };
     this.connections.set(name, connection);
 
     try {
-      if (!config.type || config.type === 'stdio') {
-        const stdioConfig = config as McpStdioServerConfig;
-        const client = new McpStdioClient(name, stdioConfig);
-        this.clients.set(name, client);
+      const client = this.createClient(name, config);
 
+      if (client) {
+        this.clients.set(name, client);
         const serverInfo = await client.connect();
         connection.serverInfo = serverInfo
           ? { name: serverInfo.name, version: serverInfo.version }
           : undefined;
         connection.tools = await client.listTools();
         connection.status = 'connected';
-      } else if (config.type === 'sse' || config.type === 'http') {
-        // SSE 和 HTTP 传输 - 简化实现，后续可扩展
+      } else {
+        // sdk type or unknown — mark connected with no tools (in-process server)
         connection.status = 'connected';
         connection.tools = [];
-      } else {
-        connection.status = 'failed';
-        connection.error = `Unsupported transport type: ${(config as any).type}`;
       }
     } catch (error: unknown) {
-      connection.status = 'failed';
+      connection.status = 'error';
       connection.error = error instanceof Error ? error.message : String(error);
     }
 
@@ -48,7 +56,10 @@ export class McpManager {
     return connection;
   }
 
-  // 批量设置服务器（仅添加新增的，移除已删除的）
+  /**
+   * Set the full server configuration, connecting new servers and
+   * disconnecting servers no longer present in the config.
+   */
   async setServers(servers: Record<string, McpServerConfig>): Promise<{
     added: string[];
     removed: string[];
@@ -60,15 +71,15 @@ export class McpManager {
       errors: {} as Record<string, string>,
     };
 
-    // 移除不在新配置中的服务器
-    for (const name of this.connections.keys()) {
+    // Remove servers not in the new config
+    for (const name of [...this.connections.keys()]) {
       if (!(name in servers)) {
         await this.removeServer(name);
         result.removed.push(name);
       }
     }
 
-    // 添加新服务器
+    // Add new servers (skip already-connected ones)
     for (const [name, config] of Object.entries(servers)) {
       if (!this.connections.has(name)) {
         const conn = await this.addServer(name, config);
@@ -80,32 +91,106 @@ export class McpManager {
     return result;
   }
 
-  // 移除并断开服务器
+  /**
+   * Disconnect and remove a server by name.
+   */
   async removeServer(name: string): Promise<void> {
     const client = this.clients.get(name);
     if (client) {
       try {
         await client.disconnect();
       } catch {
-        // 忽略断开时的错误
+        // ignore disconnect errors
       }
       this.clients.delete(name);
     }
     this.connections.delete(name);
   }
 
-  // 调用工具
-  async callTool(
-    serverName: string,
-    toolName: string,
-    args: Record<string, unknown>
-  ): Promise<any> {
-    const client = this.clients.get(serverName);
-    if (!client) throw new Error(`MCP server '${serverName}' not connected`);
-    return client.callTool(toolName, args);
+  /**
+   * Reconnect a specific server (disconnect → connect).
+   * Alias: `reconnectServer(name)`
+   */
+  async reconnect(name: string): Promise<void> {
+    const conn = this.connections.get(name);
+    if (!conn) throw new Error(`MCP server '${name}' not found`);
+    const savedConfig = conn.config;
+    await this.removeServer(name);
+    await this.addServer(name, savedConfig);
   }
 
-  // 获取所有已连接服务器的工具列表
+  /** Alias for `reconnect` — matches Claude Code's API */
+  async reconnectServer(name: string): Promise<void> {
+    return this.reconnect(name);
+  }
+
+  /**
+   * Enable or disable a server without removing its config.
+   * Disabling disconnects the transport but preserves the config for re-enabling.
+   * Alias: `toggleServer(name, enabled)`
+   */
+  async toggle(name: string, enabled: boolean): Promise<void> {
+    const conn = this.connections.get(name);
+    if (!conn) throw new Error(`MCP server '${name}' not found`);
+
+    if (enabled && conn.status === 'disabled') {
+      // Re-enable: restore connection using saved config
+      const savedConfig = conn.config;
+      await this.removeServer(name);
+      await this.addServer(name, savedConfig);
+      const refreshed = this.connections.get(name);
+      if (refreshed) refreshed.enabled = true;
+    } else if (!enabled && conn.status !== 'disabled') {
+      // Disable: disconnect transport but keep connection record
+      const client = this.clients.get(name);
+      if (client) {
+        try {
+          await client.disconnect();
+        } catch {
+          // ignore
+        }
+        this.clients.delete(name);
+      }
+      conn.status = 'disabled';
+      conn.enabled = false;
+      this.connections.set(name, conn);
+    }
+  }
+
+  /** Alias for `toggle` — matches Claude Code's API */
+  async toggleServer(name: string, enabled: boolean): Promise<void> {
+    return this.toggle(name, enabled);
+  }
+
+  /**
+   * Disconnect all servers (graceful shutdown).
+   */
+  async disconnectAll(): Promise<void> {
+    for (const name of [...this.clients.keys()]) {
+      await this.removeServer(name);
+    }
+  }
+
+  // ── Status ────────────────────────────────────────────────────────────────
+
+  /**
+   * Return status records for all configured servers.
+   * Alias: `getServerStatus()`
+   */
+  getStatus(): McpServerConnection[] {
+    return Array.from(this.connections.values());
+  }
+
+  /** Alias for `getStatus` — matches Claude Code's API */
+  getServerStatus(): McpServerConnection[] {
+    return this.getStatus();
+  }
+
+  // ── Tool discovery ────────────────────────────────────────────────────────
+
+  /**
+   * Return all tools from all connected servers.
+   */
   getAllTools(): McpToolInfo[] {
     const tools: McpToolInfo[] = [];
     for (const conn of this.connections.values()) {
@@ -116,7 +201,24 @@ export class McpManager {
     return tools;
   }
 
-  // 获取所有已连接服务器的资源列表
+  /**
+   * Execute a tool on a specific server.
+   */
+  async callTool(
+    serverName: string,
+    toolName: string,
+    args: Record<string, unknown>
+  ): Promise<any> {
+    const client = this.clients.get(serverName);
+    if (!client) throw new Error(`MCP server '${serverName}' not connected`);
+    return client.callTool(toolName, args);
+  }
+
+  // ── Resource access ───────────────────────────────────────────────────────
+
+  /**
+   * List resources from all connected servers.
+   */
   async getAllResources(): Promise<McpResourceInfo[]> {
     const resources: McpResourceInfo[] = [];
     for (const [name, client] of this.clients.entries()) {
@@ -126,63 +228,53 @@ export class McpManager {
           const serverResources = await client.listResources();
           resources.push(...serverResources);
         } catch {
-          // 忽略单个服务器的资源列举错误
+          // skip servers that don't support resources
         }
       }
     }
     return resources;
   }
 
-  // 读取指定资源内容
+  /**
+   * Read the content of a specific resource from a named server.
+   */
   async readResource(serverName: string, uri: string): Promise<any> {
     const client = this.clients.get(serverName);
     if (!client) throw new Error(`MCP server '${serverName}' not connected`);
     return client.readResource(uri);
   }
 
-  // 获取所有服务器的连接状态
-  getStatus(): McpServerConnection[] {
-    return Array.from(this.connections.values());
-  }
+  // ── Private helpers ───────────────────────────────────────────────────────
 
-  // 重新连接指定服务器
-  async reconnect(name: string): Promise<void> {
-    const conn = this.connections.get(name);
-    if (!conn) throw new Error(`MCP server '${name}' not found`);
-    const savedConfig = conn.config;
-    await this.removeServer(name);
-    await this.addServer(name, savedConfig);
-  }
+  /**
+   * Instantiate the correct transport client for the given config.
+   * Returns null for sdk-type (in-process) servers.
+   */
+  private createClient(name: string, config: McpServerConfig): AnyMcpClient | null {
+    const type = (config as any).type;
 
-  // 启用或禁用指定服务器
-  async toggle(name: string, enabled: boolean): Promise<void> {
-    const conn = this.connections.get(name);
-    if (!conn) throw new Error(`MCP server '${name}' not found`);
-
-    if (enabled && conn.status === 'disabled') {
-      // 重新连接已禁用的服务器
-      await this.removeServer(name);
-      await this.addServer(name, conn.config);
-    } else if (!enabled && conn.status !== 'disabled') {
-      // 断开连接并标记为禁用，保留配置
-      const client = this.clients.get(name);
-      if (client) {
-        try {
-          await client.disconnect();
-        } catch {
-          // 忽略断开错误
-        }
-        this.clients.delete(name);
-      }
-      conn.status = 'disabled';
-      this.connections.set(name, conn);
+    if (!type || type === 'stdio') {
+      const stdioConfig = config as McpStdioServerConfig;
+      return new McpStdioClient(name, stdioConfig);
     }
-  }
 
-  // 断开所有服务器连接
-  async disconnectAll(): Promise<void> {
-    for (const name of [...this.clients.keys()]) {
-      await this.removeServer(name);
+    if (type === 'http') {
+      const httpConfig = config as McpHttpServerConfig;
+      return new McpHttpClient(name, httpConfig.url, httpConfig.headers);
     }
+
+    if (type === 'sse') {
+      // SSE servers use the same HTTP JSON-RPC discovery protocol.
+      // Streaming notifications are not proxied — only tool/resource calls matter.
+      const sseConfig = config as McpSSEServerConfig;
+      return new McpHttpClient(name, sseConfig.url, sseConfig.headers);
+    }
+
+    if (type === 'sdk') {
+      // In-process MCP server — no client needed; tools registered separately.
+      return null;
+    }
+
+    throw new Error(`Unsupported MCP transport type: '${type}' for server '${name}'`);
   }
 }

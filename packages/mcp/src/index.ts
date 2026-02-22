@@ -4,4 +4,5 @@
 export type { McpServerConfig, McpStdioServerConfig, McpSSEServerConfig, McpHttpServerConfig, McpSdkServerConfig } from '@open-agent/core';
 export * from './types';
 export { McpStdioClient } from './stdio-transport';
+export { McpHttpClient } from './http-transport';
 export { McpManager } from './manager';

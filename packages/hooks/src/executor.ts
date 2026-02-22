@@ -170,13 +170,30 @@ export class HookExecutor {
   ): Promise<HookOutput> {
     const inputJson = JSON.stringify(input);
 
+    // Build convenience env vars so shell hooks can access common fields without
+    // parsing the full HOOK_INPUT JSON.
+    const extraEnv: Record<string, string> = {
+      HOOK_INPUT: inputJson,
+      HOOK_EVENT: input.hook_event_name,
+    };
+    if ('tool_name' in input) {
+      extraEnv.HOOK_TOOL_NAME = (input as { tool_name: string }).tool_name;
+    }
+    if ('tool_input' in input) {
+      try {
+        extraEnv.HOOK_TOOL_INPUT = JSON.stringify((input as { tool_input: unknown }).tool_input);
+      } catch {
+        extraEnv.HOOK_TOOL_INPUT = '';
+      }
+    }
+
     const proc = Bun.spawn(['bash', '-c', hook.command], {
       stdin: 'pipe',
       stdout: 'pipe',
       stderr: 'pipe',
       env: {
         ...process.env,
-        HOOK_INPUT: inputJson,
+        ...extraEnv,
       },
     });
 

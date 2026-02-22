@@ -16,9 +16,11 @@ const EDIT_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit'];
 // Tools that are always safe regardless of mode (never destructive)
 const SAFE_TOOLS = ['Read', 'Glob', 'Grep', 'AskUserQuestion'];
 
-// Patterns that indicate a potentially destructive or privileged command
+// Patterns that indicate a potentially destructive or privileged command.
+// Matches Claude Code's dangerous command detection list.
 const DANGEROUS_COMMAND_PATTERNS = [
   /\brm\s+(-rf?|-r\s+-f|-f\s+-r|--recursive)\b/,
+  /\bgit\s+push(\s+--force|-f)\b/,
   /\bgit\s+push\b/,
   /\bgit\s+reset\s+--hard\b/,
   /\bgit\s+checkout\s+\.\b/,
@@ -28,10 +30,17 @@ const DANGEROUS_COMMAND_PATTERNS = [
   /\bchown\b/,
   /\bmkfs\b/,
   /\bdd\s+/,
+  /\bkill\s+-9\b/,
+  /\bpkill\b/,
   />\s*\/dev\//,
+  // Output redirection to a file (> or >>) — can overwrite important files
+  /[^>]>{1,2}\s*\S/,
   /\bcurl\b.*\|\s*bash\b/,
   /\bwget\b.*\|\s*bash\b/,
 ];
+
+// File-system tools that operate on paths — subject to allowedPaths/deniedPaths checks
+const FILE_SYSTEM_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit'];
 
 export class PermissionEngine {
   private mode: PermissionMode;
@@ -41,6 +50,8 @@ export class PermissionEngine {
     ask: PermissionRule[];
   };
   private sandbox: SandboxConfig;
+  private allowedPaths: string[];
+  private deniedPaths: string[];
 
   constructor(config?: Partial<PermissionConfig & { sandbox: SandboxConfig }>) {
     this.mode = config?.mode ?? 'default';
@@ -50,6 +61,8 @@ export class PermissionEngine {
       ask: config?.askRules ?? [],
     };
     this.sandbox = config?.sandbox ?? { enabled: false };
+    this.allowedPaths = config?.allowedPaths ?? [];
+    this.deniedPaths = config?.deniedPaths ?? [];
   }
 
   /**
@@ -69,6 +82,13 @@ export class PermissionEngine {
     // 1. bypassPermissions: skip all checks
     if (this.mode === 'bypassPermissions') {
       return { behavior: 'allow', reason: 'bypass mode' };
+    }
+
+    // 1b. File system path restrictions — checked after bypassPermissions but
+    //     before all other rules so they can't be bypassed by allow rules.
+    if (FILE_SYSTEM_TOOLS.includes(request.toolName)) {
+      const pathDecision = this.checkPathRestrictions(request);
+      if (pathDecision) return pathDecision;
     }
 
     // 2. plan mode: only read-only tools permitted
@@ -226,5 +246,106 @@ export class PermissionEngine {
 
   getSandboxConfig(): SandboxConfig {
     return this.sandbox;
+  }
+
+  /**
+   * Return a human-readable summary of the current permission configuration.
+   * Used by the /permissions slash command.
+   */
+  getSummary(): {
+    mode: PermissionMode;
+    allowRules: PermissionRule[];
+    denyRules: PermissionRule[];
+    askRules: PermissionRule[];
+    allowedPaths: string[];
+    deniedPaths: string[];
+  } {
+    return {
+      mode: this.mode,
+      allowRules: [...this.rules.allow],
+      denyRules: [...this.rules.deny],
+      askRules: [...this.rules.ask],
+      allowedPaths: [...this.allowedPaths],
+      deniedPaths: [...this.deniedPaths],
+    };
+  }
+
+  setAllowedPaths(paths: string[]): void {
+    this.allowedPaths = paths;
+  }
+
+  setDeniedPaths(paths: string[]): void {
+    this.deniedPaths = paths;
+  }
+
+  /**
+   * Load permission rules from a settings object.
+   * Typically called with the parsed settings.json content.
+   *
+   * Expected shape:
+   * ```json
+   * {
+   *   "permissions": {
+   *     "allow": [{ "toolName": "Read" }, { "toolName": "Bash", "ruleContent": "ls *" }],
+   *     "deny":  [{ "toolName": "Bash", "ruleContent": "rm -rf *" }],
+   *     "ask":   [{ "toolName": "Write" }]
+   *   }
+   * }
+   * ```
+   */
+  loadFromSettings(settings: Record<string, any>): void {
+    const perms = settings.permissions;
+    if (!perms) return;
+
+    for (const rule of (perms.allow ?? []) as PermissionRule[]) {
+      this.addRule('allow', rule);
+    }
+    for (const rule of (perms.deny ?? []) as PermissionRule[]) {
+      this.addRule('deny', rule);
+    }
+    for (const rule of (perms.ask ?? []) as PermissionRule[]) {
+      this.addRule('ask', rule);
+    }
+  }
+
+  // ── Private helpers ──────────────────────────────────────────────────────────
+
+  /**
+   * Check whether a file-system tool request is blocked by path restrictions.
+   * Returns a PermissionDecision if the request should be denied, or null to
+   * continue normal evaluation.
+   *
+   * Priority:
+   *   1. deniedPaths — always deny if the path starts with any denied prefix
+   *   2. allowedPaths — deny if allowedPaths is non-empty and path is outside all of them
+   */
+  private checkPathRestrictions(request: PermissionRequest): PermissionDecision | null {
+    const filePath = String(
+      (request.input as Record<string, unknown>)?.file_path ??
+      (request.input as Record<string, unknown>)?.pattern ??
+      ''
+    );
+
+    if (!filePath) return null;
+
+    // Denied paths take precedence
+    for (const denied of this.deniedPaths) {
+      if (filePath.startsWith(denied)) {
+        return { behavior: 'deny', reason: `path is in denied list: ${denied}` };
+      }
+    }
+
+    // If allowed paths are configured, the file must be inside at least one
+    if (this.allowedPaths.length > 0) {
+      const inAllowed = this.allowedPaths.some(allowed => filePath.startsWith(allowed));
+      if (!inAllowed) {
+        return {
+          behavior: 'deny',
+          reason: `path is outside allowed directories: ${this.allowedPaths.join(', ')}`,
+        };
+      }
+    }
+
+    return null;
   }
 }

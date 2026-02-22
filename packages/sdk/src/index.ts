@@ -1,19 +1,32 @@
 // @open-agent/sdk – Public SDK API for embedding open-agent in other projects
 //
 // Surface:
-//   - query()                        V1 streaming API
-//   - unstable_v2_prompt()           V2 one-shot helper
-//   - unstable_v2_createSession()    V2 stateful session
-//   - unstable_v2_resumeSession()    V2 session resumption
-//   - createSdkMcpServer() / tool()  MCP in-process server helpers
+//   query(prompt, options?)                  Primary streaming API (Claude Code style)
+//   createSession(options?)                  Multi-turn session (stable)
+//   resumeSession(sessionId, options?)       Resume a session with transcript (stable)
+//   unstable_v2_prompt()                     Legacy one-shot helper
+//   unstable_v2_createSession()              Legacy stateful session
+//   unstable_v2_resumeSession()              Legacy session resumption
+//   createSdkMcpServer() / tool()            MCP in-process server helpers
 
 export * from './types.js';
+
+// Primary V1 API
 export { query } from './query.js';
+export type { QueryOptions } from './types.js';
+
+// Stable V2 session API
+export { createSession, resumeSession } from './session.js';
+export type { SDKSession } from './session.js';
+
+// Legacy V2 API (preserved for backwards compatibility)
 export {
   unstable_v2_prompt,
   unstable_v2_createSession,
   unstable_v2_resumeSession,
 } from './session.js';
+
+// MCP helpers
 export {
   createSdkMcpServer,
   tool,
@@ -42,3 +55,6 @@ export type {
   ModelUsage,
   SlashCommand,
 } from '@open-agent/core';
+
+// Provider Message type for low-level usage
+export type { Message } from '@open-agent/providers';

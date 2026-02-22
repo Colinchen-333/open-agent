@@ -5,6 +5,8 @@ import { createProvider, autoDetectProvider, calculateCost } from '@open-agent/p
 import {
   createDefaultToolRegistry,
   createTaskTool,
+  createTaskOutputTool,
+  createTaskStopTool,
   createEnterPlanModeTool,
   createExitPlanModeTool,
   createListMcpResourcesTool,
@@ -19,8 +21,11 @@ import {
   createToolSearchTool,
   createSkillTool,
   getToolPromptDescriptions,
+  createWorktree,
+  cleanupWorktree,
+  hasWorktreeChanges,
 } from '@open-agent/tools';
-import { AgentLoader, AgentRunner, TaskManager, TeamManager } from '@open-agent/agents';
+import { AgentLoader, AgentExecutor, TaskManager, TeamManager } from '@open-agent/agents';
 import { McpManager } from '@open-agent/mcp';
 import { PermissionEngine } from '@open-agent/permissions';
 import { HookExecutor } from '@open-agent/hooks';
@@ -80,25 +85,139 @@ async function main(): Promise<void> {
   const agentLoader = new AgentLoader();
   agentLoader.loadDefaults(cwd);
 
+  // agentExecutor is initialized after hookExecutor is built (below) so it
+  // can receive the hook executor for SubagentStart/Stop events.
+  let agentExecutor: AgentExecutor;
+
   const taskTool = createTaskTool({
-    runSubagent: async ({ prompt, subagentType, name: _name, model: _model, cwd: agentCwd }) => {
+    runSubagent: async ({ prompt, subagentType, name, model: agentModel, cwd: agentCwd, maxTurns, mode, isolation, runInBackground, resume, teamName }) => {
       const agentDef = agentLoader.get(subagentType);
       if (!agentDef) {
-        throw new Error(`Unknown agent type: ${subagentType}`);
+        const available = agentLoader.list().map(([n]: [string, unknown]) => n).join(', ');
+        throw new Error(`Unknown agent type: ${subagentType}. Available: ${available}`);
       }
 
-      const runner = new AgentRunner({
+      const effectiveCwd = agentCwd ?? cwd;
+
+      // --- Worktree setup ---
+      let worktreePath: string | undefined;
+      let worktreeBranch: string | undefined;
+
+      if (isolation === 'worktree') {
+        const worktreeName = name ?? `agent-${resume ?? Date.now()}`;
+        try {
+          const wt = await createWorktree(effectiveCwd, worktreeName);
+          worktreePath = wt.path;
+          worktreeBranch = wt.branch;
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new Error(`Failed to create worktree: ${msg}`);
+        }
+      }
+
+      const executeOptions = {
         definition: agentDef,
         provider,
         tools: new Map(toolRegistry.list().map((t) => [t.name, t])),
-        cwd: agentCwd,
-      });
+        prompt,
+        cwd: effectiveCwd,
+        name,
+        model: agentModel,
+        maxTurns,
+        mode: mode ?? agentDef.mode,
+        teamName,
+        isolation,
+        runInBackground,
+        resume,
+        worktreePath,
+      };
 
-      return runner.run(prompt);
+      if (runInBackground) {
+        const { agentId, outputFile } = await agentExecutor.executeInBackground(executeOptions);
+        return JSON.stringify({
+          agentId,
+          output_file: outputFile,
+          status: 'running',
+          message: 'Agent is running in the background. Use Read tool or Bash tail to check output.',
+          ...(worktreePath ? { worktree_path: worktreePath, worktree_branch: worktreeBranch } : {}),
+        });
+      }
+
+      const { agentId, result, session } = await agentExecutor.execute(executeOptions);
+
+      // --- Idle notification: inform team lead that this subagent is done ---
+      if (teamName && name) {
+        try {
+          teamManager.notifyIdle(teamName, name);
+        } catch {
+          // Non-fatal — never let idle notification break the result.
+        }
+      }
+
+      // --- Worktree post-processing (foreground) ---
+      if (worktreePath) {
+        const changed = await hasWorktreeChanges(worktreePath);
+        if (!changed) {
+          // Auto-cleanup: no changes made
+          await cleanupWorktree(worktreePath);
+          return JSON.stringify({
+            agentId,
+            result,
+            numTurns: session.numTurns,
+            durationMs: session.durationMs,
+            worktree_cleaned_up: true,
+            message: 'Agent completed with no file changes. Worktree was cleaned up automatically.',
+          });
+        }
+        // Keep worktree for user to review/merge
+        return JSON.stringify({
+          agentId,
+          result,
+          numTurns: session.numTurns,
+          durationMs: session.durationMs,
+          worktree_path: worktreePath,
+          worktree_branch: worktreeBranch,
+          message: `Agent completed with file changes. Worktree kept at ${worktreePath} on branch ${worktreeBranch}. Review changes and merge when ready.`,
+        });
+      }
+
+      return JSON.stringify({
+        agentId,
+        result,
+        numTurns: session.numTurns,
+        durationMs: session.durationMs,
+      });
+    },
+    getBackgroundAgent: (agentId: string) => {
+      const session = agentExecutor.getAgent(agentId);
+      if (!session) return null;
+      return {
+        status: session.state === 'running' ? 'running' : session.state === 'completed' ? 'completed' : 'failed',
+        output_file: session.outputFile ?? '',
+        result: session.result,
+      };
     },
   });
 
   toolRegistry.register(taskTool);
+
+  // Re-register TaskOutput/TaskStop with agent executor support.
+  // This overwrites the versions registered by createDefaultToolRegistry()
+  // that only support Bash background tasks.
+  const agentManagementDeps = {
+    getBackgroundAgent: (agentId: string) => {
+      const session = agentExecutor.getAgent(agentId);
+      if (!session) return null;
+      return {
+        status: (session.state === 'running' ? 'running' : session.state === 'completed' ? 'completed' : 'failed') as 'running' | 'completed' | 'failed',
+        output_file: session.outputFile ?? '',
+        result: session.result,
+      };
+    },
+    stopBackgroundAgent: (agentId: string) => agentExecutor.stopAgent(agentId),
+  };
+  toolRegistry.register(createTaskOutputTool(agentManagementDeps));
+  toolRegistry.register(createTaskStopTool(agentManagementDeps));
 
   // ------------------------------------------------------------------
   // Plan mode tools
@@ -208,7 +327,7 @@ async function main(): Promise<void> {
       return { success: true };
     },
     sendMessage: async (params: {
-      type: 'message' | 'broadcast' | 'shutdown_request' | 'shutdown_response' | 'plan_approval_response';
+      type: 'message' | 'broadcast' | 'shutdown_request' | 'shutdown_response' | 'plan_approval_response' | 'plan_approval_request';
       recipient?: string;
       content?: string;
       summary?: string;
@@ -216,9 +335,10 @@ async function main(): Promise<void> {
       request_id?: string;
     }) => {
       // In standalone CLI mode there is no active team context, so we write
-      // to a default team inbox so that actual teammate processes can pick it up.
+      // to the default team inbox so that actual teammate processes can pick it up.
       const activeTeam = (settings.activeTeam as string) ?? defaultTeamName;
-      teamManager.sendMessage(activeTeam, {
+
+      const msg = {
         type: params.type,
         from: 'cli',
         to: params.recipient,
@@ -227,8 +347,19 @@ async function main(): Promise<void> {
         timestamp: new Date().toISOString(),
         requestId: params.request_id,
         approve: params.approve,
-      });
-      return { success: true, message: 'Message sent' };
+      };
+
+      // broadcast is handled by TeamManager (writes to all member inboxes).
+      teamManager.sendMessage(activeTeam, msg);
+
+      const routing: Record<string, unknown> = {
+        sender: 'cli',
+        target: params.type === 'broadcast' ? '@all' : (params.recipient ?? 'unknown'),
+        summary: params.summary ?? params.content?.slice(0, 60),
+        content: params.content,
+      };
+
+      return { success: true, message: 'Message sent', routing };
     },
   };
 
@@ -238,16 +369,51 @@ async function main(): Promise<void> {
 
   // ------------------------------------------------------------------
   // ToolSearch tool — enables deferred/lazy tool loading
+  // Searches both registered tools AND MCP tools (even if not yet registered).
   // ------------------------------------------------------------------
   toolRegistry.register(createToolSearchTool({
     searchTools: async (query: string) => {
       const q = query.toLowerCase();
-      return toolRegistry.list()
+
+      // Search registered tools first
+      const registered = toolRegistry.list()
         .filter(t => t.name.toLowerCase().includes(q) || t.description.toLowerCase().includes(q))
         .map(t => ({ name: t.name, description: t.description }));
+
+      // Also search MCP tools that may not yet be in the registry
+      const mcpTools = mcpManager.getAllTools()
+        .filter(t =>
+          t.name.toLowerCase().includes(q) ||
+          (t.description ?? '').toLowerCase().includes(q)
+        )
+        .filter(t => !toolRegistry.get(t.name)) // exclude already-registered ones
+        .map(t => ({ name: t.name, description: t.description ?? `MCP tool from ${t.serverName}` }));
+
+      return [...registered, ...mcpTools];
     },
     selectTool: async (name: string) => {
-      return toolRegistry.get(name) ?? null;
+      // First try the registry
+      const existing = toolRegistry.get(name);
+      if (existing) return existing;
+
+      // Fall back: find in MCP tools and dynamically create a ToolDefinition
+      const mcpTool = mcpManager.getAllTools().find(t => t.name === name);
+      if (mcpTool) {
+        const tool = {
+          name: mcpTool.name,
+          description: mcpTool.description ?? '',
+          inputSchema: mcpTool.inputSchema ?? { type: 'object', properties: {} },
+          execute: async (input: any) => {
+            const result = await mcpManager.callTool(mcpTool.serverName, mcpTool.name, input);
+            return typeof result === 'string' ? result : JSON.stringify(result);
+          },
+        };
+        // Register so it's available for subsequent calls
+        toolRegistry.register(tool);
+        return tool;
+      }
+
+      return null;
     },
   }));
 
@@ -352,6 +518,15 @@ async function main(): Promise<void> {
   const permissionEngine = new PermissionEngine({
     mode: effectivePermissionMode,
   });
+  // Wire settings-based rules (allow/deny/ask arrays from settings.json permissions key)
+  permissionEngine.loadFromSettings(settings);
+  // Wire path restrictions from settings.json permissions.allowedPaths / deniedPaths
+  if (settings.permissions?.allowedPaths) {
+    permissionEngine.setAllowedPaths(settings.permissions.allowedPaths as string[]);
+  }
+  if (settings.permissions?.deniedPaths) {
+    permissionEngine.setDeniedPaths(settings.permissions.deniedPaths as string[]);
+  }
   const permissionPrompter = new TerminalPermissionPrompter();
 
   // ------------------------------------------------------------------
@@ -392,6 +567,16 @@ async function main(): Promise<void> {
     }
   }
 
+  // Also load hooks from settings.json (merged across user → project → local layers).
+  // settings.hooks shape: { [HookEvent]: HookDefinition[] } — same as loadFromConfig expects.
+  if (settings.hooks && typeof settings.hooks === 'object') {
+    try {
+      _hookExecutor.loadFromConfig(settings.hooks as any);
+    } catch {
+      // Malformed hooks in settings — skip silently.
+    }
+  }
+
   // Adapter: bridge HookExecutor's strict HookInput signature to the loose
   // Record<string, unknown> interface expected by ConversationLoop.
   // Also intercepts PreToolUse events for file-modifying tools to save
@@ -411,6 +596,26 @@ async function main(): Promise<void> {
       return _hookExecutor.execute(event as any, input as any, toolUseId);
     },
   };
+
+  // Now that hookExecutor is ready, initialise AgentExecutor so subagent
+  // lifecycle hooks (SubagentStart / SubagentStop) are wired in.
+  agentExecutor = new AgentExecutor(hookExecutor);
+
+  // Fire SessionStart hook — all setup is complete.
+  const sessionSource: 'startup' | 'resume' = args.resume || args.continue ? 'resume' : 'startup';
+  try {
+    await hookExecutor.execute('SessionStart', {
+      hook_event_name: 'SessionStart',
+      session_id: sessionId,
+      transcript_path: join(sessionMgr.getSessionDir(cwd, sessionId), `${sessionId}.jsonl`),
+      cwd,
+      permission_mode: effectivePermissionMode,
+      source: sessionSource,
+      model,
+    });
+  } catch {
+    // SessionStart hooks are non-fatal.
+  }
 
   // ------------------------------------------------------------------
   // Resolve settings-derived loop options
@@ -478,6 +683,17 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------
   if (args.prompt) {
     await executePrompt(loop, args.prompt, renderer, isStreamJson, sessionMgr, cwd, sessionId);
+    // Fire SessionEnd before exiting single-prompt mode.
+    try {
+      await hookExecutor.execute('SessionEnd', {
+        hook_event_name: 'SessionEnd',
+        session_id: sessionId,
+        transcript_path: join(sessionMgr.getSessionDir(cwd, sessionId), `${sessionId}.jsonl`),
+        cwd,
+        permission_mode: effectivePermissionMode,
+        reason: 'exit',
+      });
+    } catch { /* non-fatal */ }
     process.exit(0);
   }
 
@@ -509,6 +725,16 @@ async function main(): Promise<void> {
         checkpoint,
         sessionMgr,
         permissionMode: effectivePermissionMode,
+        thinking: effectiveThinking.type,
+        effort: effectiveEffort,
+        agentTypes: agentLoader.list().map(([name, def]) => ({
+          name,
+          description: def.description,
+        })),
+        mcpStatus: mcpManager.getServerStatus().map((s: any) => ({
+          name: s.name,
+          status: s.status,
+        })),
       });
       if (result) {
         if (result.shouldExit) break;
@@ -528,6 +754,20 @@ async function main(): Promise<void> {
   }
 
   repl.close();
+
+  // Fire SessionEnd hook — session is closing normally.
+  try {
+    await hookExecutor.execute('SessionEnd', {
+      hook_event_name: 'SessionEnd',
+      session_id: sessionId,
+      transcript_path: join(sessionMgr.getSessionDir(cwd, sessionId), `${sessionId}.jsonl`),
+      cwd,
+      permission_mode: effectivePermissionMode,
+      reason: 'exit',
+    });
+  } catch {
+    // SessionEnd hooks are non-fatal.
+  }
 }
 
 // ---------------------------------------------------------------------------

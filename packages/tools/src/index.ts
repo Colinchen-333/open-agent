@@ -50,7 +50,8 @@ export {
   createExitPlanModeTool,
   type PlanModeDeps,
 } from './plan-mode.js';
-export { createEnterWorktreeTool } from './worktree.js';
+export { createEnterWorktreeTool, createWorktree, cleanupWorktree, hasWorktreeChanges } from './worktree.js';
+export type { WorktreeInfo } from './worktree.js';
 export { createConfigTool } from './config-tool.js';
 export {
   createTaskOutputTool,

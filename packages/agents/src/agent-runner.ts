@@ -10,6 +10,11 @@ export interface AgentRunnerOptions {
   tools: Map<string, ToolDefinition>;
   cwd: string;
   parentSessionId?: string;
+  maxTurns?: number;
+  mode?: string;
+  initialMessages?: import('@open-agent/providers').Message[];
+  /** When set, all tool executions use this path as cwd instead of options.cwd */
+  worktreePath?: string;
 }
 
 export interface AgentResult {
@@ -18,6 +23,10 @@ export interface AgentResult {
   isError: boolean;
   numTurns: number;
   durationMs: number;
+  /** Set when the agent ran inside a worktree and changes were detected */
+  worktreePath?: string;
+  worktreeBranch?: string;
+  hasWorktreeChanges?: boolean;
 }
 
 export class AgentRunner {
@@ -56,20 +65,25 @@ export class AgentRunner {
       tools.delete('Task');
     }
 
+    // When running inside a worktree, use its path as cwd so all tool calls
+    // (Bash, Read, Write, etc.) operate on the isolated branch.
+    const effectiveCwd = this.options.worktreePath ?? this.options.cwd;
+
     const systemPrompt = def.prompt
-      ? `${def.prompt}\n\nCurrent working directory: ${this.options.cwd}`
-      : `You are a specialized agent. Complete the given task. Working directory: ${this.options.cwd}`;
+      ? `${def.prompt}\n\nCurrent working directory: ${effectiveCwd}`
+      : `You are a specialized agent. Complete the given task. Working directory: ${effectiveCwd}`;
 
     const loop = new ConversationLoop({
       provider: this.options.provider,
       tools,
       model: this.resolveModel(def.model),
       systemPrompt,
-      maxTurns: def.maxTurns ?? 30,
+      maxTurns: this.options.maxTurns ?? def.maxTurns ?? 30,
       thinking: { type: 'adaptive' },
       effort: 'high',
-      cwd: this.options.cwd,
+      cwd: effectiveCwd,
       sessionId: `subagent-${this.agentId}`,
+      initialMessages: this.options.initialMessages,
     });
 
     let resultText = '';
@@ -86,13 +100,15 @@ export class AgentRunner {
       }
     }
 
-    return {
+    const agentResult: AgentResult = {
       agentId: this.agentId,
       result: resultText,
       isError,
       numTurns,
       durationMs: Date.now() - startTime,
     };
+
+    return agentResult;
   }
 
   private resolveModel(model?: string): string {

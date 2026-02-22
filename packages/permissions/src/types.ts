@@ -10,6 +10,8 @@ export interface PermissionConfig {
   allowRules: PermissionRule[];
   denyRules: PermissionRule[];
   askRules: PermissionRule[];
+  allowedPaths?: string[];
+  deniedPaths?: string[];
 }
 
 export interface PermissionRequest {

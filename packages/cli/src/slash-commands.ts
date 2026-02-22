@@ -13,6 +13,26 @@ export interface SlashCommandContext {
   sessionMgr?: SessionManager;
   /** Current effective permission mode. */
   permissionMode?: string;
+  /** Current thinking mode. */
+  thinking?: string;
+  /** Current effort level. */
+  effort?: string;
+  /** Available agent types with descriptions. */
+  agentTypes?: { name: string; description: string }[];
+  /** MCP server status. */
+  mcpStatus?: { name: string; status: string }[];
+  /** Permission engine instance for detailed rule display. */
+  permissionEngine?: {
+    getSummary(): {
+      mode: string;
+      allowRules: { toolName: string; ruleContent?: string }[];
+      denyRules: { toolName: string; ruleContent?: string }[];
+      askRules: { toolName: string; ruleContent?: string }[];
+      allowedPaths: string[];
+      deniedPaths: string[];
+    };
+    setMode(mode: string): void;
+  };
 }
 
 export interface SlashCommandResult {
@@ -74,9 +94,13 @@ const SLASH_COMMANDS: Record<
         '  Tools & Config',
         '    /tools           List registered tools',
         '    /model [name]    Show or change model',
+        '    /thinking [mode] Show or change thinking (adaptive/enabled/disabled)',
+        '    /effort [level]  Show or change effort (low/medium/high/max)',
         '    /config          Show current configuration',
-        '    /permissions     Show permission rules',
+        '    /permissions     Show permission mode and rules',
         '    /memory          Show auto-memory status',
+        '    /agents          List available agent types',
+        '    /mcp             Show MCP server status',
         '',
         '  General',
         '    /help            Show this help',
@@ -116,6 +140,8 @@ const SLASH_COMMANDS: Record<
       const lines = [
         `  Model:           ${ctx.model}`,
         `  Permission mode: ${ctx.permissionMode ?? 'default'}`,
+        `  Thinking:        ${ctx.thinking ?? 'adaptive'}`,
+        `  Effort:          ${ctx.effort ?? 'high'}`,
         `  CWD:             ${ctx.cwd}`,
         `  Session:         ${ctx.sessionId}`,
       ];
@@ -146,11 +172,77 @@ const SLASH_COMMANDS: Record<
     },
   },
   '/permissions': {
-    description: 'Show current permission mode',
-    handler: async (_args, _ctx) => {
+    description: 'Show current permission mode and rules',
+    handler: async (_args, ctx) => {
+      const lines = [
+        `Permission mode: ${ctx.permissionMode ?? 'default'}`,
+        '',
+        'Modes:',
+        '  default          - Ask for dangerous operations',
+        '  acceptEdits      - Auto-accept file edits',
+        '  bypassPermissions - Skip all permission checks',
+        '  plan             - Read-only planning mode',
+        '  dontAsk          - Deny unpermitted, never prompt',
+        '',
+        `Use --permission-mode <mode> to change.`,
+      ];
+      return { handled: true, output: lines.join('\n') };
+    },
+  },
+  '/thinking': {
+    description: 'Show or change thinking mode (adaptive/enabled/disabled)',
+    handler: async (args, ctx) => {
+      if (!args.trim()) {
+        return { handled: true, output: `Current thinking: ${ctx.thinking ?? 'adaptive'}` };
+      }
+      const mode = args.trim().toLowerCase();
+      if (!['adaptive', 'enabled', 'disabled'].includes(mode)) {
+        return { handled: true, output: 'Invalid mode. Use: adaptive, enabled, disabled' };
+      }
+      ctx.loop.setThinking({ type: mode as 'adaptive' | 'enabled' | 'disabled' });
+      return { handled: true, output: `Thinking set to: ${mode}` };
+    },
+  },
+  '/effort': {
+    description: 'Show or change effort level (low/medium/high/max)',
+    handler: async (args, ctx) => {
+      if (!args.trim()) {
+        return { handled: true, output: `Current effort: ${ctx.effort ?? 'high'}` };
+      }
+      const level = args.trim().toLowerCase();
+      if (!['low', 'medium', 'high', 'max'].includes(level)) {
+        return { handled: true, output: 'Invalid level. Use: low, medium, high, max' };
+      }
+      // Effort is set on the loop options for the next LLM call.
+      (ctx.loop as any).options.effort = level;
+      return { handled: true, output: `Effort set to: ${level}` };
+    },
+  },
+  '/agents': {
+    description: 'List available agent types',
+    handler: async (_args, ctx) => {
+      const agents = ctx.agentTypes ?? [];
+      if (agents.length === 0) {
+        return { handled: true, output: 'No agent types loaded.' };
+      }
+      const lines = agents.map((a) => `  ${a.name.padEnd(28)} ${a.description.slice(0, 50)}`);
       return {
         handled: true,
-        output: 'Permission mode management is handled via --permission-mode flag.',
+        output: `Available agent types (${agents.length}):\n${lines.join('\n')}`,
+      };
+    },
+  },
+  '/mcp': {
+    description: 'Show MCP server connection status',
+    handler: async (_args, ctx) => {
+      const servers = ctx.mcpStatus ?? [];
+      if (servers.length === 0) {
+        return { handled: true, output: 'No MCP servers configured.' };
+      }
+      const lines = servers.map((s) => `  ${s.name.padEnd(24)} ${s.status}`);
+      return {
+        handled: true,
+        output: `MCP servers (${servers.length}):\n${lines.join('\n')}`,
       };
     },
   },

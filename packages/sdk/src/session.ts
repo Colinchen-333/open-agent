@@ -1,16 +1,129 @@
 import { randomUUID } from 'crypto';
 import type { SDKMessage, SDKUserMessage, SDKResultMessage } from '@open-agent/core';
-import type { SessionOptions, Session } from './types.js';
+import { SessionManager } from '@open-agent/core';
+import type { SessionOptions, Session, QueryOptions } from './types.js';
 import { query } from './query.js';
 
 // --------------------------------------------------------------------------
-// V2 one-shot prompt
+// V2 stable API — createSession / resumeSession
+// --------------------------------------------------------------------------
+
+/**
+ * Create a multi-turn stateful agent session.
+ *
+ * The returned `SDKSession` lets you:
+ * - Call `send(message)` to get an async generator of `SDKMessage` for each turn.
+ * - Call `close()` to terminate the session.
+ *
+ * @example
+ * ```ts
+ * const session = createSession({ model: 'claude-sonnet-4-6' });
+ * for await (const msg of session.send('Hello!')) {
+ *   if (msg.type === 'result') console.log(msg.result);
+ * }
+ * session.close();
+ * ```
+ */
+export function createSession(options?: QueryOptions): SDKSession {
+  return _buildSession(randomUUID(), options);
+}
+
+/**
+ * Resume a previously created session by its ID, restoring conversation history.
+ *
+ * @param sessionId - The `sessionId` returned by a prior `createSession` call.
+ * @param options   - Session options (should use the same model/cwd as the original).
+ *
+ * @example
+ * ```ts
+ * const session = resumeSession('abc-123', { cwd: '/my/project' });
+ * for await (const msg of session.send('Continue from where we left off')) { ... }
+ * ```
+ */
+export function resumeSession(sessionId: string, options?: QueryOptions): SDKSession {
+  const cwd = options?.cwd ?? process.cwd();
+  const sessionMgr = new SessionManager();
+  const initialMessages = sessionMgr.loadTranscript(cwd, sessionId);
+
+  return _buildSession(sessionId, options, initialMessages);
+}
+
+/**
+ * The session handle returned by `createSession` / `resumeSession`.
+ * Each call to `send()` runs one conversation turn and yields SDK messages.
+ */
+export interface SDKSession {
+  /** Stable identifier for this session. */
+  readonly sessionId: string;
+  /**
+   * Send a user message and iterate over the SDK messages for that turn.
+   * The generator completes (returns) when the agent produces a `result` message.
+   */
+  send(message: string): AsyncGenerator<SDKMessage, void>;
+  /** Terminate the session and release resources. */
+  close(): void;
+}
+
+// --------------------------------------------------------------------------
+// Internal builder
+// --------------------------------------------------------------------------
+
+function _buildSession(
+  sessionId: string,
+  options?: QueryOptions,
+  initialMessages?: import('@open-agent/providers').Message[],
+): SDKSession {
+  let closed = false;
+  // Conversation history accumulates across turns so the model retains context.
+  const history: import('@open-agent/providers').Message[] = initialMessages ? [...initialMessages] : [];
+
+  return {
+    get sessionId(): string {
+      return sessionId;
+    },
+
+    async *send(message: string): AsyncGenerator<SDKMessage, void> {
+      if (closed) {
+        throw new Error(`Session ${sessionId} is closed.`);
+      }
+
+      // Each send() uses a fresh query() call with accumulated history
+      // so the ConversationLoop sees the full prior context.
+      const q = query(message, {
+        ...options,
+        sessionId,
+        initialMessages: history as any,
+      } as QueryOptions & { initialMessages: any });
+
+      for await (const msg of q) {
+        // Capture user/assistant turns into history for the next send().
+        if (msg.type === 'user' || msg.type === 'assistant') {
+          const msgRecord = (msg as any).message;
+          if (msgRecord) {
+            history.push(msgRecord as import('@open-agent/providers').Message);
+          }
+        }
+        yield msg;
+        // Stop iterating this turn once we get the result.
+        if (msg.type === 'result') break;
+      }
+
+      q.close();
+    },
+
+    close(): void {
+      closed = true;
+    },
+  };
+}
+
+// --------------------------------------------------------------------------
+// V2 unstable API — preserved for backwards compatibility
 // --------------------------------------------------------------------------
 
 /**
  * Send a single message, wait for the full result, and return the final
- * `SDKResultMessage`.  Intended for simple request-response use-cases where
- * stateful session management is unnecessary.
+ * `SDKResultMessage`.  Intended for simple request-response use-cases.
  *
  * @example
  * ```ts
@@ -43,16 +156,9 @@ export async function unstable_v2_prompt(
   return result;
 }
 
-// --------------------------------------------------------------------------
-// V2 create session
-// --------------------------------------------------------------------------
-
 /**
- * Create a long-lived, stateful agent session.  Messages are enqueued via
- * `session.send()` and consumed through `session.stream()`.
- *
- * The session implements the TC39 explicit-resource-management protocol
- * (`Symbol.asyncDispose`) so it can be used with `await using`:
+ * Create a long-lived, stateful agent session using the legacy queue-based API.
+ * Prefer `createSession()` for new code.
  *
  * @example
  * ```ts
@@ -67,9 +173,6 @@ export function unstable_v2_createSession(options: SessionOptions): Session {
   const sessionId = randomUUID();
   let closed = false;
 
-  // A simple queue + promise-based mechanism for bridging the synchronous
-  // `send()` call into an async iterable that the ConversationLoop can
-  // consume.
   const messageQueue: SDKUserMessage[] = [];
   let resolveNext: ((msg: SDKUserMessage) => void) | null = null;
 
@@ -78,7 +181,6 @@ export function unstable_v2_createSession(options: SessionOptions): Session {
       if (messageQueue.length > 0) {
         yield messageQueue.shift()!;
       } else {
-        // Park until the next send() call resolves the promise.
         yield await new Promise<SDKUserMessage>((resolve) => {
           resolveNext = resolve;
         });
@@ -117,7 +219,6 @@ export function unstable_v2_createSession(options: SessionOptions): Session {
           : message;
 
       if (resolveNext) {
-        // There is already a parked consumer — unblock it immediately.
         const resolve = resolveNext;
         resolveNext = null;
         resolve(msg);
@@ -141,28 +242,16 @@ export function unstable_v2_createSession(options: SessionOptions): Session {
   };
 }
 
-// --------------------------------------------------------------------------
-// V2 resume session
-// --------------------------------------------------------------------------
-
 /**
- * Re-attach to a previously created session by its ID.  Full transcript
- * replay is not yet implemented; this currently creates a fresh session
- * with the same ID so callers can at least continue sending messages.
- *
- * @param sessionId - The session ID returned by a prior `unstable_v2_createSession`.
- * @param options   - Session options (must match the original session's model).
+ * Re-attach to a previously created unstable_v2 session by its ID.
+ * Prefer `resumeSession()` for new code.
  */
 export function unstable_v2_resumeSession(
   sessionId: string,
   options: SessionOptions,
 ): Session {
-  // TODO: Restore conversation history from a persisted transcript before
-  //       handing off to the ConversationLoop so the model retains context.
   const session = unstable_v2_createSession(options);
 
-  // Override the generated sessionId with the one being resumed so callers
-  // receive consistent session_id values in streamed SDKMessages.
   Object.defineProperty(session, 'sessionId', {
     value: sessionId,
     writable: false,

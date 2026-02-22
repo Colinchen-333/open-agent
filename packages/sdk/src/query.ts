@@ -7,25 +7,52 @@ import type { QueryOptions, Query } from './types.js';
 
 // --------------------------------------------------------------------------
 // query() – V1 streaming API
+//
+// Supports two call signatures:
+//
+//   1. query(prompt, options?)        — Claude Code style (primary)
+//   2. query({ prompt, options })     — legacy object style (backwards-compat)
 // --------------------------------------------------------------------------
 
 /**
- * Start a new agent conversation and return a `Query` handle that is both an
+ * Run an agent conversation and return a `Query` handle that is both an
  * `AsyncGenerator<SDKMessage>` and exposes control methods.
  *
- * @example
+ * @example — simple string prompt (Claude Code style)
  * ```ts
- * const q = query({ prompt: 'List files in the current directory' });
+ * const q = query('List files in the current directory');
  * for await (const msg of q) {
  *   if (msg.type === 'result') console.log(msg.result);
  * }
  * ```
+ *
+ * @example — with options
+ * ```ts
+ * const q = query('Refactor this file', { model: 'claude-opus-4-6', cwd: '/my/project' });
+ * for await (const msg of q) { ... }
+ * ```
  */
+export function query(prompt: string, options?: QueryOptions): Query;
 export function query(params: {
   prompt: string | AsyncIterable<SDKUserMessage>;
   options?: QueryOptions;
-}): Query {
-  const { prompt, options = {} } = params;
+}): Query;
+export function query(
+  promptOrParams: string | { prompt: string | AsyncIterable<SDKUserMessage>; options?: QueryOptions },
+  maybeOptions?: QueryOptions,
+): Query {
+  // Normalise the two call signatures into a single shape.
+  let prompt: string | AsyncIterable<SDKUserMessage>;
+  let options: QueryOptions;
+
+  if (typeof promptOrParams === 'string') {
+    prompt = promptOrParams;
+    options = maybeOptions ?? {};
+  } else {
+    prompt = promptOrParams.prompt;
+    options = promptOrParams.options ?? {};
+  }
+
   const cwd = options.cwd ?? process.cwd();
   const sessionId = options.sessionId ?? randomUUID();
 
@@ -34,7 +61,7 @@ export function query(params: {
   // ------------------------------------------------------------------
   const providerName = guessProviderFromModel(options.model);
   const provider = providerName
-    ? createProvider({ provider: providerName })
+    ? createProvider({ provider: providerName, apiKey: (options as any).apiKey })
     : autoDetectProvider();
 
   // ------------------------------------------------------------------
@@ -47,7 +74,6 @@ export function query(params: {
     const allowed = new Set(options.allowedTools);
     for (const tool of toolRegistry.list()) {
       if (!allowed.has(tool.name)) {
-        // ToolRegistry has no `remove` method; rebuild via a filtered Map.
         (toolRegistry as any).tools.delete(tool.name);
       }
     }
@@ -96,6 +122,7 @@ export function query(params: {
     cwd,
     sessionId,
     abortSignal: options.abortController?.signal,
+    initialMessages: (options as any).initialMessages,
   });
 
   // ------------------------------------------------------------------

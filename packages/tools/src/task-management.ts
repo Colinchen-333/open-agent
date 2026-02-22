@@ -14,10 +14,21 @@ export function getBackgroundTasks(): Map<string, BackgroundTask> {
   return backgroundTasks;
 }
 
-export function createTaskOutputTool(): ToolDefinition {
+export interface BackgroundAgentInfo {
+  status: 'running' | 'completed' | 'failed';
+  output_file: string;
+  result?: string;
+}
+
+export interface TaskManagementDeps {
+  getBackgroundAgent?: (agentId: string) => BackgroundAgentInfo | null;
+  stopBackgroundAgent?: (agentId: string) => boolean;
+}
+
+export function createTaskOutputTool(deps?: TaskManagementDeps): ToolDefinition {
   return {
     name: 'TaskOutput',
-    description: 'Retrieve output from a running or completed background task.',
+    description: 'Retrieves output from a running or completed task (background shell command or background agent).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -25,67 +36,123 @@ export function createTaskOutputTool(): ToolDefinition {
         block: {
           type: 'boolean',
           default: true,
-          description: 'Whether to wait for task completion',
+          description: 'Whether to wait for task completion before returning',
         },
         timeout: {
           type: 'number',
           default: 30000,
           description: 'Max wait time in milliseconds',
+          maximum: 600000,
+          minimum: 0,
         },
       },
-      required: ['task_id'],
+      required: ['task_id', 'block', 'timeout'],
     },
-    async execute(input: any, _ctx: ToolContext) {
-      const task = backgroundTasks.get(input.task_id as string);
-      if (!task) {
-        return `Error: No task found with ID ${input.task_id}`;
+    async execute(input: any, _ctx: ToolContext): Promise<string> {
+      const taskId = input.task_id as string;
+      const shouldBlock: boolean = input.block ?? true;
+      const timeoutMs: number = Math.min(input.timeout ?? 30000, 600000);
+
+      // First check Bash background tasks
+      const bashTask = backgroundTasks.get(taskId);
+      if (bashTask) {
+        if (shouldBlock && bashTask.status === 'running') {
+          const deadline = Date.now() + timeoutMs;
+          while (bashTask.status === 'running' && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+        }
+
+        return JSON.stringify({
+          task_id: taskId,
+          type: 'bash',
+          status: bashTask.status,
+          output: bashTask.output,
+          durationMs: Date.now() - bashTask.startTime,
+        });
       }
 
-      if (input.block && task.status === 'running') {
-        const deadline = Date.now() + ((input.timeout as number) ?? 30000);
-        while (task.status === 'running' && Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, 500));
+      // Then check background agents
+      if (deps?.getBackgroundAgent) {
+        const agentInfo = deps.getBackgroundAgent(taskId);
+        if (agentInfo) {
+          if (shouldBlock && agentInfo.status === 'running') {
+            const deadline = Date.now() + timeoutMs;
+            while (Date.now() < deadline) {
+              const current = deps.getBackgroundAgent!(taskId);
+              if (!current || current.status !== 'running') break;
+              await new Promise((resolve) => setTimeout(resolve, 1000));
+            }
+            // Fetch final state after waiting
+            const finalInfo = deps.getBackgroundAgent(taskId);
+            if (finalInfo) {
+              return JSON.stringify({
+                task_id: taskId,
+                type: 'agent',
+                status: finalInfo.status,
+                output_file: finalInfo.output_file,
+                result: finalInfo.result,
+              });
+            }
+          }
+
+          return JSON.stringify({
+            task_id: taskId,
+            type: 'agent',
+            status: agentInfo.status,
+            output_file: agentInfo.output_file,
+            result: agentInfo.result,
+          });
         }
       }
 
-      return {
-        task_id: input.task_id,
-        status: task.status,
-        output: task.output,
-        durationMs: Date.now() - task.startTime,
-      };
+      return `Error: No task found with ID "${taskId}". The task may have expired or the ID is incorrect.`;
     },
   };
 }
 
-export function createTaskStopTool(): ToolDefinition {
+export function createTaskStopTool(deps?: TaskManagementDeps): ToolDefinition {
   return {
     name: 'TaskStop',
-    description: 'Stop a running background task.',
+    description: 'Stops a running background task (shell command or agent) by its ID.',
     inputSchema: {
       type: 'object',
       properties: {
-        task_id: { type: 'string', description: 'The task ID to stop' },
-        shell_id: {
+        task_id: {
           type: 'string',
-          description: 'Deprecated: use task_id instead',
+          description: 'The ID of the background task to stop',
         },
       },
+      required: ['task_id'],
     },
-    async execute(input: any, _ctx: ToolContext) {
-      const taskId: string = (input.task_id ?? input.shell_id) as string;
-      const task = backgroundTasks.get(taskId);
-      if (!task) {
-        return `Error: No task found with ID ${taskId}`;
+    async execute(input: any, _ctx: ToolContext): Promise<string> {
+      const taskId = input.task_id as string;
+
+      // Try Bash background task first
+      const bashTask = backgroundTasks.get(taskId);
+      if (bashTask) {
+        if (bashTask.process && bashTask.status === 'running') {
+          bashTask.process.kill();
+          bashTask.status = 'completed';
+          bashTask.output += '\n[Task stopped by user]';
+          return JSON.stringify({ success: true, task_id: taskId, type: 'bash' });
+        }
+        return JSON.stringify({ success: false, task_id: taskId, type: 'bash', reason: 'Task is not running' });
       }
 
-      if (task.process && task.status === 'running') {
-        task.process.kill();
-        task.status = 'completed';
-        task.output += '\n[Task stopped by user]';
+      // Try background agent
+      if (deps?.stopBackgroundAgent) {
+        const stopped = deps.stopBackgroundAgent(taskId);
+        if (stopped) {
+          return JSON.stringify({ success: true, task_id: taskId, type: 'agent' });
+        }
+        // Agent existed but couldn't be stopped (not running)
+        if (deps.getBackgroundAgent?.(taskId)) {
+          return JSON.stringify({ success: false, task_id: taskId, type: 'agent', reason: 'Agent is not running' });
+        }
       }
 
-      return { success: true, task_id: taskId };
+      return `Error: No task found with ID "${taskId}". The task may have already completed or the ID is incorrect.`;
     },
   };
 }

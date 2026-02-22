@@ -7,8 +7,21 @@ export interface TaskToolDeps {
     subagentType: string;
     name?: string;
     model?: string;
-    cwd: string;
-  }) => Promise<{ agentId: string; result: string; isError: boolean; numTurns: number; durationMs: number }>;
+    cwd?: string;
+    maxTurns?: number;
+    mode?: string;
+    isolation?: string;
+    runInBackground?: boolean;
+    resume?: string;
+    teamName?: string;
+  }) => Promise<string>;
+
+  // Background agent management
+  getBackgroundAgent?: (agentId: string) => {
+    status: 'running' | 'completed' | 'failed';
+    output_file: string;
+    result?: string;
+  } | null;
 }
 
 export function createTaskTool(deps: TaskToolDeps): ToolDefinition {
@@ -18,54 +31,92 @@ export function createTaskTool(deps: TaskToolDeps): ToolDefinition {
     inputSchema: {
       type: 'object',
       properties: {
+        description: {
+          type: 'string',
+          description: 'A short (3-5 word) description of the task',
+        },
         prompt: {
           type: 'string',
           description: 'The task for the agent to perform',
         },
         subagent_type: {
           type: 'string',
-          description: 'The type of specialized agent: Explore, Plan, code-writer, architecture-logic-reviewer, general-purpose',
+          description: 'The type of specialized agent to use',
         },
-        description: {
+        isolation: {
           type: 'string',
-          description: 'A short (3-5 word) description of the task',
+          enum: ['worktree'],
+          description: 'Isolation mode. "worktree" creates a temporary git worktree.',
         },
-        name: {
+        run_in_background: {
+          type: 'boolean',
+          description: 'Set to true to run this agent in the background.',
+        },
+        max_turns: {
+          type: 'integer',
+          description: 'Maximum number of agentic turns before stopping.',
+          exclusiveMinimum: 0,
+        },
+        mode: {
           type: 'string',
-          description: 'Optional name for the spawned agent',
+          enum: ['acceptEdits', 'bypassPermissions', 'default', 'dontAsk', 'plan'],
+          description: 'Permission mode for spawned teammate.',
         },
         model: {
           type: 'string',
-          description: 'Optional model to use: sonnet, opus, haiku',
           enum: ['sonnet', 'opus', 'haiku'],
+          description: 'Optional model to use for this agent.',
+        },
+        name: {
+          type: 'string',
+          description: 'Name for the spawned agent',
+        },
+        resume: {
+          type: 'string',
+          description: 'Optional agent ID to resume from.',
+        },
+        team_name: {
+          type: 'string',
+          description: 'Team name for spawning.',
         },
       },
-      required: ['prompt', 'subagent_type'],
+      required: ['description', 'prompt', 'subagent_type'],
+      additionalProperties: false,
     },
-    async execute(input: any, context: ToolContext): Promise<string> {
-      const { prompt, subagent_type, name, model } = input;
-
-      if (!prompt || !subagent_type) {
-        return 'Error: prompt and subagent_type are required';
-      }
+    async execute(input: any, ctx: ToolContext): Promise<string> {
+      const {
+        description,
+        prompt,
+        subagent_type,
+        isolation,
+        run_in_background,
+        max_turns,
+        mode,
+        model,
+        name,
+        resume,
+        team_name,
+      } = input;
 
       try {
-        const result = await deps.runSubagent({
+        // runSubagent handles all logic (foreground/background/worktree)
+        // and returns the final formatted JSON string directly.
+        return await deps.runSubagent({
           prompt,
           subagentType: subagent_type,
           name,
           model,
-          cwd: context.cwd,
+          cwd: ctx.cwd,
+          maxTurns: max_turns,
+          mode,
+          isolation,
+          runInBackground: run_in_background,
+          resume,
+          teamName: team_name,
         });
-
-        if (result.isError) {
-          return `Agent ${result.agentId} encountered an error after ${result.numTurns} turns (${result.durationMs}ms):\n${result.result}`;
-        }
-
-        return `${result.result}\n\nagentId: ${result.agentId} (for resuming)\n<usage>total_tokens: unknown\ntool_uses: ${result.numTurns}\nduration_ms: ${result.durationMs}</usage>`;
       } catch (error: unknown) {
         const msg = error instanceof Error ? error.message : String(error);
-        return `Error launching subagent: ${msg}`;
+        return `Error launching subagent (${description}): ${msg}`;
       }
     },
   };

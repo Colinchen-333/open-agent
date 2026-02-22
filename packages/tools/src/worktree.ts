@@ -2,6 +2,110 @@ import type { ToolDefinition, ToolContext } from './types.js';
 import { randomUUID } from 'crypto';
 import { mkdirSync } from 'fs';
 
+// ---------------------------------------------------------------------------
+// Reusable worktree utility functions
+// ---------------------------------------------------------------------------
+
+export interface WorktreeInfo {
+  path: string;
+  branch: string;
+}
+
+/**
+ * Create a git worktree at `<repoPath>/.open-agent/worktrees/<name>` on a new
+ * branch named `open-agent/<name>`.  Returns the worktree path and branch name.
+ */
+export async function createWorktree(repoPath: string, name: string): Promise<WorktreeInfo> {
+  const worktreePath = `${repoPath}/.open-agent/worktrees/${name}`;
+  const branchName = `open-agent/${name}`;
+
+  mkdirSync(`${repoPath}/.open-agent/worktrees`, { recursive: true });
+
+  const proc = Bun.spawn(
+    ['git', 'worktree', 'add', '-b', branchName, worktreePath],
+    {
+      cwd: repoPath,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    },
+  );
+
+  const stderr = await new Response(proc.stderr).text();
+  await proc.exited;
+
+  if (proc.exitCode !== 0) {
+    throw new Error(`Failed to create worktree: ${stderr.trim()}`);
+  }
+
+  return { path: worktreePath, branch: branchName };
+}
+
+/**
+ * Remove a git worktree and prune stale worktree references.
+ * Runs `git worktree remove --force` followed by `git worktree prune`.
+ * Errors are swallowed so cleanup never blocks the caller.
+ */
+export async function cleanupWorktree(worktreePath: string): Promise<void> {
+  // Derive the repo root: worktrees live at <repo>/.open-agent/worktrees/<name>
+  // so we can walk up or use `git -C <worktreePath> rev-parse --git-common-dir`
+  // to locate the common git dir.  The simplest approach: run the remove from
+  // the worktree itself using --force so even dirty trees are deleted.
+  try {
+    const proc = Bun.spawn(
+      ['git', 'worktree', 'remove', '--force', worktreePath],
+      {
+        cwd: worktreePath,
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    );
+    await proc.exited;
+
+    // Best-effort prune regardless of exit code above.
+    const pruneProc = Bun.spawn(
+      ['git', 'worktree', 'prune'],
+      {
+        cwd: worktreePath,
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    );
+    await pruneProc.exited;
+  } catch {
+    // Cleanup is best-effort — never throw.
+  }
+}
+
+/**
+ * Return true if the worktree has any tracked or untracked changes relative
+ * to its HEAD commit.  Uses `git status --porcelain` for a machine-readable
+ * check: any non-empty output means the tree is dirty.
+ */
+export async function hasWorktreeChanges(worktreePath: string): Promise<boolean> {
+  try {
+    const proc = Bun.spawn(
+      ['git', 'status', '--porcelain'],
+      {
+        cwd: worktreePath,
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    );
+
+    const stdout = await new Response(proc.stdout).text();
+    await proc.exited;
+
+    if (proc.exitCode !== 0) return false;
+    return stdout.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// EnterWorktree tool (unchanged surface — now delegates to helpers above)
+// ---------------------------------------------------------------------------
+
 export function createEnterWorktreeTool(): ToolDefinition {
   return {
     name: 'EnterWorktree',
@@ -15,31 +119,12 @@ export function createEnterWorktreeTool(): ToolDefinition {
     },
     async execute(input: any, ctx: ToolContext) {
       const name: string = input.name ?? `worktree-${randomUUID().slice(0, 8)}`;
-      const worktreePath = `${ctx.cwd}/.open-agent/worktrees/${name}`;
-      const branchName = `open-agent/${name}`;
-
-      mkdirSync(`${ctx.cwd}/.open-agent/worktrees`, { recursive: true });
-
-      const proc = Bun.spawn(
-        ['git', 'worktree', 'add', '-b', branchName, worktreePath],
-        {
-          cwd: ctx.cwd,
-          stdout: 'pipe',
-          stderr: 'pipe',
-        },
-      );
-
-      const stderr = await new Response(proc.stderr).text();
-      await proc.exited;
-
-      if (proc.exitCode !== 0) {
-        throw new Error(`Failed to create worktree: ${stderr}`);
-      }
+      const { path: worktreePath, branch: worktreeBranch } = await createWorktree(ctx.cwd, name);
 
       return {
         worktreePath,
-        worktreeBranch: branchName,
-        message: `Created worktree at ${worktreePath} on branch ${branchName}`,
+        worktreeBranch,
+        message: `Created worktree at ${worktreePath} on branch ${worktreeBranch}`,
       };
     },
   };

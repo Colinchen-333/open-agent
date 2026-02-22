@@ -23,8 +23,12 @@ export interface McpResourceInfo {
 export interface McpServerConnection {
   name: string;
   config: McpServerConfig;
-  status: 'connected' | 'failed' | 'pending' | 'disabled';
+  /** Lifecycle state of the server connection */
+  status: 'connected' | 'connecting' | 'failed' | 'error' | 'pending' | 'disabled' | 'disconnected';
   tools: McpToolInfo[];
+  resources?: McpResourceInfo[];
   error?: string;
   serverInfo?: { name: string; version: string };
+  /** Whether the server has been explicitly disabled by the user */
+  enabled?: boolean;
 }

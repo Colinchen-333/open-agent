@@ -15,42 +15,11 @@ export class AgentLoader {
   }
 
   /**
-   * Returns the hardcoded built-in agent definitions for the essential agent types.
+   * Returns the hardcoded built-in agent definitions for all built-in agent types.
    * These are always available regardless of any on-disk configuration.
-   *
-   * Included types:
-   *  - Explore       : read-only codebase exploration (no Edit/Write/Task tools)
-   *  - Plan          : planning agent (no Edit/Write tools)
-   *  - code-writer   : full-capability code writing agent
-   *  - general-purpose: all tools available
    */
   getBuiltinAgents(): Record<string, AgentDefinition> {
-    return {
-      Explore: {
-        description: 'Read-only agent for exploring and understanding codebases without making any modifications.',
-        tools: ['Read', 'Glob', 'Grep', 'Bash'],
-        disallowedTools: ['Edit', 'Write', 'Task'],
-        prompt:
-          'You are a read-only exploration agent. Your job is to search, read, and understand code in order to answer questions accurately. You MUST NOT modify any files. Use Read, Glob, Grep, and Bash (for inspection commands only) to gather information.',
-      },
-      Plan: {
-        description: 'Planning agent that designs implementation strategies without writing code.',
-        tools: ['Read', 'Glob', 'Grep', 'Bash'],
-        disallowedTools: ['Edit', 'Write'],
-        prompt:
-          'You are a planning agent. Your role is to design clear implementation strategies, identify the relevant files and functions, and produce an actionable plan. You MUST NOT write or edit any files. Focus on analysis and structured planning output.',
-      },
-      'code-writer': {
-        description: 'Full-capability agent for writing new code and implementing features.',
-        prompt:
-          'You are a code writing agent. Implement features, create new functions, and write production-quality code as requested. Use all available tools to read existing code, make edits, run tests, and verify your work.',
-      },
-      'general-purpose': {
-        description: 'General-purpose agent with all tools available for complex, multi-step tasks.',
-        prompt:
-          'You are a general-purpose agent. Handle complex, multi-step tasks autonomously. Use all available tools as needed to research, plan, implement, test, and verify your work.',
-      },
-    };
+    return { ...BUILTIN_AGENT_TYPES };
   }
 
   // Load custom agents from .md files in a directory

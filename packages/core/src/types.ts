@@ -81,6 +81,11 @@ export interface AgentDefinition {
   model?: 'sonnet' | 'opus' | 'haiku' | 'inherit';
   maxTurns?: number;
   skills?: string[];
+  name?: string;
+  mode?: PermissionMode;
+  isolation?: 'worktree' | 'none';
+  timeoutMs?: number;
+  allowBackgroundExecution?: boolean;
 }
 
 // MCP server configurations
