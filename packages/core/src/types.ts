@@ -208,6 +208,8 @@ export interface SDKToolResultMessage {
   tool_name: string;
   tool_use_id: string;
   result: string;
+  /** Full untruncated tool result for transcript persistence (not for display). */
+  _fullResult?: string;
   is_error: boolean;
   uuid: string;
   session_id: string;

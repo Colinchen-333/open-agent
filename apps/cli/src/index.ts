@@ -595,8 +595,8 @@ async function main(): Promise<void> {
       // Auto-checkpoint before file-modifying tools so /rewind can restore.
       if (event === 'PreToolUse' && toolUseId) {
         const toolName = input.tool_name as string;
-        if (toolName === 'Write' || toolName === 'Edit') {
-          const filePath = (input.tool_input as any)?.file_path;
+        if (toolName === 'Write' || toolName === 'Edit' || toolName === 'NotebookEdit') {
+          const filePath = (input.tool_input as any)?.file_path ?? (input.tool_input as any)?.notebook_path;
           if (filePath) {
             try { checkpoint.save(toolUseId, filePath); } catch { /* ignore checkpoint errors */ }
           }
@@ -702,7 +702,7 @@ async function main(): Promise<void> {
   });
 
   const renderer = new TerminalRenderer();
-  const isStreamJson = args.outputFormat === 'stream-json';
+  const isStreamJson = args.outputFormat === 'stream-json' || args.json === true;
 
   // ------------------------------------------------------------------
   // Print mode  (open-agent --print "…")

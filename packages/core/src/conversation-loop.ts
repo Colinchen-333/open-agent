@@ -352,8 +352,16 @@ export class ConversationLoop {
               break;
             }
 
-            // Other event types (message_start, content_block_*, error) are
-            // forwarded via stream_event above but require no content accumulation.
+            case 'error': {
+              // Provider-level errors during streaming (429, 500, overloaded).
+              // Throw so the outer catch block surfaces a proper error result
+              // rather than producing a ghost empty success.
+              const errorMsg = event.error?.message ?? event.error ?? 'Unknown streaming error';
+              throw new Error(typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg));
+            }
+
+            // Other event types (message_start, content_block_*, message_delta)
+            // are forwarded via stream_event above but require no content accumulation.
           }
         }
       } catch (error: unknown) {
@@ -803,6 +811,9 @@ export class ConversationLoop {
             tool_name: toolUse.name,
             tool_use_id: toolUse.id,
             result: resultStr.slice(0, 500),
+            // Include the full result for transcript persistence so --resume
+            // reconstructs the complete tool_result user message.
+            _fullResult: truncatedResult,
             is_error: false,
             uuid: randomUUID(),
             session_id: sessionId,
@@ -821,9 +832,9 @@ export class ConversationLoop {
     }
   }
 
-  /** Return a snapshot of the current conversation history. */
+  /** Return a snapshot of the current conversation history, excluding transient messages. */
   getMessages(): Message[] {
-    return [...this.messages];
+    return this.messages.filter(m => !(m as any)._transient);
   }
 
   /** Return the number of LLM turns executed so far. */
@@ -978,7 +989,7 @@ export class ConversationLoop {
 
     if (keepFrom <= 0) return; // Nothing to compact.
 
-    const toSummarize = this.messages.slice(0, keepFrom);
+    const toSummarize = this.messages.slice(0, keepFrom).filter(m => !(m as any)._transient);
     const toKeep = this.messages.slice(keepFrom);
 
     // Build the summarisation prompt with the messages we are compacting.

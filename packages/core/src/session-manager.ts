@@ -191,7 +191,9 @@ export class SessionManager {
       // tool_use blocks).
       if (entry.type === 'tool_result') {
         const toolUseId = (entry as any).tool_use_id;
-        const result = (entry as any).result ?? '';
+        // Prefer the full result content (persisted as _fullResult) over the
+        // 500-char display preview so resumed sessions get the complete context.
+        const result = (entry as any)._fullResult ?? (entry as any).result ?? '';
         const isError = (entry as any).is_error === true;
 
         // Check if the previous message is already a user message with
