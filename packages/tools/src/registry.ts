@@ -5,6 +5,9 @@ import { createEditTool } from './edit.js';
 import { createBashTool } from './bash.js';
 import { createGlobTool } from './glob.js';
 import { createGrepTool } from './grep.js';
+import { createWebFetchTool } from './web-fetch.js';
+import { createNotebookEditTool } from './notebook-edit.js';
+import { createAskUserTool } from './ask-user.js';
 
 /**
  * Central registry for all available tools.
@@ -54,5 +57,8 @@ export function createDefaultToolRegistry(_cwd: string): ToolRegistry {
   registry.register(createBashTool());
   registry.register(createGlobTool());
   registry.register(createGrepTool());
+  registry.register(createWebFetchTool());
+  registry.register(createNotebookEditTool());
+  registry.register(createAskUserTool());
   return registry;
 }

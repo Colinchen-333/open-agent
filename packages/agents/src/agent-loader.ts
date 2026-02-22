@@ -1,0 +1,90 @@
+import { existsSync, readFileSync, readdirSync } from 'fs';
+import { join } from 'path';
+import { homedir } from 'os';
+import type { AgentDefinition } from '@open-agent/core';
+import { BUILTIN_AGENT_TYPES } from './types';
+
+export class AgentLoader {
+  private agents: Map<string, AgentDefinition> = new Map();
+
+  constructor() {
+    // Load built-in agents
+    for (const [name, def] of Object.entries(BUILTIN_AGENT_TYPES)) {
+      this.agents.set(name, def);
+    }
+  }
+
+  // Load custom agents from .md files in a directory
+  loadFromDirectory(dir: string): void {
+    if (!existsSync(dir)) return;
+    const files = readdirSync(dir).filter(f => f.endsWith('.md'));
+
+    for (const file of files) {
+      const content = readFileSync(join(dir, file), 'utf-8');
+      const agent = this.parseAgentMd(content);
+      if (agent) {
+        const name = file.replace('.md', '');
+        this.agents.set(name, agent);
+      }
+    }
+  }
+
+  // Load agents from default directories
+  loadDefaults(cwd: string): void {
+    // User-level agents
+    this.loadFromDirectory(join(homedir(), '.open-agent', 'agents'));
+    // Project-level agents
+    this.loadFromDirectory(join(cwd, '.open-agent', 'agents'));
+  }
+
+  // Parse .md format agent definition (YAML frontmatter + prompt body)
+  private parseAgentMd(content: string): AgentDefinition | null {
+    const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+    if (!frontmatterMatch) {
+      // No frontmatter — treat entire content as prompt
+      return { description: '', prompt: content.trim() };
+    }
+
+    const [, frontmatter, body] = frontmatterMatch;
+    const meta: Record<string, unknown> = {};
+
+    // Simple YAML parsing (key: value pairs and inline arrays)
+    for (const line of frontmatter.split('\n')) {
+      const match = line.match(/^(\w+):\s*(.+)$/);
+      if (match) {
+        const [, key, value] = match;
+        // Handle inline arrays: [a, b, c]
+        if (value.startsWith('[') && value.endsWith(']')) {
+          meta[key] = value
+            .slice(1, -1)
+            .split(',')
+            .map(s => s.trim().replace(/['"]/g, ''));
+        } else {
+          meta[key] = value.replace(/['"]/g, '').trim();
+        }
+      }
+    }
+
+    return {
+      description: (meta.description as string) || '',
+      tools: meta.tools as string[] | undefined,
+      disallowedTools: meta.disallowedTools as string[] | undefined,
+      prompt: body.trim(),
+      model: meta.model as AgentDefinition['model'],
+      maxTurns: meta.maxTurns ? parseInt(meta.maxTurns as string, 10) : undefined,
+    };
+  }
+
+  // Programmatically register an agent
+  register(name: string, definition: AgentDefinition): void {
+    this.agents.set(name, definition);
+  }
+
+  get(name: string): AgentDefinition | undefined {
+    return this.agents.get(name);
+  }
+
+  list(): [string, AgentDefinition][] {
+    return Array.from(this.agents.entries());
+  }
+}

@@ -213,6 +213,14 @@ export interface SlashCommand {
   argumentHint: string;
 }
 
+// MCP server runtime status
+export interface McpServerStatus {
+  name: string;
+  status: 'connected' | 'connecting' | 'error' | 'disconnected';
+  error?: string;
+  tools?: string[];
+}
+
 // Configuration scope and source
 export type ConfigScope = 'local' | 'user' | 'project';
 export type SettingSource = 'user' | 'project' | 'local';

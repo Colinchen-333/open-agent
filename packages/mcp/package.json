@@ -9,6 +9,7 @@
     "dev": "echo 'No dev step for mcp'"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
     "@open-agent/core": "workspace:*"
   }
 }

@@ -2,3 +2,6 @@
 // Implements MCP transport (stdio, SSE, HTTP) and tool proxying
 
 export type { McpServerConfig, McpStdioServerConfig, McpSSEServerConfig, McpHttpServerConfig, McpSdkServerConfig } from '@open-agent/core';
+export * from './types';
+export { McpStdioClient } from './stdio-transport';
+export { McpManager } from './manager';

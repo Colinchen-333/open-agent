@@ -1,4 +1,3 @@
-// @open-agent/plugins - Plugin system
-// Provides plugin registration, lifecycle management, and extension points
-
-export {};
+export * from './types.js';
+export { PluginLoader } from './loader.js';
+export { SkillExecutor } from './skill-executor.js';
