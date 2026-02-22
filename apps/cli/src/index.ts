@@ -1,9 +1,16 @@
 #!/usr/bin/env bun
-import { parseArgs, TerminalRenderer, REPL, emitStreamJson } from '@open-agent/cli';
-import { ConversationLoop, SessionManager } from '@open-agent/core';
-import { createProvider, autoDetectProvider } from '@open-agent/providers';
-import { createDefaultToolRegistry } from '@open-agent/tools';
+import { parseArgs, TerminalRenderer, REPL, emitStreamJson, TerminalPermissionPrompter } from '@open-agent/cli';
+import { ConversationLoop, SessionManager, ConfigLoader, AutoMemory } from '@open-agent/core';
+import { createProvider, autoDetectProvider, calculateCost } from '@open-agent/providers';
+import { createDefaultToolRegistry, createTaskTool } from '@open-agent/tools';
+import { AgentLoader, AgentRunner } from '@open-agent/agents';
+import { PermissionEngine } from '@open-agent/permissions';
+import { HookExecutor } from '@open-agent/hooks';
 import type { SDKMessage } from '@open-agent/core';
+import type { PermissionMode } from '@open-agent/core';
+import { existsSync, readFileSync } from 'fs';
+import { join } from 'path';
+import { homedir } from 'os';
 
 const VERSION = '0.1.0';
 
@@ -43,6 +50,32 @@ async function main(): Promise<void> {
   const toolRegistry = createDefaultToolRegistry(cwd);
 
   // ------------------------------------------------------------------
+  // Task tool (subagent spawning)
+  // ------------------------------------------------------------------
+  const agentLoader = new AgentLoader();
+  agentLoader.loadDefaults(cwd);
+
+  const taskTool = createTaskTool({
+    runSubagent: async ({ prompt, subagentType, name: _name, model: _model, cwd: agentCwd }) => {
+      const agentDef = agentLoader.get(subagentType);
+      if (!agentDef) {
+        throw new Error(`Unknown agent type: ${subagentType}`);
+      }
+
+      const runner = new AgentRunner({
+        definition: agentDef,
+        provider,
+        tools: new Map(toolRegistry.list().map((t) => [t.name, t])),
+        cwd: agentCwd,
+      });
+
+      return runner.run(prompt);
+    },
+  });
+
+  toolRegistry.register(taskTool);
+
+  // ------------------------------------------------------------------
   // Session management
   // ------------------------------------------------------------------
   const sessionMgr = new SessionManager();
@@ -68,6 +101,55 @@ async function main(): Promise<void> {
   });
 
   // ------------------------------------------------------------------
+  // Permission system
+  // ------------------------------------------------------------------
+  const permissionEngine = new PermissionEngine({
+    mode: (args.permissionMode as PermissionMode) ?? 'default',
+  });
+  const permissionPrompter = new TerminalPermissionPrompter();
+
+  // ------------------------------------------------------------------
+  // AGENT.md config and Auto-Memory
+  // ------------------------------------------------------------------
+  const configLoader = new ConfigLoader();
+  const agentInstructions = configLoader.loadAgentMd(cwd);
+  const autoMemory = new AutoMemory(cwd);
+  const memoryContent = autoMemory.readMemory();
+
+  // ------------------------------------------------------------------
+  // Hook system — load global then project-level hooks.json
+  // ------------------------------------------------------------------
+  const _hookExecutor = new HookExecutor();
+
+  const globalHooksPath = join(homedir(), '.open-agent', 'hooks.json');
+  if (existsSync(globalHooksPath)) {
+    try {
+      const config = JSON.parse(readFileSync(globalHooksPath, 'utf-8'));
+      _hookExecutor.loadFromConfig(config);
+    } catch {
+      // Malformed global hooks.json — skip silently.
+    }
+  }
+
+  const projectHooksPath = join(cwd, '.open-agent', 'hooks.json');
+  if (existsSync(projectHooksPath)) {
+    try {
+      const config = JSON.parse(readFileSync(projectHooksPath, 'utf-8'));
+      _hookExecutor.loadFromConfig(config);
+    } catch {
+      // Malformed project hooks.json — skip silently.
+    }
+  }
+
+  // Adapter: bridge HookExecutor's strict HookInput signature to the loose
+  // Record<string, unknown> interface expected by ConversationLoop.
+  const hookExecutor = {
+    execute(event: string, input: Record<string, unknown>, toolUseId?: string) {
+      return _hookExecutor.execute(event as any, input as any, toolUseId);
+    },
+  };
+
+  // ------------------------------------------------------------------
   // Conversation loop
   // ------------------------------------------------------------------
   const loop = new ConversationLoop({
@@ -75,13 +157,17 @@ async function main(): Promise<void> {
     // Pass the full tool map; ConversationLoop expects Map<name, ToolDefinition>.
     tools: new Map(toolRegistry.list().map((t) => [t.name, t])),
     model,
-    systemPrompt: getSystemPrompt(cwd),
+    systemPrompt: getSystemPrompt(cwd, agentInstructions, memoryContent),
     maxTurns: args.maxTurns,
     thinking: { type: 'adaptive' },
     effort: 'high',
     cwd,
     sessionId,
     abortSignal: abortController.signal,
+    permissionEngine,
+    permissionPrompter,
+    hookExecutor,
+    costCalculator: calculateCost,
   });
 
   const renderer = new TerminalRenderer();
@@ -178,14 +264,24 @@ function getDefaultModel(providerName: string): string {
   }
 }
 
-function getSystemPrompt(cwd: string): string {
-  return `You are OpenAgent, an AI coding assistant. You help users with software engineering tasks.
+function getSystemPrompt(cwd: string, agentInstructions?: string[], memoryContent?: string): string {
+  let prompt = `You are OpenAgent, an AI coding assistant. You help users with software engineering tasks.
 
 Current working directory: ${cwd}
 
 You have access to tools for reading files, writing files, editing files, executing shell commands, searching files by name patterns, and searching file contents.
 
 Be concise and helpful. When asked to modify code, read the relevant files first to understand the context.`;
+
+  if (agentInstructions && agentInstructions.length > 0) {
+    prompt += '\n\n# User Instructions\n\n' + agentInstructions.join('\n\n---\n\n');
+  }
+
+  if (memoryContent) {
+    prompt += `\n\n# Auto Memory\n\nYou have a persistent memory directory. Current MEMORY.md contents:\n\n${memoryContent}`;
+  }
+
+  return prompt;
 }
 
 function printHelp(): void {

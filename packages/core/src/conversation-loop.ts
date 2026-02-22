@@ -4,6 +4,41 @@ import type { ThinkingConfig } from './types.js';
 import type { SDKMessage } from './types.js';
 import { randomUUID } from 'crypto';
 
+/**
+ * Minimal interface for permission checking — implemented by PermissionEngine
+ * from @open-agent/permissions, but defined here so core does not depend on
+ * that package.
+ */
+export interface PermissionChecker {
+  evaluate(request: { toolName: string; input: unknown }): { behavior: 'allow' | 'deny' | 'ask'; reason?: string };
+  addRule(behavior: 'allow' | 'deny' | 'ask', rule: { toolName: string; ruleContent?: string }): void;
+}
+
+/**
+ * Callback interface for prompting the user when a permission decision is
+ * 'ask'.  Callers supply a concrete implementation (e.g. TerminalPermissionPrompter).
+ */
+export interface PermissionPrompter {
+  prompt(request: { toolName: string; input: any; reason?: string }): Promise<'allow' | 'deny' | 'always'>;
+}
+
+// Hook executor interface — avoids a direct dependency on @open-agent/hooks.
+// The caller supplies a compatible implementation (e.g. HookExecutor from
+// @open-agent/hooks) when hook support is desired.
+export interface LoopHookExecutor {
+  execute(
+    event: string,
+    input: Record<string, unknown>,
+    toolUseId?: string,
+  ): Promise<{
+    continue?: boolean;
+    suppressOutput?: boolean;
+    updatedInput?: Record<string, unknown>;
+    additionalContext?: string;
+    decision?: string;
+  }>;
+}
+
 export interface ConversationLoopOptions {
   provider: LLMProvider;
   tools: Map<string, ToolDefinition>;
@@ -16,6 +51,11 @@ export interface ConversationLoopOptions {
   cwd: string;
   sessionId: string;
   abortSignal?: AbortSignal;
+  permissionEngine?: PermissionChecker;
+  permissionPrompter?: PermissionPrompter;
+  hookExecutor?: LoopHookExecutor;
+  compactThreshold?: number; // 触发压缩的估算 token 数，默认 100000
+  costCalculator?: (model: string, inputTokens: number, outputTokens: number) => number;
 }
 
 // Internal marker type for tracking open content blocks during accumulation.
@@ -47,6 +87,8 @@ export class ConversationLoop {
     const startTime = Date.now();
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
+    let totalCostUsd = 0;
+    const allPermissionDenials: string[] = [];
 
     // Append the user message to local history and emit it as an SDKUserMessage.
     this.messages.push({ role: 'user', content: userMessage });
@@ -62,6 +104,12 @@ export class ConversationLoop {
     while (true) {
       this.turnCount++;
 
+      // Check if context needs compaction
+      const threshold = this.options.compactThreshold ?? 100000;
+      if (this.estimateTokens() > threshold) {
+        await this.compact();
+      }
+
       // Guard: respect the caller-provided turn limit.
       if (this.options.maxTurns !== undefined && this.turnCount > this.options.maxTurns) {
         yield {
@@ -72,7 +120,7 @@ export class ConversationLoop {
           is_error: true,
           num_turns: this.turnCount,
           stop_reason: 'max_turns',
-          total_cost_usd: 0,
+          total_cost_usd: totalCostUsd,
           usage: { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
           modelUsage: {},
           permission_denials: [],
@@ -118,7 +166,7 @@ export class ConversationLoop {
               is_error: true,
               num_turns: this.turnCount,
               stop_reason: 'interrupted',
-              total_cost_usd: 0,
+              total_cost_usd: totalCostUsd,
               usage: { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
               modelUsage: {},
               permission_denials: [],
@@ -226,7 +274,7 @@ export class ConversationLoop {
           is_error: true,
           num_turns: this.turnCount,
           stop_reason: 'error',
-          total_cost_usd: 0,
+          total_cost_usd: totalCostUsd,
           usage: { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
           modelUsage: {},
           permission_denials: [],
@@ -241,6 +289,13 @@ export class ConversationLoop {
       if (messageUsage) {
         totalInputTokens += messageUsage.input_tokens ?? 0;
         totalOutputTokens += messageUsage.output_tokens ?? 0;
+      }
+      if (this.options.costCalculator && messageUsage) {
+        totalCostUsd += this.options.costCalculator(
+          this.options.model,
+          messageUsage.input_tokens ?? 0,
+          messageUsage.output_tokens ?? 0,
+        );
       }
 
       // Strip the internal `_closed` marker before storing / emitting.
@@ -274,6 +329,15 @@ export class ConversationLoop {
           .map((b: any) => b.text as string)
           .join('');
 
+        // ── Stop hook ───────────────────────────────────────────────────────
+        if (this.options.hookExecutor) {
+          await this.options.hookExecutor.execute('Stop', {
+            stop_reason: 'end_turn',
+            result: resultText,
+          });
+        }
+        // ── End Stop hook ───────────────────────────────────────────────────
+
         yield {
           type: 'result',
           subtype: 'success',
@@ -283,10 +347,10 @@ export class ConversationLoop {
           num_turns: this.turnCount,
           result: resultText,
           stop_reason: 'end_turn',
-          total_cost_usd: 0,
+          total_cost_usd: totalCostUsd,
           usage: { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
           modelUsage: {},
-          permission_denials: [],
+          permission_denials: allPermissionDenials,
           uuid: randomUUID(),
           session_id: sessionId,
         };
@@ -297,6 +361,7 @@ export class ConversationLoop {
       // Sequential execution avoids ordering ambiguity when tools share state
       // (e.g., file-system tools writing then reading the same path).
       const toolResults: ContentBlock[] = [];
+      const permissionDenials: string[] = [];
 
       for (const toolUse of toolUses) {
         const tool = this.options.tools.get(toolUse.name);
@@ -311,6 +376,93 @@ export class ConversationLoop {
           continue;
         }
 
+        // ── Permission check ────────────────────────────────────────────────
+        const { permissionEngine, permissionPrompter } = this.options;
+        if (permissionEngine) {
+          const decision = permissionEngine.evaluate({
+            toolName: toolUse.name,
+            input: toolUse.input,
+          });
+
+          if (decision.behavior === 'deny') {
+            const reason = decision.reason ?? 'permission denied';
+            permissionDenials.push(`${toolUse.name}: ${reason}`);
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: toolUse.id,
+              content: `Permission denied: ${reason}`,
+              is_error: true,
+            });
+            continue;
+          }
+
+          if (decision.behavior === 'ask') {
+            if (!permissionPrompter) {
+              // No prompter available — deny by default when mode requires confirmation.
+              const reason = decision.reason ?? 'permission required but no prompter configured';
+              permissionDenials.push(`${toolUse.name}: ${reason}`);
+              toolResults.push({
+                type: 'tool_result',
+                tool_use_id: toolUse.id,
+                content: `Permission denied: ${reason}`,
+                is_error: true,
+              });
+              continue;
+            }
+
+            const userDecision = await permissionPrompter.prompt({
+              toolName: toolUse.name,
+              input: toolUse.input,
+              reason: decision.reason,
+            });
+
+            if (userDecision === 'deny') {
+              const reason = 'user denied permission';
+              permissionDenials.push(`${toolUse.name}: ${reason}`);
+              toolResults.push({
+                type: 'tool_result',
+                tool_use_id: toolUse.id,
+                content: `Permission denied: ${reason}`,
+                is_error: true,
+              });
+              continue;
+            }
+
+            if (userDecision === 'always') {
+              // Persist an allow rule so this tool is pre-approved in future turns.
+              permissionEngine.addRule('allow', { toolName: toolUse.name });
+            }
+            // 'allow' or 'always' — fall through to execute the tool.
+          }
+        }
+        // ── End permission check ────────────────────────────────────────────
+
+        // ── PreToolUse hook ─────────────────────────────────────────────────
+        if (this.options.hookExecutor) {
+          const hookResult = await this.options.hookExecutor.execute(
+            'PreToolUse',
+            { tool_name: toolUse.name, tool_input: toolUse.input },
+            toolUse.id,
+          );
+
+          if (hookResult.continue === false) {
+            // Hook blocked the tool execution.
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: toolUse.id,
+              content: hookResult.decision ?? 'Blocked by hook',
+              is_error: true,
+            });
+            continue;
+          }
+
+          // Allow the hook to mutate the tool input before execution.
+          if (hookResult.updatedInput) {
+            toolUse.input = { ...(toolUse.input as Record<string, unknown>), ...hookResult.updatedInput };
+          }
+        }
+        // ── End PreToolUse hook ─────────────────────────────────────────────
+
         const toolCtx: ToolContext = {
           cwd: this.options.cwd,
           abortSignal: this.options.abortSignal,
@@ -324,6 +476,20 @@ export class ConversationLoop {
             tool_use_id: toolUse.id,
             content: typeof result === 'string' ? result : JSON.stringify(result),
           });
+
+          // ── PostToolUse hook (success) ────────────────────────────────────
+          if (this.options.hookExecutor) {
+            await this.options.hookExecutor.execute(
+              'PostToolUse',
+              {
+                tool_name: toolUse.name,
+                tool_input: toolUse.input,
+                tool_result: typeof result === 'string' ? result : JSON.stringify(result),
+              },
+              toolUse.id,
+            );
+          }
+          // ── End PostToolUse hook ──────────────────────────────────────────
         } catch (error: unknown) {
           const msg = error instanceof Error ? error.message : String(error);
           toolResults.push({
@@ -334,6 +500,9 @@ export class ConversationLoop {
           });
         }
       }
+
+      // Accumulate permission denials across all turns for the final result.
+      allPermissionDenials.push(...permissionDenials);
 
       // Feed the tool results back as a user message so the LLM can continue.
       this.messages.push({ role: 'user', content: toolResults });
@@ -350,5 +519,67 @@ export class ConversationLoop {
   /** Return the number of LLM turns executed so far. */
   getTurnCount(): number {
     return this.turnCount;
+  }
+
+  /** Update the model used for subsequent LLM calls. */
+  setModel(model: string): void {
+    this.options.model = model;
+  }
+
+  /** Update the thinking configuration. */
+  setThinking(thinking: ThinkingConfig): void {
+    this.options.thinking = thinking;
+  }
+
+  /** 估算消息列表的总 token 数（按字符数/4粗略估算） */
+  private estimateTokens(): number {
+    let chars = 0;
+    for (const msg of this.messages) {
+      if (typeof msg.content === 'string') {
+        chars += msg.content.length;
+      } else if (Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          if (block.type === 'text') chars += ((block as any).text ?? '').length;
+          else if (block.type === 'thinking') chars += ((block as any).thinking ?? '').length;
+          else if (block.type === 'tool_use') chars += JSON.stringify((block as any).input ?? {}).length;
+          else if (block.type === 'tool_result') chars += (typeof (block as any).content === 'string' ? (block as any).content.length : JSON.stringify((block as any).content ?? '').length);
+        }
+      }
+    }
+    return Math.ceil(chars / 4);
+  }
+
+  /** 压缩对话历史：用 LLM 生成摘要替换旧消息 */
+  private async compact(): Promise<void> {
+    if (this.messages.length <= 4) return; // 太短不压缩
+
+    // 保留最后 2 轮（4 条消息）
+    const keepCount = 4;
+    const toSummarize = this.messages.slice(0, -keepCount);
+    const toKeep = this.messages.slice(-keepCount);
+
+    // 用 LLM 生成摘要
+    const summaryPrompt = `Summarize the following conversation history in a concise manner, preserving key decisions, code changes, and context:\n\n${toSummarize.map(m => `[${m.role}]: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content).slice(0, 500)}`).join('\n\n')}`;
+
+    let summaryText = '';
+    try {
+      for await (const event of this.options.provider.chat(
+        [{ role: 'user', content: summaryPrompt }],
+        { model: this.options.model, maxTokens: 2048, systemPrompt: 'You are a conversation summarizer. Be concise but preserve important details.' }
+      )) {
+        if (event.type === 'text_delta') {
+          summaryText += event.text;
+        }
+      }
+    } catch {
+      // If summarization fails, just truncate without summary
+      summaryText = '[Previous conversation history was compacted]';
+    }
+
+    this.messages = [
+      { role: 'user', content: `[Conversation Summary]\n${summaryText}` },
+      { role: 'assistant', content: [{ type: 'text', text: 'I understand the context. Let me continue helping you.' }] },
+      ...toKeep,
+    ];
   }
 }

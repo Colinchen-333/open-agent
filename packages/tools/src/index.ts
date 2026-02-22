@@ -25,3 +25,4 @@ export { createGrepTool } from './grep.js';
 export { createWebFetchTool } from './web-fetch.js';
 export { createNotebookEditTool } from './notebook-edit.js';
 export { createAskUserTool } from './ask-user.js';
+export { createTaskTool, type TaskToolDeps } from './task-tool.js';

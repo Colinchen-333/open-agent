@@ -117,9 +117,11 @@ export class TerminalRenderer {
     }
     const usage = result.usage as Record<string, number> | undefined;
     if (usage) {
+      const cost = result.total_cost_usd as number | undefined;
+      const costStr = cost && cost > 0 ? ` | Cost: $${cost.toFixed(4)}` : '';
       process.stdout.write(
         `${COLORS.dim}Tokens: ${usage.input_tokens ?? 0} in / ${usage.output_tokens ?? 0} out` +
-          ` | Turns: ${result.num_turns} | ${result.duration_ms}ms${COLORS.reset}\n`,
+          ` | Turns: ${result.num_turns} | ${result.duration_ms}ms${costStr}${COLORS.reset}\n`,
       );
     }
   }

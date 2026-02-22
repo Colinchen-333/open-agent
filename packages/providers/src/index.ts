@@ -13,6 +13,7 @@ export type {
 export { AnthropicProvider } from './anthropic.js';
 export { OpenAIProvider } from './openai.js';
 export { OllamaProvider } from './ollama.js';
+export { calculateCost } from './pricing.js';
 
 import type { LLMProvider } from './types.js';
 import { AnthropicProvider } from './anthropic.js';

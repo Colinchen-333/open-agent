@@ -136,12 +136,18 @@ export function query(params: {
     // Documented as a no-op stub for forward compatibility.
   };
 
-  queryObj.setModel = async (_newModel) => {
-    // Dynamic model swapping is not yet implemented in the core loop.
+  queryObj.setModel = async (newModel) => {
+    if (newModel !== undefined) {
+      loop.setModel(newModel);
+    }
   };
 
-  queryObj.setMaxThinkingTokens = async (_tokens) => {
-    // Dynamic thinking-budget adjustment is not yet implemented.
+  queryObj.setMaxThinkingTokens = async (tokens) => {
+    if (tokens !== null) {
+      loop.setThinking({ type: 'enabled', budgetTokens: tokens });
+    } else {
+      loop.setThinking({ type: 'disabled' });
+    }
   };
 
   queryObj.supportedCommands = async () => [];
