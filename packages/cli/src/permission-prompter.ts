@@ -1,4 +1,3 @@
-import * as readline from 'readline/promises';
 import type { PermissionPrompter } from '@open-agent/core';
 
 const ESC = '\x1b';
@@ -86,24 +85,24 @@ export class TerminalPermissionPrompter implements PermissionPrompter {
     // Prompt for answer
     process.stdout.write(`${dangerColor}❯${C.reset} `);
 
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    try {
-      const answer = await rl.question('');
-      const lower = answer.trim().toLowerCase();
+    const answer = await new Promise<string>((resolve) => {
+      const onData = (data: Buffer) => {
+        resolve(data.toString().trim());
+      };
+      process.stdin.once('data', onData);
+    });
+    const lower = answer.toLowerCase();
 
-      if (lower === 'a' || lower === 'always') {
-        process.stdout.write(`${C.cyan}  ✓ Always allowing ${request.toolName}${C.reset}\n`);
-        return 'always';
-      }
-      if (lower === 'y' || lower === 'yes' || lower === '') {
-        process.stdout.write(`${C.green}  ✓ Allowed${C.reset}\n`);
-        return 'allow';
-      }
-      process.stdout.write(`${C.red}  ✗ Denied${C.reset}\n`);
-      return 'deny';
-    } finally {
-      rl.close();
+    if (lower === 'a' || lower === 'always') {
+      process.stdout.write(`${C.cyan}  ✓ Always allowing ${request.toolName}${C.reset}\n`);
+      return 'always';
     }
+    if (lower === 'y' || lower === 'yes' || lower === '') {
+      process.stdout.write(`${C.green}  ✓ Allowed${C.reset}\n`);
+      return 'allow';
+    }
+    process.stdout.write(`${C.red}  ✗ Denied${C.reset}\n`);
+    return 'deny';
   }
 
   private isDangerous(toolName: string, input: any): boolean {

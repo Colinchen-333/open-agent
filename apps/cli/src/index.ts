@@ -120,9 +120,29 @@ async function main(): Promise<void> {
   // Load MCP server configs from settings (key: mcpServers)
   const mcpServers = (settings.mcpServers ?? {}) as Record<string, any>;
   if (Object.keys(mcpServers).length > 0) {
-    // Fire-and-forget: connection errors are recorded on the manager but
-    // should not prevent the CLI from starting.
-    mcpManager.setServers(mcpServers).catch(() => {});
+    // Connect MCP servers and register their tools into the tool registry.
+    // We use .then() so CLI startup is not blocked — MCP tools become
+    // available shortly after the REPL is ready.
+    mcpManager.setServers(mcpServers).then(async () => {
+      try {
+        const mcpTools = mcpManager.getAllTools();
+        for (const mcpTool of mcpTools) {
+          // Avoid overwriting built-in tools with same name.
+          if (toolRegistry.get(mcpTool.name)) continue;
+          toolRegistry.register({
+            name: mcpTool.name,
+            description: mcpTool.description ?? '',
+            inputSchema: mcpTool.inputSchema ?? { type: 'object', properties: {} },
+            execute: async (input: any) => {
+              const result = await mcpManager.callTool(mcpTool.serverName, mcpTool.name, input);
+              return typeof result === 'string' ? result : JSON.stringify(result);
+            },
+          });
+        }
+      } catch {
+        // MCP tool registration failed — not fatal, continue without them.
+      }
+    }).catch(() => {});
   }
 
   toolRegistry.register(createListMcpResourcesTool({
@@ -435,6 +455,7 @@ async function main(): Promise<void> {
       memoryDir: autoMemory.getDir(),
       isGitRepo: isGitRepository(cwd),
       toolDescriptions: getToolPromptDescriptions(),
+      knowledgeCutoff: 'May 2025',
     }),
     maxTurns: effectiveMaxTurns,
     thinking: effectiveThinking,
@@ -532,6 +553,8 @@ async function executePrompt(
     sessionMgr.appendToTranscript(cwd, sessionId, message);
   }
   renderer.stopSpinner();
+  // Touch session to update lastActiveAt so --continue picks the right session.
+  sessionMgr.touchSession(cwd, sessionId);
 }
 
 function renderMessage(renderer: TerminalRenderer, message: SDKMessage): void {

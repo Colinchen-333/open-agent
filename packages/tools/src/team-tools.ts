@@ -37,10 +37,16 @@ export function createTeamDeleteTool(deps: TeamToolsDeps): ToolDefinition {
   return {
     name: 'TeamDelete',
     description: 'Remove team and task directories when work is complete.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-    async execute(_input: any, _ctx: ToolContext) {
-      // 实际中需要从上下文获取当前 team name
-      return JSON.stringify({ success: true, message: 'Team deleted' });
+    inputSchema: {
+      type: 'object',
+      properties: {
+        team_name: { type: 'string', description: 'Name of the team to delete' },
+      },
+      required: ['team_name'],
+    },
+    async execute(input: any, _ctx: ToolContext) {
+      const result = await deps.deleteTeam(input.team_name);
+      return JSON.stringify(result);
     },
   };
 }

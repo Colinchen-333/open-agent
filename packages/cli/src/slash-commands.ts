@@ -43,8 +43,9 @@ const SLASH_COMMANDS: Record<
   },
   '/compact': {
     description: 'Compact conversation history to save context',
-    handler: async (_args, _ctx) => {
-      return { handled: true, output: 'Compacting conversation history...' };
+    handler: async (_args, ctx) => {
+      await ctx.loop.compact();
+      return { handled: true, output: 'Conversation history compacted.' };
     },
   },
   '/model': {

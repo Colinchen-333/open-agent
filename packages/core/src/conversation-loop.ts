@@ -815,7 +815,7 @@ export class ConversationLoop {
   }
 
   /** Compact conversation history by summarising older messages with the LLM. */
-  private async compact(): Promise<void> {
+  async compact(): Promise<void> {
     // Keep the last 6 messages (3 turns) — enough to preserve immediate context
     // while still meaningfully reducing the window size.
     if (this.messages.length <= 6) return;
