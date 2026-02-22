@@ -38,7 +38,7 @@ export class FileCheckpoint {
     this.entries.push(entry);
 
     // Also persist to disk
-    const checkpointFile = join(this.sessionDir, `${toolUseId}-${Date.now()}.json`);
+    const checkpointFile = join(this.sessionDir, `${toolUseId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`);
     writeFileSync(checkpointFile, JSON.stringify(entry), 'utf-8');
   }
 

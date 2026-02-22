@@ -99,6 +99,14 @@ export class ConversationLoop {
     };
   }
 
+  /** Build the base fields required by all hook events. */
+  private hookBase(): Record<string, unknown> {
+    return {
+      session_id: this.options.sessionId,
+      cwd: this.options.cwd,
+    };
+  }
+
   /**
    * Process a user message and stream back SDK messages for every significant
    * event in the agent loop (stream events, assistant turns, tool results,
@@ -125,7 +133,7 @@ export class ConversationLoop {
     if (this.options.hookExecutor) {
       const hookResult = await this.options.hookExecutor.execute(
         'UserPromptSubmit',
-        { user_prompt: userMessage, session_id: sessionId },
+        { ...this.hookBase(), hook_event_name: 'UserPromptSubmit', user_prompt: userMessage },
       );
       if (hookResult.continue === false) {
         yield {
@@ -396,6 +404,23 @@ export class ConversationLoop {
         }
       } catch (error: unknown) {
         const msg = error instanceof Error ? error.message : String(error);
+
+        // If the error is a context-length exceeded error, try to compact and retry.
+        const isContextError = /context.length|token.limit|too.many.tokens|request.too.large|max.context/i.test(msg)
+          || (msg.includes('400') && /tokens?/i.test(msg));
+        if (isContextError && this.messages.length > 4) {
+          yield {
+            type: 'system' as any,
+            subtype: 'info',
+            message: 'Context limit reached — compacting conversation history and retrying...',
+            session_id: sessionId,
+            uuid: randomUUID(),
+          } as any;
+          await this.compact();
+          this.turnCount--; // Don't count the failed attempt as a turn
+          continue;
+        }
+
         yield {
           type: 'result',
           subtype: 'error_during_execution',
@@ -510,6 +535,8 @@ export class ConversationLoop {
         // ── Stop hook ───────────────────────────────────────────────────────
         if (this.options.hookExecutor) {
           await this.options.hookExecutor.execute('Stop', {
+            ...this.hookBase(),
+            hook_event_name: 'Stop',
             stop_reason: stopReason ?? 'end_turn',
             result: resultText,
           });
@@ -677,7 +704,7 @@ export class ConversationLoop {
           if (this.options.hookExecutor) {
             const hookResult = await this.options.hookExecutor.execute(
               'PreToolUse',
-              { tool_name: toolUse.name, tool_input: toolUse.input },
+              { ...this.hookBase(), hook_event_name: 'PreToolUse', tool_name: toolUse.name, tool_input: toolUse.input },
               toolUse.id,
             );
 
@@ -707,9 +734,11 @@ export class ConversationLoop {
               await this.options.hookExecutor.execute(
                 'PostToolUse',
                 {
+                  ...this.hookBase(),
+                  hook_event_name: 'PostToolUse',
                   tool_name: toolUse.name,
                   tool_input: toolUse.input,
-                  tool_result: resultStr,
+                  tool_response: resultStr,
                 },
                 toolUse.id,
               );
@@ -744,6 +773,8 @@ export class ConversationLoop {
               await this.options.hookExecutor.execute(
                 'PostToolUseFailure',
                 {
+                  ...this.hookBase(),
+                  hook_event_name: 'PostToolUseFailure',
                   tool_name: toolUse.name,
                   tool_input: toolUse.input,
                   error: msg,
@@ -991,6 +1022,8 @@ export class ConversationLoop {
     // ── PreCompact hook ───────────────────────────────────────────────
     if (this.options.hookExecutor) {
       await this.options.hookExecutor.execute('PreCompact', {
+        ...this.hookBase(),
+        hook_event_name: 'PreCompact',
         message_count: this.messages.length,
         estimated_tokens: this.estimateTokens(),
       });
@@ -1008,11 +1041,17 @@ export class ConversationLoop {
     );
     let keepFrom = this.messages.length - targetKeep;
 
-    // Walk forward to find a clean turn boundary (user text message, not
-    // a tool_result array).
+    // Walk forward to find a clean turn boundary — a user message that is
+    // not a tool_result response.  User messages with string content or
+    // array content that does NOT start with a tool_result block qualify.
     while (keepFrom < this.messages.length - 2) {
       const msg = this.messages[keepFrom];
-      if (msg.role === 'user' && typeof msg.content === 'string') break;
+      if (msg.role === 'user') {
+        const isToolResult = Array.isArray(msg.content) &&
+          msg.content.length > 0 &&
+          (msg.content[0] as any)?.type === 'tool_result';
+        if (!isToolResult) break;
+      }
       keepFrom++;
     }
 
