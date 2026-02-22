@@ -1,8 +1,9 @@
 import { randomUUID } from 'crypto';
 import type { SDKMessage, SDKUserMessage } from '@open-agent/core';
-import { ConversationLoop } from '@open-agent/core';
+import { ConversationLoop, SessionManager } from '@open-agent/core';
 import { createDefaultToolRegistry } from '@open-agent/tools';
 import { autoDetectProvider, createProvider } from '@open-agent/providers';
+import { PermissionEngine } from '@open-agent/permissions';
 import type { QueryOptions, Query } from './types.js';
 
 // --------------------------------------------------------------------------
@@ -109,6 +110,23 @@ export function query(
   }
 
   // ------------------------------------------------------------------
+  // Permission engine — wire from QueryOptions
+  // ------------------------------------------------------------------
+  const permMode = options.allowDangerouslySkipPermissions
+    ? 'bypassPermissions'
+    : (options.permissionMode as any) ?? 'bypassPermissions'; // SDK defaults to bypass
+  const permissionEngine = new PermissionEngine({ mode: permMode });
+
+  // ------------------------------------------------------------------
+  // Session resume — restore prior history if requested
+  // ------------------------------------------------------------------
+  let initialMessages: import('@open-agent/providers').Message[] = (options as any).initialMessages ?? [];
+  if (options.resume && initialMessages.length === 0) {
+    const sessionMgr = new SessionManager();
+    initialMessages = sessionMgr.loadTranscript(cwd, options.resume);
+  }
+
+  // ------------------------------------------------------------------
   // Conversation loop
   // ------------------------------------------------------------------
   const loop = new ConversationLoop({
@@ -122,7 +140,8 @@ export function query(
     cwd,
     sessionId,
     abortSignal: options.abortController?.signal,
-    initialMessages: (options as any).initialMessages,
+    permissionEngine,
+    initialMessages: initialMessages.length > 0 ? initialMessages : undefined,
   });
 
   // ------------------------------------------------------------------

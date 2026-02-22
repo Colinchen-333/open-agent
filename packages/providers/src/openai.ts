@@ -266,11 +266,16 @@ export class OpenAIProvider implements LLMProvider {
 
         // Finish reason
         if (choice.finish_reason) {
-          // Close all pending tool calls
+          // Close all pending tool calls — including zero-argument ones that
+          // never received an arguments chunk and thus were never "started".
           for (const [, acc] of toolAccumulators) {
-            if (acc.started) {
-              yield { type: 'tool_use_end', id: acc.id };
+            if (!acc.started) {
+              // Zero-argument tool call: emit start + empty args + end
+              acc.started = true;
+              yield { type: 'tool_use_start', id: acc.id, name: acc.name };
+              yield { type: 'tool_use_delta', id: acc.id, partial_json: acc.argumentsJson || '{}' };
             }
+            yield { type: 'tool_use_end', id: acc.id };
           }
 
           yield {

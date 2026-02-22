@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import type { ModelInfo } from '@open-agent/core';
 import type {
   ChatOptions,
@@ -275,7 +276,7 @@ export class OllamaProvider implements LLMProvider {
             for (const tc of chunk.message.tool_calls) {
               const name = tc.function.name;
               const argsJson = JSON.stringify(tc.function.arguments);
-              const id = `ollama-tool-${name}-${Date.now()}`;
+              const id = `ollama-${randomUUID().slice(0, 12)}`;
 
               yield { type: 'tool_use_start', id, name };
               yield { type: 'tool_use_delta', id, partial_json: argsJson };
@@ -295,7 +296,9 @@ export class OllamaProvider implements LLMProvider {
               type: 'message_end',
               message: {
                 model: chunk.model,
-                done_reason: chunk.done_reason,
+                stop_reason: chunk.done_reason === 'stop' ? 'end_turn'
+                  : chunk.done_reason === 'length' ? 'max_tokens'
+                  : chunk.done_reason ?? 'end_turn',
               },
               usage: {
                 prompt_tokens: chunk.prompt_eval_count,

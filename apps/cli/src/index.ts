@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { parseArgs, TerminalRenderer, REPL, emitStreamJson, TerminalPermissionPrompter, handleSlashCommand } from '@open-agent/cli';
+import { parseArgs, TerminalRenderer, REPL, emitStreamJson, emitStreamJsonInit, TerminalPermissionPrompter, handleSlashCommand } from '@open-agent/cli';
 import { ConversationLoop, SessionManager, ConfigLoader, AutoMemory, buildSystemPrompt, isGitRepository, FileCheckpoint } from '@open-agent/core';
 import { createProvider, autoDetectProvider, calculateCost } from '@open-agent/providers';
 import {
@@ -741,6 +741,9 @@ async function main(): Promise<void> {
   // Single-prompt mode  (open-agent -p "…" or open-agent "…")
   // ------------------------------------------------------------------
   if (args.prompt) {
+    if (isStreamJson) {
+      emitStreamJsonInit({ tools: toolNames, model, cwd, permissionMode: effectivePermissionMode, sessionId });
+    }
     await executePrompt(loop, args.prompt, renderer, isStreamJson, sessionMgr, cwd, sessionId);
     // Fire SessionEnd before exiting single-prompt mode.
     try {

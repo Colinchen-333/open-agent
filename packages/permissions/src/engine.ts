@@ -84,7 +84,13 @@ export class PermissionEngine {
       return { behavior: 'allow', reason: 'bypass mode' };
     }
 
-    // 1b. File system path restrictions — checked after bypassPermissions but
+    // 1b. Sandbox enforcement — file system + auto-allow bash if sandboxed.
+    if (this.sandbox.enabled) {
+      const sandboxDecision = this.checkSandbox(request);
+      if (sandboxDecision) return sandboxDecision;
+    }
+
+    // 1c. File system path restrictions — checked after bypassPermissions but
     //     before all other rules so they can't be bypassed by allow rules.
     if (FILE_SYSTEM_TOOLS.includes(request.toolName)) {
       const pathDecision = this.checkPathRestrictions(request);
@@ -309,6 +315,50 @@ export class PermissionEngine {
   }
 
   // ── Private helpers ──────────────────────────────────────────────────────────
+
+  /**
+   * Check sandbox restrictions — filesystem write paths and read deny lists.
+   * Returns a PermissionDecision if the request is affected, or null.
+   */
+  private checkSandbox(request: PermissionRequest): PermissionDecision | null {
+    const fs = this.sandbox.filesystem;
+    const inp = request.input as Record<string, unknown>;
+    const filePath = String(inp?.file_path ?? inp?.path ?? inp?.notebook_path ?? '');
+
+    // Sandbox: deny reads for blocked paths
+    if (filePath && fs?.denyRead) {
+      for (const denied of fs.denyRead) {
+        if (filePath.startsWith(denied)) {
+          return { behavior: 'deny', reason: `sandbox: read denied for ${denied}` };
+        }
+      }
+    }
+
+    // Sandbox: restrict writes to allowed paths only
+    const isWriteTool = ['Write', 'Edit', 'NotebookEdit'].includes(request.toolName);
+    if (isWriteTool && filePath && fs?.allowWrite && fs.allowWrite.length > 0) {
+      const inAllowed = fs.allowWrite.some(a => filePath.startsWith(a));
+      if (!inAllowed) {
+        return { behavior: 'deny', reason: `sandbox: write outside allowed paths` };
+      }
+    }
+
+    // Sandbox: deny writes to explicitly denied paths
+    if (isWriteTool && filePath && fs?.denyWrite) {
+      for (const denied of fs.denyWrite) {
+        if (filePath.startsWith(denied)) {
+          return { behavior: 'deny', reason: `sandbox: write denied for ${denied}` };
+        }
+      }
+    }
+
+    // Sandbox: auto-allow Bash if autoAllowBashIfSandboxed is set
+    if (this.sandbox.autoAllowBashIfSandboxed && request.toolName === 'Bash') {
+      return { behavior: 'allow', reason: 'sandbox: auto-allow bash (sandboxed)' };
+    }
+
+    return null;
+  }
 
   /**
    * Check whether a file-system tool request is blocked by path restrictions.

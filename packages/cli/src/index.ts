@@ -7,7 +7,7 @@ export { TerminalRenderer } from './renderer.js';
 
 export { REPL } from './repl.js';
 
-export { emitStreamJson } from './stream-json.js';
+export { emitStreamJson, emitStreamJsonInit } from './stream-json.js';
 
 export { TerminalPermissionPrompter } from './permission-prompter.js';
 
