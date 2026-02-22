@@ -1,3 +1,5 @@
+import { existsSync, writeFileSync } from 'fs';
+import { join } from 'path';
 import type { ConversationLoop, FileCheckpoint, SessionManager } from '@open-agent/core';
 
 export interface SlashCommandContext {
@@ -101,6 +103,14 @@ const SLASH_COMMANDS: Record<
         '    /memory          Show auto-memory status',
         '    /agents          List available agent types',
         '    /mcp             Show MCP server status',
+        '',
+        '  Git',
+        '    /commit          Create a git commit with AI message',
+        '    /review          Review current git diff',
+        '',
+        '  Project',
+        '    /init            Create AGENT.md for this project',
+        '    /doctor          Diagnose environment issues',
         '',
         '  General',
         '    /help            Show this help',
@@ -325,6 +335,86 @@ const SLASH_COMMANDS: Record<
         handled: true,
         output: `Registered tools (${tools.length}):\n${lines.join('\n')}`,
       };
+    },
+  },
+  '/init': {
+    description: 'Create an AGENT.md file for this project',
+    handler: async (_args, ctx) => {
+      const agentMdPath = join(ctx.cwd, 'AGENT.md');
+      if (existsSync(agentMdPath)) {
+        return { handled: true, output: `AGENT.md already exists at ${agentMdPath}` };
+      }
+      const template = [
+        '# Agent Instructions',
+        '',
+        '## Project',
+        '',
+        '<!-- Describe this project: what it does, the tech stack, and key conventions -->',
+        '',
+        '## Commands',
+        '',
+        '<!-- Common commands the agent should know about -->',
+        '<!-- Example: -->',
+        '<!-- - Build: `npm run build` -->',
+        '<!-- - Test: `npm test` -->',
+        '<!-- - Lint: `npm run lint` -->',
+        '',
+        '## Code Style',
+        '',
+        '<!-- Describe coding conventions, naming patterns, file organization -->',
+        '',
+        '## Notes',
+        '',
+        '<!-- Any gotchas, important context, or constraints the agent should know -->',
+        '',
+      ].join('\n');
+      writeFileSync(agentMdPath, template);
+      return { handled: true, output: `Created AGENT.md at ${agentMdPath}\nEdit it to describe your project.` };
+    },
+  },
+  '/commit': {
+    description: 'Stage and commit changes with an AI-generated message',
+    handler: async (_args, ctx) => {
+      // Delegate to the agent loop — the system prompt already has detailed
+      // commit instructions. This approach lets the LLM inspect the diff,
+      // write a proper message, and handle edge cases.
+      return {
+        handled: false,
+        output: 'Create a git commit for all the current changes. Follow the commit instructions in the system prompt.',
+      };
+    },
+  },
+  '/review': {
+    description: 'Review the current git diff',
+    handler: async (_args, ctx) => {
+      return {
+        handled: false,
+        output: 'Review the current git diff (both staged and unstaged changes). Provide feedback on code quality, potential bugs, and suggestions for improvement.',
+      };
+    },
+  },
+  '/doctor': {
+    description: 'Diagnose environment and configuration issues',
+    handler: async (_args, ctx) => {
+      const checks: string[] = [];
+      // Check git
+      try {
+        const { execSync } = require('child_process');
+        const gitVersion = execSync('git --version', { encoding: 'utf-8' }).trim();
+        checks.push(`  ✓ ${gitVersion}`);
+      } catch { checks.push('  ✗ git not found'); }
+      // Check ripgrep
+      try {
+        const { execSync } = require('child_process');
+        const rgVersion = execSync('rg --version', { encoding: 'utf-8' }).split('\n')[0].trim();
+        checks.push(`  ✓ ${rgVersion}`);
+      } catch { checks.push('  ✗ ripgrep (rg) not found — Grep tool will not work'); }
+      // Check Node/Bun
+      checks.push(`  ✓ Bun ${Bun.version}`);
+      checks.push(`  ✓ CWD: ${ctx.cwd}`);
+      checks.push(`  ✓ Model: ${ctx.model}`);
+      checks.push(`  ✓ Permission mode: ${ctx.permissionMode ?? 'default'}`);
+      return { handled: true, output: `Environment check:\n${checks.join('\n')}` };
     },
   },
   '/rewind': {

@@ -65,7 +65,7 @@ async function main(): Promise<void> {
   // Working directory + settings
   // (settings must be loaded before model selection so defaults apply)
   // ------------------------------------------------------------------
-  const cwd = process.cwd();
+  const cwd = args.cwd ? require('path').resolve(args.cwd) : process.cwd();
   const configLoader = new ConfigLoader();
   const settings = configLoader.loadSettings(cwd);
 
@@ -652,6 +652,10 @@ async function main(): Promise<void> {
   if (args.systemPrompt) {
     customInstructionsList.push(args.systemPrompt);
   }
+  // --append-system-prompt adds extra text after the default system prompt
+  if (args.appendSystemPrompt) {
+    customInstructionsList.push(args.appendSystemPrompt);
+  }
 
   // Apply --allowedTools / --disallowedTools filtering
   if (args.allowedTools && args.allowedTools.length > 0) {
@@ -710,30 +714,21 @@ async function main(): Promise<void> {
   // output.  Useful for scripting and piping.
   // ------------------------------------------------------------------
   if (args.print && args.prompt) {
-    const printLoop = new ConversationLoop({
-      provider,
-      tools: new Map(), // No tools in print mode
-      model,
-      systemPrompt: loop['options'].systemPrompt, // reuse same system prompt
-      maxTurns: 1,
-      thinking: effectiveThinking,
-      effort: effectiveEffort,
-      cwd,
-      sessionId,
-      abortSignal: abortController.signal,
-      costCalculator: calculateCost,
-    });
-    for await (const message of printLoop.run(args.prompt)) {
-      if (message.type === 'result' && (message as any).result) {
-        process.stdout.write((message as any).result);
+    // Print mode: one-shot with full tools, streams only text to stdout.
+    // Matches Claude Code's `-p` behavior — runs agent loop then exits.
+    for await (const message of loop.run(args.prompt)) {
+      if (isStreamJson) {
+        emitStreamJson(message);
       } else if (message.type === 'stream_event') {
         const evt = (message as any).event;
         if (evt?.type === 'text_delta') {
           process.stdout.write(evt.text);
         }
+      } else if (message.type === 'result' && (message as any).result) {
+        // Final text only if we haven't been streaming deltas
       }
     }
-    process.stdout.write('\n');
+    if (!isStreamJson) process.stdout.write('\n');
     process.exit(0);
   }
 
@@ -767,7 +762,7 @@ async function main(): Promise<void> {
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    const input = await repl.getInput();
+    let input = await repl.getInput();
 
     if (input === null) {
       // EOF — user pressed Ctrl+D
@@ -802,8 +797,14 @@ async function main(): Promise<void> {
       if (result) {
         if (result.shouldExit) break;
         if (result.shouldClear) { console.clear(); continue; }
-        if (result.output) console.log(result.output);
-        continue;
+        if (!result.handled && result.output) {
+          // Command wants to delegate to the agent loop (e.g. /commit, /review).
+          // Use the output as the prompt instead of the raw slash command.
+          input = result.output;
+        } else {
+          if (result.output) console.log(result.output);
+          continue;
+        }
       }
     }
 

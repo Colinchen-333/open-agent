@@ -14,10 +14,14 @@ export interface CliArgs {
   apiKey?: string;
   baseURL?: string;
   systemPrompt?: string;
+  appendSystemPrompt?: string;
   allowedTools?: string[];
   disallowedTools?: string[];
   dangerouslySkipPermissions?: boolean;
   json?: boolean;
+  cwd?: string;
+  noMarkdown?: boolean;
+  inputFormat?: 'text' | 'stream-json';
 }
 
 /**
@@ -100,11 +104,11 @@ export function parseArgs(argv: string[]): CliArgs {
 
 /** Flags that are purely boolean and never consume the next token. */
 function isBooleanFlag(key: string): boolean {
-  return ['continue', 'print', 'help', 'version', 'verbose', 'debug', 'dangerouslySkipPermissions', 'json'].includes(key);
+  return ['continue', 'print', 'help', 'version', 'verbose', 'debug', 'dangerouslySkipPermissions', 'json', 'no-markdown', 'noMarkdown'].includes(key);
 }
 
 function isBooleanShort(key: string): boolean {
-  return ['c', 'h', 'v'].includes(key);
+  return ['c', 'h', 'v', 'p'].includes(key);
 }
 
 function applyLongFlag(result: CliArgs, key: string, value: string | undefined): void {
@@ -173,6 +177,23 @@ function applyLongFlag(result: CliArgs, key: string, value: string | undefined):
     case 'json':
       result.json = value !== 'false';
       break;
+    case 'cwd':
+      result.cwd = value;
+      break;
+    case 'append-system-prompt':
+    case 'appendSystemPrompt':
+      result.appendSystemPrompt = value;
+      break;
+    case 'no-markdown':
+    case 'noMarkdown':
+      result.noMarkdown = value !== 'false';
+      break;
+    case 'input-format':
+    case 'inputFormat':
+      if (value === 'text' || value === 'stream-json') {
+        result.inputFormat = value;
+      }
+      break;
     // Unknown flags are silently ignored
   }
 }
@@ -189,7 +210,9 @@ function applyShortFlag(result: CliArgs, key: string, value: string | undefined)
       result.continue = value !== 'false';
       break;
     case 'p':
-      result.prompt = value;
+      result.print = true;
+      // If a value was passed (e.g. -p "query"), treat it as the prompt too
+      if (value && value !== 'true') result.prompt = value;
       break;
     case 'h':
       result.help = true;
