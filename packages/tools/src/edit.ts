@@ -90,6 +90,13 @@ export function createEditTool(): ToolDefinition {
     },
 
     async execute(input: FileEditInput, ctx: ToolContext) {
+      // Reject no-op edits where old and new strings are identical.
+      if (input.old_string === input.new_string) {
+        throw new Error(
+          'old_string and new_string are identical. No changes to make.'
+        );
+      }
+
       // Enforce read-before-edit safety: the LLM must have read the file
       // at least once in this conversation before it can edit it.  This
       // prevents blind edits that could silently corrupt files.

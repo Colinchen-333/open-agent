@@ -184,6 +184,7 @@ export class ConversationLoop {
       // being delivered via tool_use_delta events.
       let currentToolUse: { id: string; name: string; input: string } | null = null;
       let messageUsage: any = null;
+      let stopReason: string | null = null;
       // Signature from the most recent thinking content_block_start, used to
       // attach the signature to the accumulated thinking block.
       let pendingThinkingSignature: string | undefined;
@@ -318,6 +319,7 @@ export class ConversationLoop {
 
             case 'message_end': {
               messageUsage = event.usage ?? null;
+              stopReason = (event.message as any)?.stop_reason ?? null;
               break;
             }
 
@@ -413,6 +415,17 @@ export class ConversationLoop {
       const toolUses = cleanContent.filter((b) => b.type === 'tool_use');
 
       if (toolUses.length === 0) {
+        // If the model hit the output token limit, automatically continue
+        // rather than treating it as a final response. This matches Claude
+        // Code's behaviour of seamlessly continuing truncated output.
+        if (stopReason === 'max_tokens') {
+          this.messages.push({
+            role: 'user',
+            content: 'Continue from where you left off. Do not repeat what you already said.',
+          });
+          continue; // Loop back to call the LLM again
+        }
+
         // No tool calls — the model has finished. Extract the final text and
         // emit a success result.
         const resultText = cleanContent
@@ -423,7 +436,7 @@ export class ConversationLoop {
         // ── Stop hook ───────────────────────────────────────────────────────
         if (this.options.hookExecutor) {
           await this.options.hookExecutor.execute('Stop', {
-            stop_reason: 'end_turn',
+            stop_reason: stopReason ?? 'end_turn',
             result: resultText,
           });
         }
@@ -437,7 +450,7 @@ export class ConversationLoop {
           is_error: false,
           num_turns: this.turnCount,
           result: resultText,
-          stop_reason: 'end_turn',
+          stop_reason: stopReason ?? 'end_turn',
           total_cost_usd: totalCostUsd,
           usage: { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
           modelUsage: {},
