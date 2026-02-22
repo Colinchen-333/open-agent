@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import type { SDKMessage, SDKUserMessage } from '@open-agent/core';
-import { ConversationLoop, SessionManager } from '@open-agent/core';
+import { ConversationLoop, SessionManager, buildSystemPrompt, ConfigLoader, AutoMemory } from '@open-agent/core';
 import { createDefaultToolRegistry } from '@open-agent/tools';
 import { autoDetectProvider, createProvider } from '@open-agent/providers';
 import { PermissionEngine } from '@open-agent/permissions';
@@ -95,27 +95,43 @@ export function query(
     (provider.name === 'anthropic' ? 'claude-sonnet-4-6' : 'gpt-4o');
 
   // ------------------------------------------------------------------
-  // System prompt
-  // ------------------------------------------------------------------
-  let systemPrompt: string;
-  if (typeof options.systemPrompt === 'string') {
-    systemPrompt = options.systemPrompt;
-  } else if (options.systemPrompt?.type === 'preset') {
-    systemPrompt = buildDefaultSystemPrompt(cwd);
-    if (options.systemPrompt.append) {
-      systemPrompt += '\n\n' + options.systemPrompt.append;
-    }
-  } else {
-    systemPrompt = buildDefaultSystemPrompt(cwd);
-  }
-
-  // ------------------------------------------------------------------
   // Permission engine — wire from QueryOptions
   // ------------------------------------------------------------------
   const permMode = options.allowDangerouslySkipPermissions
     ? 'bypassPermissions'
     : (options.permissionMode as any) ?? 'bypassPermissions'; // SDK defaults to bypass
   const permissionEngine = new PermissionEngine({ mode: permMode });
+
+  // ------------------------------------------------------------------
+  // System prompt
+  // ------------------------------------------------------------------
+  let systemPrompt: string;
+  if (typeof options.systemPrompt === 'string') {
+    systemPrompt = options.systemPrompt;
+  } else {
+    // Build the full system prompt (matching CLI behavior): includes tool
+    // descriptions, safety guidelines, AGENT.md, auto-memory, etc.
+    const toolNames = toolRegistry.list().map(t => t.name);
+    const configLoader = new ConfigLoader();
+    const agentMdInstructions = configLoader.loadAgentMd(cwd);
+    const memory = new AutoMemory(cwd);
+    const memoryContent = memory.readMemory();
+
+    systemPrompt = buildSystemPrompt({
+      model,
+      cwd,
+      tools: toolNames,
+      permissionMode: permMode,
+      knowledgeCutoff: 'August 2025',
+      agentInstructions: agentMdInstructions,
+      memoryDir: memory.getDir(),
+      memoryContent: memoryContent ?? undefined,
+    });
+
+    if (options.systemPrompt?.type === 'preset' && options.systemPrompt.append) {
+      systemPrompt += '\n\n' + options.systemPrompt.append;
+    }
+  }
 
   // ------------------------------------------------------------------
   // Session resume — restore prior history if requested
@@ -129,6 +145,8 @@ export function query(
   // ------------------------------------------------------------------
   // Conversation loop
   // ------------------------------------------------------------------
+  const internalAbortController = options.abortController ?? new AbortController();
+
   const loop = new ConversationLoop({
     provider,
     tools: new Map(toolRegistry.list().map((t) => [t.name, t])),
@@ -139,7 +157,7 @@ export function query(
     effort: options.effort,
     cwd,
     sessionId,
-    abortSignal: options.abortController?.signal,
+    abortSignal: internalAbortController.signal,
     permissionEngine,
     initialMessages: initialMessages.length > 0 ? initialMessages : undefined,
   });
@@ -174,7 +192,7 @@ export function query(
   const queryObj = gen as unknown as Query;
 
   queryObj.interrupt = async () => {
-    options.abortController?.abort();
+    internalAbortController.abort();
   };
 
   queryObj.setPermissionMode = async (mode) => {
@@ -206,7 +224,7 @@ export function query(
   queryObj.accountInfo = async () => ({});
 
   queryObj.close = () => {
-    options.abortController?.abort();
+    internalAbortController.abort();
   };
 
   return queryObj;
@@ -235,7 +253,3 @@ function guessProviderFromModel(
   return null;
 }
 
-/** Minimal default system prompt injected when no override is supplied. */
-function buildDefaultSystemPrompt(cwd: string): string {
-  return `You are OpenAgent, an AI coding assistant. Current working directory: ${cwd}`;
-}

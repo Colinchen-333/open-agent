@@ -250,7 +250,16 @@ export function unstable_v2_resumeSession(
   sessionId: string,
   options: SessionOptions,
 ): Session {
-  const session = unstable_v2_createSession(options);
+  // Restore conversation transcript from disk before creating session
+  const cwd = options?.cwd ?? process.cwd();
+  const sessionMgr = new SessionManager();
+  const initialMessages = sessionMgr.loadTranscript(cwd, sessionId);
+
+  const session = unstable_v2_createSession({
+    ...options,
+    resume: sessionId,
+    initialMessages,
+  } as any);
 
   Object.defineProperty(session, 'sessionId', {
     value: sessionId,

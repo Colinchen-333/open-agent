@@ -58,6 +58,7 @@ export interface QueryOptions {
 
 export interface SessionOptions {
   model: string;
+  cwd?: string;
   env?: Record<string, string | undefined>;
   allowedTools?: string[];
   disallowedTools?: string[];

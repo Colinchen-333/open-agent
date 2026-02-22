@@ -244,7 +244,7 @@ export class OpenAIProvider implements LLMProvider {
 
             // Accumulate id/name/arguments across chunks
             if (tc.id) acc.id = tc.id;
-            if (tc.function?.name) acc.name += tc.function.name;
+            if (tc.function?.name) acc.name = tc.function.name;
             if (tc.function?.arguments) {
               acc.argumentsJson += tc.function.arguments;
 

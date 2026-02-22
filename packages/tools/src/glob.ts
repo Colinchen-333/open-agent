@@ -1,8 +1,29 @@
 import fg from 'fast-glob';
-import { statSync } from 'fs';
+import { statSync, readFileSync, existsSync } from 'fs';
+import { join } from 'path';
 import type { ToolDefinition, ToolContext, GlobInput, GlobOutput } from './types.js';
 
 const MAX_FILES = 100;
+
+/** Read .gitignore patterns from cwd and convert to glob ignore patterns. */
+function loadGitignorePatterns(cwd: string): string[] {
+  const gitignorePath = join(cwd, '.gitignore');
+  if (!existsSync(gitignorePath)) return [];
+  try {
+    return readFileSync(gitignorePath, 'utf-8')
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line && !line.startsWith('#'))
+      .map(pattern => {
+        // Convert gitignore patterns to glob ignore patterns
+        if (pattern.startsWith('/')) return pattern.slice(1);
+        if (!pattern.includes('/')) return `**/${pattern}`;
+        return pattern;
+      });
+  } catch {
+    return [];
+  }
+}
 
 export function createGlobTool(): ToolDefinition {
   return {
@@ -27,11 +48,12 @@ export function createGlobTool(): ToolDefinition {
       const start = Date.now();
       const cwd = input.path || ctx.cwd;
 
+      const gitignorePatterns = loadGitignorePatterns(cwd);
       let files = await fg(input.pattern, {
         cwd,
         absolute: true,
         dot: true,
-        ignore: ['**/node_modules/**', '**/.git/**'],
+        ignore: ['**/node_modules/**', '**/.git/**', ...gitignorePatterns],
       });
 
       // Sort by modification time, newest first

@@ -51,6 +51,15 @@ export function convertMessages(
           break;
         }
 
+        case 'redacted_thinking': {
+          // Redacted thinking blocks must be passed back verbatim to the API.
+          converted.push({
+            type: 'redacted_thinking',
+            data: (block as any).data,
+          } as any);
+          break;
+        }
+
         case 'tool_use':
           converted.push({
             type: 'tool_use',

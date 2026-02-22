@@ -12,7 +12,7 @@ export interface Message {
 }
 
 export interface ContentBlock {
-  type: 'text' | 'image' | 'tool_use' | 'tool_result' | 'thinking';
+  type: 'text' | 'image' | 'tool_use' | 'tool_result' | 'thinking' | 'redacted_thinking';
   [key: string]: any;
 }
 
