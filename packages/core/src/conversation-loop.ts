@@ -410,13 +410,20 @@ export class ConversationLoop {
           || (msg.includes('400') && /tokens?/i.test(msg));
         if (isContextError && this.messages.length > 4) {
           yield {
-            type: 'system' as any,
-            subtype: 'info',
-            message: 'Context limit reached — compacting conversation history and retrying...',
+            type: 'system',
+            subtype: 'status',
+            status: 'compacting',
             session_id: sessionId,
             uuid: randomUUID(),
           } as any;
           await this.compact();
+          yield {
+            type: 'system',
+            subtype: 'status',
+            status: null,
+            session_id: sessionId,
+            uuid: randomUUID(),
+          } as any;
           this.turnCount--; // Don't count the failed attempt as a turn
           continue;
         }
@@ -920,6 +927,16 @@ export class ConversationLoop {
   /** Update the effort level for subsequent LLM calls. */
   setEffort(effort: 'low' | 'medium' | 'high' | 'max'): void {
     this.options.effort = effort;
+  }
+
+  /** Replace the tool map (e.g. when entering/exiting plan mode). */
+  setTools(tools: Map<string, ToolDefinition>): void {
+    this.options.tools = tools;
+  }
+
+  /** Add a single tool to the live tool map (e.g. after ToolSearch selects one). */
+  addTool(tool: ToolDefinition): void {
+    this.options.tools.set(tool.name, tool);
   }
 
   /**

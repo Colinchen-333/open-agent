@@ -3,6 +3,7 @@ import type { ToolDefinition, ToolContext } from './types.js';
 export interface TeamToolsDeps {
   createTeam: (name: string, description?: string) => Promise<{ teamName: string; configPath: string }>;
   deleteTeam: (name: string) => Promise<{ success: boolean }>;
+  getActiveTeam?: () => string | null;
   sendMessage: (params: {
     type: 'message' | 'broadcast' | 'shutdown_request' | 'shutdown_response' | 'plan_approval_response' | 'plan_approval_request';
     recipient?: string;
@@ -36,16 +37,19 @@ export function createTeamCreateTool(deps: TeamToolsDeps): ToolDefinition {
 export function createTeamDeleteTool(deps: TeamToolsDeps): ToolDefinition {
   return {
     name: 'TeamDelete',
-    description: 'Remove team and task directories when work is complete.',
+    description: 'Remove team and task directories when work is complete. The active team is automatically determined from the session context.',
     inputSchema: {
       type: 'object',
-      properties: {
-        team_name: { type: 'string', description: 'Name of the team to delete' },
-      },
-      required: ['team_name'],
+      properties: {},
+      additionalProperties: false,
     },
-    async execute(input: any, _ctx: ToolContext) {
-      const result = await deps.deleteTeam(input.team_name);
+    async execute(_input: any, _ctx: ToolContext) {
+      // Derive active team from deps — the CLI wires this to settings.activeTeam
+      const teamName = deps.getActiveTeam?.();
+      if (!teamName) {
+        return JSON.stringify({ error: 'No active team in current session.' });
+      }
+      const result = await deps.deleteTeam(teamName);
       return JSON.stringify(result);
     },
   };

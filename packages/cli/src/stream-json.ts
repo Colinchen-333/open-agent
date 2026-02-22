@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import type { SDKMessage } from '@open-agent/core';
 
 /**
@@ -18,7 +19,8 @@ export function emitStreamJsonInit(info: {
     model: info.model,
     cwd: info.cwd,
     permissionMode: info.permissionMode,
-    sessionId: info.sessionId,
+    session_id: info.sessionId,
+    uuid: randomUUID(),
   };
   process.stdout.write(JSON.stringify(init) + '\n');
 }

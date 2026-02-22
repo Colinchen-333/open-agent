@@ -223,9 +223,36 @@ async function main(): Promise<void> {
   // Plan mode tools
   // ------------------------------------------------------------------
   let _planMode = false;
+  let _savedTools: Map<string, import('@open-agent/tools').ToolDefinition> | null = null;
+  const READ_ONLY_TOOLS = new Set([
+    'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'TaskOutput',
+    'EnterPlanMode', 'ExitPlanMode', 'AskUser', 'ListMcpResourcesTool', 'ReadMcpResourceTool',
+    'ToolSearch',
+  ]);
   const planModeDeps = {
-    enterPlanMode: () => { _planMode = true; },
-    exitPlanMode: (_allowedPrompts?: { tool: string; prompt: string }[]) => { _planMode = false; },
+    enterPlanMode: () => {
+      _planMode = true;
+      // Save current tools and restrict to read-only
+      const allTools = new Map(toolRegistry.list().map(t => [t.name, t]));
+      _savedTools = allTools;
+      const readOnlyMap = new Map<string, import('@open-agent/tools').ToolDefinition>();
+      for (const [name, tool] of allTools) {
+        if (READ_ONLY_TOOLS.has(name) || name.startsWith('mcp__')) {
+          readOnlyMap.set(name, tool);
+        }
+      }
+      // loop may not exist yet at registration time; it's set later
+      if ((globalThis as any).__openAgentLoop) {
+        (globalThis as any).__openAgentLoop.setTools(readOnlyMap);
+      }
+    },
+    exitPlanMode: (_allowedPrompts?: { tool: string; prompt: string }[]) => {
+      _planMode = false;
+      if (_savedTools && (globalThis as any).__openAgentLoop) {
+        (globalThis as any).__openAgentLoop.setTools(_savedTools);
+        _savedTools = null;
+      }
+    },
     isPlanMode: () => _planMode,
   };
   toolRegistry.register(createEnterPlanModeTool(planModeDeps));
@@ -416,8 +443,11 @@ async function main(): Promise<void> {
             return typeof result === 'string' ? result : JSON.stringify(result);
           },
         };
-        // Register so it's available for subsequent calls
+        // Register in both the registry and the live loop's tool map
         toolRegistry.register(tool);
+        if ((globalThis as any).__openAgentLoop) {
+          (globalThis as any).__openAgentLoop.addTool(tool);
+        }
         return tool;
       }
 
@@ -440,8 +470,13 @@ async function main(): Promise<void> {
       for (const dir of skillDirs) {
         const skillPath = join(dir, `${name}.md`);
         if (existsSync(skillPath)) {
-          const content = readFileSync(skillPath, 'utf-8');
-          return `Skill "${name}" loaded. Content:\n\n${content}\nArgs: ${skillArgs ?? '(none)'}`;
+          let content = readFileSync(skillPath, 'utf-8');
+          // Substitute $ARGUMENTS placeholder with actual args
+          if (skillArgs) {
+            content = content.replace(/\$ARGUMENTS/g, skillArgs);
+          }
+          // Return as a rendered prompt for the LLM to act on
+          return `<skill name="${name}">\n${content}\n</skill>`;
         }
       }
       return `Skill "${name}" not found. Searched: ${skillDirs.join(', ')}`;
@@ -646,9 +681,13 @@ async function main(): Promise<void> {
     (settings.effort as 'low' | 'medium' | 'high' | 'max' | undefined) ?? 'high';
 
   // customInstructions: appended to the system prompt as extra guidance.
-  const customInstructions = settings.customInstructions as string | undefined;
-  const customInstructionsList: string[] =
-    customInstructions ? [customInstructions] : [];
+  // Supports both string and string[] formats in settings.json.
+  const rawCustomInstructions = settings.customInstructions;
+  const customInstructionsList: string[] = Array.isArray(rawCustomInstructions)
+    ? rawCustomInstructions.filter((s): s is string => typeof s === 'string')
+    : typeof rawCustomInstructions === 'string'
+      ? [rawCustomInstructions]
+      : [];
   // --system-prompt CLI flag appends to custom instructions
   if (args.systemPrompt) {
     customInstructionsList.push(args.systemPrompt);
@@ -705,6 +744,9 @@ async function main(): Promise<void> {
     costCalculator: calculateCost,
     initialMessages: initialMessages.length > 0 ? initialMessages : undefined,
   });
+
+  // Expose loop for plan mode tool access
+  (globalThis as any).__openAgentLoop = loop;
 
   const renderer = new TerminalRenderer({ noMarkdown: args.noMarkdown });
   const isStreamJson = args.outputFormat === 'stream-json' || args.json === true;
