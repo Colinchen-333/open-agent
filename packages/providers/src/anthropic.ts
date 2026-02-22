@@ -11,7 +11,8 @@ import type {
 
 // Convert unified Message[] to Anthropic MessageParam[] format.
 // System messages are extracted separately and not included in the returned array.
-function convertMessages(
+// @internal
+export function convertMessages(
   messages: Message[],
 ): Anthropic.Messages.MessageParam[] {
   const result: Anthropic.Messages.MessageParam[] = [];
@@ -104,7 +105,8 @@ function convertMessages(
 }
 
 // Extract the first system message content, or fall back to ChatOptions.systemPrompt.
-function extractSystemPrompt(
+// @internal
+export function extractSystemPrompt(
   messages: Message[],
   options: ChatOptions,
 ): string | undefined {
@@ -121,7 +123,8 @@ function extractSystemPrompt(
 }
 
 // Convert ToolSpec[] to Anthropic Tool format.
-function convertTools(tools: ToolSpec[]): Anthropic.Messages.Tool[] {
+// @internal
+export function convertTools(tools: ToolSpec[]): Anthropic.Messages.Tool[] {
   return tools.map((t) => ({
     name: t.name,
     description: t.description,
@@ -130,7 +133,8 @@ function convertTools(tools: ToolSpec[]): Anthropic.Messages.Tool[] {
 }
 
 // Map effort level to thinking budget tokens.
-function effortToBudget(effort: ChatOptions['effort']): number {
+// @internal
+export function effortToBudget(effort: ChatOptions['effort']): number {
   switch (effort) {
     case 'low':
       return 2000;

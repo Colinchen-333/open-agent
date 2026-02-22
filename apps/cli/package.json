@@ -6,7 +6,7 @@
     "open-agent": "src/index.ts"
   },
   "scripts": {
-    "build": "echo 'No build step for cli-app'",
+    "build": "bun build src/index.ts --compile --outfile open-agent",
     "dev": "bun run src/index.ts",
     "start": "bun run src/index.ts"
   },

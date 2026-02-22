@@ -1,0 +1,9 @@
+{
+  "defaultModel": "claude-sonnet-4-6",
+  "permissionMode": "default",
+  "effort": "high",
+  "thinking": "adaptive",
+  "maxTurns": 50,
+  "mcpServers": {},
+  "customInstructions": ""
+}

@@ -3,8 +3,9 @@ import type { ToolDefinition } from './types.js';
 /**
  * Convert an HTML string to Markdown-flavored plain text.
  * Order matters: block-level conversions run before tag stripping.
+ * @internal
  */
-function htmlToMarkdown(html: string): string {
+export function htmlToMarkdown(html: string): string {
   let text = html;
 
   // Remove script and style blocks entirely (content included)

@@ -68,5 +68,6 @@ export function autoDetectProvider(): LLMProvider {
   if (process.env.OPENAI_API_KEY) {
     return new OpenAIProvider();
   }
+  console.warn('No API key found (ANTHROPIC_API_KEY, OPENAI_API_KEY). Falling back to Ollama at localhost:11434.');
   return new OllamaProvider();
 }

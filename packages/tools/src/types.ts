@@ -50,6 +50,10 @@ export interface GrepInput {
 
 // Tool output types
 
+/**
+ * @deprecated The bash tool now returns a plain `string` instead of BashOutput.
+ * This interface is kept for backwards compatibility only and will be removed in a future version.
+ */
 export interface BashOutput {
   stdout: string;
   stderr: string;

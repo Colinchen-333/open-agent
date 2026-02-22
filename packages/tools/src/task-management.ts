@@ -33,7 +33,7 @@ export function createTaskOutputTool(): ToolDefinition {
           description: 'Max wait time in milliseconds',
         },
       },
-      required: ['task_id', 'block', 'timeout'],
+      required: ['task_id'],
     },
     async execute(input: any, _ctx: ToolContext) {
       const task = backgroundTasks.get(input.task_id as string);
