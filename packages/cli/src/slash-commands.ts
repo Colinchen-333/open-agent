@@ -5,6 +5,8 @@ export interface SlashCommandContext {
   cwd: string;
   model: string;
   sessionId: string;
+  /** Names of all registered tools available to the agent. */
+  tools?: string[];
 }
 
 export interface SlashCommandResult {
@@ -100,6 +102,40 @@ const SLASH_COMMANDS: Record<
       return {
         handled: true,
         output: 'Permission mode management is handled via --permission-mode flag.',
+      };
+    },
+  },
+  '/cost': {
+    description: 'Show cumulative cost and token usage for this session',
+    handler: async (_args, ctx) => {
+      const { totalCostUsd, totalInputTokens, totalOutputTokens } = ctx.loop.getTotalCost();
+      const totalTokens = totalInputTokens + totalOutputTokens;
+      const costStr = totalCostUsd > 0
+        ? `$${totalCostUsd.toFixed(6)}`
+        : '$0.000000';
+      return {
+        handled: true,
+        output: [
+          'Session cost:',
+          `  Total cost:     ${costStr}`,
+          `  Input tokens:   ${totalInputTokens.toLocaleString()}`,
+          `  Output tokens:  ${totalOutputTokens.toLocaleString()}`,
+          `  Total tokens:   ${totalTokens.toLocaleString()}`,
+        ].join('\n'),
+      };
+    },
+  },
+  '/tools': {
+    description: 'List all registered tools available to the agent',
+    handler: async (_args, ctx) => {
+      const tools = ctx.tools ?? [];
+      if (tools.length === 0) {
+        return { handled: true, output: 'No tools registered.' };
+      }
+      const lines = tools.map((name, i) => `  ${String(i + 1).padStart(2)}. ${name}`);
+      return {
+        handled: true,
+        output: `Registered tools (${tools.length}):\n${lines.join('\n')}`,
       };
     },
   },

@@ -157,8 +157,32 @@ export class SessionManager {
       } else if (entry.type === 'assistant') {
         const content = (entry as any).message?.content;
         if (!content) continue;
+
+        // JSON.parse produces plain objects; ensure content blocks are valid
+        // before handing them back to the provider layer.
+        const normalised = Array.isArray(content)
+          ? content
+              .filter((block: unknown): block is Record<string, unknown> =>
+                block !== null && typeof block === 'object',
+              )
+              .map((block: Record<string, unknown>) => {
+                // tool_use blocks may have their `input` field stored as a
+                // JSON string (e.g. when the transcript was written from a
+                // partially-assembled stream).  Parse it back to an object.
+                if (block['type'] === 'tool_use' && typeof block['input'] === 'string') {
+                  try {
+                    return { ...block, input: JSON.parse(block['input'] as string) };
+                  } catch {
+                    // Malformed JSON — keep original string to avoid silent data loss.
+                    return block;
+                  }
+                }
+                return block;
+              })
+          : content;
+
         // Reconstruct a proper assistant Message with content blocks.
-        messages.push({ role: 'assistant', content });
+        messages.push({ role: 'assistant', content: normalised });
       }
       // All other types (stream_event, tool_result, result, system) are skipped.
     }

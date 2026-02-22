@@ -56,7 +56,9 @@ export class REPL {
       }
 
       const trimmed = input.trim();
-      if (!trimmed) return null;
+      // Return '' for blank/whitespace-only input so the caller can `continue`
+      // the loop.  null is reserved exclusively for EOF (Ctrl+D).
+      if (!trimmed) return '';
 
       // Add to history, avoiding consecutive duplicates
       if (trimmed && (this.history.length === 0 || this.history[this.history.length - 1] !== trimmed)) {

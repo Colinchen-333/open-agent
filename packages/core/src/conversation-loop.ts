@@ -68,6 +68,10 @@ export class ConversationLoop {
   private messages: Message[] = [];
   private options: ConversationLoopOptions;
   private turnCount = 0;
+  // Cumulative cost counters — accumulate across multiple run() calls.
+  private _totalInputTokens = 0;
+  private _totalOutputTokens = 0;
+  private _totalCostUsd = 0;
 
   constructor(options: ConversationLoopOptions) {
     this.options = options;
@@ -75,6 +79,18 @@ export class ConversationLoop {
     if (options.initialMessages && options.initialMessages.length > 0) {
       this.messages = [...options.initialMessages];
     }
+  }
+
+  /**
+   * Return the cumulative cost and token usage across all run() calls in this
+   * session. Useful for /cost slash commands and end-of-session reporting.
+   */
+  getTotalCost(): { totalCostUsd: number; totalInputTokens: number; totalOutputTokens: number } {
+    return {
+      totalCostUsd: this._totalCostUsd,
+      totalInputTokens: this._totalInputTokens,
+      totalOutputTokens: this._totalOutputTokens,
+    };
   }
 
   /**
@@ -91,6 +107,8 @@ export class ConversationLoop {
   async *run(userMessage: string): AsyncGenerator<SDKMessage> {
     const sessionId = this.options.sessionId;
     const startTime = Date.now();
+    // Per-run counters track only this invocation; instance-level counters
+    // accumulate the full session totals.
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
     let totalCostUsd = 0;
@@ -293,15 +311,21 @@ export class ConversationLoop {
 
       // Update cumulative token counts from this turn's usage.
       if (messageUsage) {
-        totalInputTokens += messageUsage.input_tokens ?? 0;
-        totalOutputTokens += messageUsage.output_tokens ?? 0;
+        const inTok = messageUsage.input_tokens ?? 0;
+        const outTok = messageUsage.output_tokens ?? 0;
+        totalInputTokens += inTok;
+        totalOutputTokens += outTok;
+        this._totalInputTokens += inTok;
+        this._totalOutputTokens += outTok;
       }
       if (this.options.costCalculator && messageUsage) {
-        totalCostUsd += this.options.costCalculator(
+        const turnCost = this.options.costCalculator(
           this.options.model,
           messageUsage.input_tokens ?? 0,
           messageUsage.output_tokens ?? 0,
         );
+        totalCostUsd += turnCost;
+        this._totalCostUsd += turnCost;
       }
 
       // Strip the internal `_closed` marker before storing / emitting.

@@ -230,8 +230,10 @@ export class AnthropicProvider implements LLMProvider {
       finalMessage(): Promise<Anthropic.Messages.Message>;
     },
   ): AsyncGenerator<StreamEvent> {
-    // Track in-progress tool calls so we can emit tool_use_start/delta/end
-    const activeToolUseIds = new Set<string>();
+    // Map from content block index → tool_use id, populated at content_block_start.
+    // This lets us emit tool_use_end at content_block_stop (per-block) rather than
+    // batching all tool_use_end events at message_stop.
+    const blockIndexToToolUseId = new Map<number, string>();
 
     for await (const event of stream) {
       switch (event.type) {
@@ -248,7 +250,8 @@ export class AnthropicProvider implements LLMProvider {
           };
 
           if (block.type === 'tool_use') {
-            activeToolUseIds.add(block.id);
+            // Record the mapping so content_block_stop can look up the id.
+            blockIndexToToolUseId.set(event.index, block.id);
             yield { type: 'tool_use_start', id: block.id, name: block.name };
           }
           break;
@@ -267,11 +270,12 @@ export class AnthropicProvider implements LLMProvider {
           } else if (delta.type === 'thinking_delta') {
             yield { type: 'thinking_delta', thinking: delta.thinking };
           } else if (delta.type === 'input_json_delta') {
-            // Find which tool_use block this belongs to by index.
-            // We emit a generic delta; consumers can track by content_block_start.
+            // Resolve the tool_use id from the block index map so consumers
+            // get a populated id on every tool_use_delta event.
+            const toolUseId = blockIndexToToolUseId.get(event.index) ?? '';
             yield {
               type: 'tool_use_delta',
-              id: '', // index-based tracking done via content_block_delta
+              id: toolUseId,
               partial_json: delta.partial_json,
             };
           }
@@ -280,6 +284,13 @@ export class AnthropicProvider implements LLMProvider {
 
         case 'content_block_stop': {
           yield { type: 'content_block_stop', index: event.index };
+          // Emit tool_use_end immediately when the block closes (per-block timing),
+          // then remove the entry so we don't re-emit it at message_stop.
+          const toolUseId = blockIndexToToolUseId.get(event.index);
+          if (toolUseId !== undefined) {
+            yield { type: 'tool_use_end', id: toolUseId };
+            blockIndexToToolUseId.delete(event.index);
+          }
           break;
         }
 
@@ -294,11 +305,14 @@ export class AnthropicProvider implements LLMProvider {
             message: finalMsg,
             usage: finalMsg.usage,
           };
-          // Emit tool_use_end for each active tool call
-          for (const id of activeToolUseIds) {
+          // blockIndexToToolUseId should be empty at this point because every
+          // tool_use block emits tool_use_end at content_block_stop.  If any
+          // stragglers remain (e.g. due to a truncated stream), emit them now
+          // as a safety net.
+          for (const id of blockIndexToToolUseId.values()) {
             yield { type: 'tool_use_end', id };
           }
-          activeToolUseIds.clear();
+          blockIndexToToolUseId.clear();
           return;
         }
 

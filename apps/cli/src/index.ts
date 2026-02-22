@@ -56,14 +56,21 @@ async function main(): Promise<void> {
     : autoDetectProvider();
 
   // ------------------------------------------------------------------
-  // Model selection
+  // Working directory + settings
+  // (settings must be loaded before model selection so defaults apply)
   // ------------------------------------------------------------------
-  const model = args.model ?? getDefaultModel(provider.name);
+  const cwd = process.cwd();
+  const configLoader = new ConfigLoader();
+  const settings = configLoader.loadSettings(cwd);
+
+  // ------------------------------------------------------------------
+  // Model selection — CLI flag > settings.json > provider default
+  // ------------------------------------------------------------------
+  const model = args.model ?? (settings.defaultModel as string | undefined) ?? getDefaultModel(provider.name);
 
   // ------------------------------------------------------------------
   // Tool registry
   // ------------------------------------------------------------------
-  const cwd = process.cwd();
   const toolRegistry = createDefaultToolRegistry(cwd);
 
   // ------------------------------------------------------------------
@@ -107,8 +114,6 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------
   // MCP tools
   // ------------------------------------------------------------------
-  const configLoader = new ConfigLoader();
-  const settings = configLoader.loadSettings(cwd);
   const mcpManager = new McpManager();
 
   // Load MCP server configs from settings (key: mcpServers)
@@ -304,15 +309,20 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------
   // Permission system
   // ------------------------------------------------------------------
+  // CLI flag > settings.json > 'default'
+  const effectivePermissionMode: PermissionMode =
+    (args.permissionMode as PermissionMode | undefined) ??
+    (settings.permissionMode as PermissionMode | undefined) ??
+    'default';
+
   const permissionEngine = new PermissionEngine({
-    mode: (args.permissionMode as PermissionMode) ?? 'default',
+    mode: effectivePermissionMode,
   });
   const permissionPrompter = new TerminalPermissionPrompter();
 
   // ------------------------------------------------------------------
   // AGENT.md config and Auto-Memory
   // ------------------------------------------------------------------
-  // Note: configLoader was already instantiated above for MCP settings.
   const agentInstructions = configLoader.loadAgentMd(cwd);
   const autoMemory = new AutoMemory(cwd);
   const memoryContent = autoMemory.readMemory();
@@ -351,6 +361,31 @@ async function main(): Promise<void> {
   };
 
   // ------------------------------------------------------------------
+  // Resolve settings-derived loop options
+  //   CLI flags always take precedence; settings.json provides fallbacks.
+  // ------------------------------------------------------------------
+  const effectiveMaxTurns: number | undefined =
+    args.maxTurns ?? (settings.maxTurns as number | undefined);
+
+  // thinking: CLI has no direct flag; settings.json can specify the mode.
+  const settingsThinking = settings.thinking as string | undefined;
+  const effectiveThinking: import('@open-agent/core').ThinkingConfig =
+    settingsThinking === 'enabled'  ? { type: 'enabled' } :
+    settingsThinking === 'disabled' ? { type: 'disabled' } :
+    { type: 'adaptive' }; // default / 'adaptive'
+
+  // effort: CLI has no direct flag; settings.json can specify the level.
+  const effectiveEffort =
+    (settings.effort as 'low' | 'medium' | 'high' | 'max' | undefined) ?? 'high';
+
+  // customInstructions: appended to the system prompt as extra guidance.
+  const customInstructions = settings.customInstructions as string | undefined;
+  const customInstructionsList: string[] =
+    customInstructions ? [customInstructions] : [];
+
+  const toolNames = toolRegistry.list().map(t => t.name);
+
+  // ------------------------------------------------------------------
   // Conversation loop
   // ------------------------------------------------------------------
   const loop = new ConversationLoop({
@@ -361,16 +396,16 @@ async function main(): Promise<void> {
     systemPrompt: buildSystemPrompt({
       cwd,
       model,
-      tools: toolRegistry.list().map(t => t.name),
-      permissionMode: (args.permissionMode as string) ?? 'default',
-      agentInstructions,
+      tools: toolNames,
+      permissionMode: effectivePermissionMode,
+      agentInstructions: [...agentInstructions, ...customInstructionsList],
       memoryContent,
       memoryDir: autoMemory.getDir(),
       isGitRepo: isGitRepository(cwd),
     }),
-    maxTurns: args.maxTurns,
-    thinking: { type: 'adaptive' },
-    effort: 'high',
+    maxTurns: effectiveMaxTurns,
+    thinking: effectiveThinking,
+    effort: effectiveEffort,
     cwd,
     sessionId,
     abortSignal: abortController.signal,
@@ -416,6 +451,7 @@ async function main(): Promise<void> {
         cwd,
         model,
         sessionId,
+        tools: toolNames,
       });
       if (result) {
         if (result.shouldExit) break;
@@ -524,6 +560,9 @@ Slash commands (REPL mode):
   /compact                    Compact conversation history
   /status                     Show session status
   /memory                     Show auto-memory status
+  /cost                       Show cumulative session cost and token usage
+  /tools                      List all registered tools
+  /permissions                Show current permission mode
   `);
 }
 
