@@ -149,6 +149,9 @@ function renderMarkdown(text: string): string {
     // List items
     if (processed.match(/^\s*[-*]\s/)) {
       processed = processed.replace(/^(\s*)[-*]\s/, '$1• ');
+    } else if (processed.match(/^\s*\d+\.\s/)) {
+      // Numbered lists: bold the number
+      processed = processed.replace(/^(\s*)(\d+\.)(\s)/, `$1${C.bold}$2${C.reset}$3`);
     }
 
     // Inline formatting
@@ -160,6 +163,11 @@ function renderMarkdown(text: string): string {
     processed = processed.replace(/`([^`]+)`/g, `${C.bgGray}${C.white} $1 ${C.reset}`);
     // Strikethrough ~~text~~
     processed = processed.replace(/~~([^~]+)~~/g, `${C.strikethrough}$1${C.reset}`);
+    // Markdown links [text](url)
+    processed = processed.replace(
+      /\[([^\]]+)\]\(([^)]+)\)/g,
+      `${C.underline}$1${C.reset}${C.dim} ($2)${C.reset}`,
+    );
 
     result.push(processed);
   }
@@ -228,7 +236,7 @@ export class TerminalRenderer {
       case 'text_delta': {
         this.stopSpinner();
         if (this.inThinking) {
-          process.stdout.write(`${C.reset}\n\n`);
+          process.stdout.write(`\n${C.gray}${C.dim}${BOX.bottomLeft}${BOX.horizontal.repeat(40)}${C.reset}\n\n`);
           this.inThinking = false;
         }
         this.textBuffer += event.text;
@@ -250,7 +258,9 @@ export class TerminalRenderer {
       case 'thinking_delta': {
         this.stopSpinner();
         if (!this.inThinking) {
-          process.stdout.write(`\n${C.gray}${C.dim}`);
+          process.stdout.write(
+            `\n${C.gray}${C.dim}${BOX.topLeft}${BOX.horizontal} thinking ${BOX.horizontal.repeat(30)}${C.reset}\n${C.gray}${C.dim}`,
+          );
           this.inThinking = true;
         }
         // Thinking content in dim gray

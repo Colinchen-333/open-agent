@@ -163,7 +163,7 @@ export function createGrepTool(): ToolDefinition {
         mode,
         numFiles: filenames.length,
         filenames,
-        content: mode === 'content' ? lines.join('\n') : undefined,
+        content: (mode === 'content' || mode === 'count') ? lines.join('\n') : undefined,
         numLines: lines.length,
       };
     },

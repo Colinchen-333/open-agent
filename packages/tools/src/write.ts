@@ -40,6 +40,9 @@ export function createWriteTool(): ToolDefinition {
 
       await Bun.write(input.file_path, input.content);
 
+      // Mark the file as read so a subsequent Edit doesn't reject it.
+      ctx.fileReadTracker?.markRead(input.file_path);
+
       const lineCount = input.content.split('\n').length;
       return {
         type: exists ? ('update' as const) : ('create' as const),

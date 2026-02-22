@@ -686,7 +686,7 @@ async function main(): Promise<void> {
       memoryDir: autoMemory.getDir(),
       isGitRepo: isGitRepository(cwd),
       toolDescriptions: getToolPromptDescriptions(),
-      knowledgeCutoff: 'May 2025',
+      knowledgeCutoff: 'August 2025',
     }),
     maxTurns: effectiveMaxTurns,
     thinking: effectiveThinking,
