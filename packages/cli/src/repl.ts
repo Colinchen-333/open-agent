@@ -36,6 +36,12 @@ export class REPL {
       history: this.history.slice().reverse(), // readline expects newest-first
     });
 
+    // Enable bracketed paste mode so pasted multi-line content arrives as
+    // a single readline event rather than being split on every newline.
+    if (process.stdout.isTTY) {
+      process.stdout.write('\x1b[?2004h');
+    }
+
     // Prevent readline from swallowing Ctrl+C — let the SIGINT handler in
     // apps/cli/src/index.ts deal with it instead.
     this.rl.on('SIGINT', () => {
@@ -80,8 +86,14 @@ export class REPL {
    */
   async getInput(): Promise<string | null> {
     try {
-      const line = await this.rl.question(this.getPrompt());
+      let line = await this.rl.question(this.getPrompt());
       if (line === undefined) return null;
+
+      // Strip bracketed paste markers and preserve embedded newlines.
+      if (line.includes('\x1b[200~')) {
+        line = line.replace(/\x1b\[200~/g, '').replace(/\x1b\[201~/g, '');
+        line = line.replace(/\r/g, '\n');
+      }
 
       let input = line;
 
@@ -124,6 +136,10 @@ export class REPL {
 
   close(): void {
     this.saveHistory();
+    // Disable bracketed paste mode on exit.
+    if (process.stdout.isTTY) {
+      process.stdout.write('\x1b[?2004l');
+    }
     this.rl.close();
   }
 }

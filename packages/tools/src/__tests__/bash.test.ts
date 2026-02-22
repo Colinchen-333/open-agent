@@ -92,7 +92,7 @@ describe('Bash tool', () => {
     expect(elapsed).toBeLessThan(2000);
 
     // The result must mention interruption.
-    expect(result).toContain('command was interrupted');
+    expect(result).toContain('command timed out and was killed');
   }, 5_000);
 
   // ---------------------------------------------------------------------------

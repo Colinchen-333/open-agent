@@ -55,7 +55,7 @@ export interface ConversationLoopOptions {
   permissionPrompter?: PermissionPrompter;
   hookExecutor?: LoopHookExecutor;
   compactThreshold?: number; // 触发压缩的估算 token 数，默认 100000
-  costCalculator?: (model: string, inputTokens: number, outputTokens: number) => number;
+  costCalculator?: (model: string, inputTokens: number, outputTokens: number, cacheCreationTokens?: number, cacheReadTokens?: number) => number;
   /** Pre-populate conversation history when resuming a session. */
   initialMessages?: Message[];
 }
@@ -346,9 +346,26 @@ export class ConversationLoop {
               break;
             }
 
+            case 'message_delta': {
+              // message_delta carries stop_reason and incremental usage
+              // (including cache token counts). Capture here so max_tokens
+              // continuation works even if message_end usage differs.
+              if ((event as any).delta?.stop_reason) {
+                stopReason = (event as any).delta.stop_reason;
+              }
+              if ((event as any).usage) {
+                messageUsage = { ...(messageUsage ?? {}), ...(event as any).usage };
+              }
+              break;
+            }
+
             case 'message_end': {
-              messageUsage = event.usage ?? null;
-              stopReason = (event.message as any)?.stop_reason ?? null;
+              if (event.usage) {
+                messageUsage = { ...(messageUsage ?? {}), ...event.usage };
+              }
+              if (!stopReason) {
+                stopReason = (event.message as any)?.stop_reason ?? null;
+              }
               break;
             }
 
@@ -399,6 +416,8 @@ export class ConversationLoop {
           this.options.model,
           messageUsage.input_tokens ?? 0,
           messageUsage.output_tokens ?? 0,
+          messageUsage.cache_creation_input_tokens ?? 0,
+          messageUsage.cache_read_input_tokens ?? 0,
         );
         totalCostUsd += turnCost;
         this._totalCostUsd += turnCost;

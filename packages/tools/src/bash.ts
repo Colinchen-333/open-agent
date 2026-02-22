@@ -123,18 +123,18 @@ export function createBashTool(): ToolDefinition {
       const truncatedStdout = truncate(stdout);
       const truncatedStderr = truncate(rawStderr);
 
-      // interrupted = killed by our timer OR non-zero exit with a signal
-      const interrupted = killed || (proc.exitCode !== 0 && proc.signalCode !== null);
-
-      // Return a clean string that the LLM can read directly.
-      // Always include stderr so the model can see error messages alongside output.
-      let output = truncatedStdout || '(no output)';
-      if (rawStderr.trim() && rawStderr.trim() !== truncatedStdout.trim()) {
-        output += '\nSTDERR:\n' + truncatedStderr;
+      // Assemble output: prefer stdout; always include non-empty stderr.
+      let output = truncatedStdout || '';
+      if (rawStderr.trim()) {
+        if (output) output += '\nSTDERR:\n' + truncatedStderr;
+        else output = truncatedStderr; // Only stderr — use it directly
       }
-      const exitInfo =
-        proc.exitCode !== 0 ? `\n(exit code: ${proc.exitCode})` : '';
-      const interruptedNote = interrupted ? '\n(command was interrupted)' : '';
+      if (!output) output = '(no output)';
+
+      // Exit info: only show numeric exit code if we have one.
+      const exitInfo = (proc.exitCode !== null && proc.exitCode !== 0)
+        ? `\n(exit code: ${proc.exitCode})` : '';
+      const interruptedNote = killed ? '\n(command timed out and was killed)' : '';
       return output + exitInfo + interruptedNote;
     },
   };

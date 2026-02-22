@@ -868,7 +868,7 @@ function renderMessage(renderer: TerminalRenderer, message: SDKMessage): void {
     case 'tool_result':
       renderer.renderToolResult(
         (message as any).tool_name,
-        (message as any).result,
+        (message as any)._fullResult ?? (message as any).result,
         (message as any).is_error,
       );
       break;

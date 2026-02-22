@@ -25,6 +25,8 @@ export function calculateCost(
   model: string,
   inputTokens: number,
   outputTokens: number,
+  cacheCreationTokens = 0,
+  cacheReadTokens = 0,
 ): number {
   // Try exact match first, then prefix match
   let pricing = MODEL_PRICING[model];
@@ -34,5 +36,9 @@ export function calculateCost(
   }
   if (!pricing) return 0;
 
-  return (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000;
+  // Cache writes are billed at 1.25x input; cache reads at 0.1x input.
+  const cacheWriteCost = (cacheCreationTokens * pricing.input * 1.25) / 1_000_000;
+  const cacheReadCost = (cacheReadTokens * pricing.input * 0.1) / 1_000_000;
+  return (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000
+    + cacheWriteCost + cacheReadCost;
 }
