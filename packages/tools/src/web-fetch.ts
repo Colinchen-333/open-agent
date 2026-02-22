@@ -103,6 +103,13 @@ export function createWebFetchTool(): ToolDefinition {
       }
 
       try {
+        // Create a timeout signal (30s) combined with user abort signal
+        const timeoutController = new AbortController();
+        const timeout = setTimeout(() => timeoutController.abort(), 30000);
+        const combinedSignal = ctx.abortSignal
+          ? AbortSignal.any([ctx.abortSignal, timeoutController.signal])
+          : timeoutController.signal;
+
         const response = await fetch(url, {
           redirect: 'follow',
           headers: {
@@ -110,8 +117,9 @@ export function createWebFetchTool(): ToolDefinition {
               'Mozilla/5.0 (compatible; OpenAgent/0.1.0; +https://github.com/open-agent)',
             Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           },
-          signal: ctx.abortSignal,
+          signal: combinedSignal,
         });
+        clearTimeout(timeout);
 
         const contentType = response.headers.get('content-type') || '';
         let text = await response.text();

@@ -241,15 +241,20 @@ export function createReadTool(): ToolDefinition {
           parts.push('');
         }
 
-        const nbContent = parts.join('\n');
+        const nbLines = parts.join('\n').split('\n');
+        const totalLines = nbLines.length;
+        const offset = Math.max(0, (input.offset ?? 1) - 1);
+        const limit = input.limit ?? totalLines;
+        const sliced = nbLines.slice(offset, offset + limit);
+        const nbContent = sliced.map((line, i) => `${String(offset + i + 1).padStart(6)}\t${line}`).join('\n');
         return {
           type: 'text' as const,
           file: {
             filePath: input.file_path,
             content: nbContent,
-            numLines: nbContent.split('\n').length,
-            startLine: 1,
-            totalLines: nbContent.split('\n').length,
+            numLines: sliced.length,
+            startLine: offset + 1,
+            totalLines,
           },
         };
       }
