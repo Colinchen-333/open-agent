@@ -1,0 +1,25 @@
+{
+  "name": "@open-agent/cli-app",
+  "version": "0.1.0",
+  "private": true,
+  "bin": {
+    "open-agent": "src/index.ts"
+  },
+  "scripts": {
+    "build": "echo 'No build step for cli-app'",
+    "dev": "bun run src/index.ts",
+    "start": "bun run src/index.ts"
+  },
+  "dependencies": {
+    "@open-agent/core": "workspace:*",
+    "@open-agent/cli": "workspace:*",
+    "@open-agent/sdk": "workspace:*",
+    "@open-agent/tools": "workspace:*",
+    "@open-agent/permissions": "workspace:*",
+    "@open-agent/mcp": "workspace:*",
+    "@open-agent/agents": "workspace:*",
+    "@open-agent/plugins": "workspace:*",
+    "@open-agent/hooks": "workspace:*",
+    "@open-agent/providers": "workspace:*"
+  }
+}
