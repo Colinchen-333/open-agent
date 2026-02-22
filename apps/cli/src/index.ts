@@ -18,6 +18,7 @@ import {
   createSendMessageTool,
   createToolSearchTool,
   createSkillTool,
+  getToolPromptDescriptions,
 } from '@open-agent/tools';
 import { AgentLoader, AgentRunner, TaskManager, TeamManager } from '@open-agent/agents';
 import { McpManager } from '@open-agent/mcp';
@@ -433,6 +434,7 @@ async function main(): Promise<void> {
       memoryContent,
       memoryDir: autoMemory.getDir(),
       isGitRepo: isGitRepository(cwd),
+      toolDescriptions: getToolPromptDescriptions(),
     }),
     maxTurns: effectiveMaxTurns,
     thinking: effectiveThinking,

@@ -537,6 +537,7 @@ export class ConversationLoop {
         isError: boolean;
         blocked: boolean;
         blockReason?: string;
+        isImageResult?: boolean;
       };
 
       const parallelResults: ExecutionResult[] = await Promise.all(
@@ -590,17 +591,36 @@ export class ConversationLoop {
             }
             // ── End PostToolUse hook ─────────────────────────────────────
 
-            return { toolUse, resultStr, isError: false, blocked: false };
+            // Check if the result is a structured image content block.
+            // When the Read tool returns base64 image data, we want the LLM
+            // to receive it as an actual image block rather than a JSON string
+            // so vision capabilities are properly exercised.
+            let isImageResult = false;
+            try {
+              const parsed = JSON.parse(resultStr);
+              if (
+                parsed?.type === 'image' &&
+                parsed?.source?.type === 'base64' &&
+                typeof parsed?.source?.media_type === 'string' &&
+                typeof parsed?.source?.data === 'string'
+              ) {
+                isImageResult = true;
+              }
+            } catch {
+              // Not JSON — not an image result
+            }
+
+            return { toolUse, resultStr, isError: false, blocked: false, isImageResult };
           } catch (error: unknown) {
             const msg = error instanceof Error ? error.message : String(error);
-            return { toolUse, resultStr: msg, isError: true, blocked: false };
+            return { toolUse, resultStr: msg, isError: true, blocked: false, isImageResult: false };
           }
         }),
       );
       // ── End Phase 2 ───────────────────────────────────────────────────────
 
       // ── Phase 3: Yield results in original call order ─────────────────────
-      for (const { toolUse, resultStr, isError, blocked } of parallelResults) {
+      for (const { toolUse, resultStr, isError, blocked, isImageResult } of parallelResults) {
         if (blocked) {
           // Pre-hook blocked execution — surface as an error result.
           toolResults.push({
@@ -625,6 +645,39 @@ export class ConversationLoop {
             tool_use_id: toolUse.id,
             result: resultStr,
             is_error: true,
+            uuid: randomUUID(),
+            session_id: sessionId,
+          };
+        } else if (isImageResult) {
+          // Parse the structured image result and send it as actual image
+          // content blocks so the LLM can visually inspect the image.
+          const parsed = JSON.parse(resultStr) as {
+            type: 'image';
+            source: { type: 'base64'; media_type: string; data: string };
+            file_path?: string;
+          };
+          const imageContentBlocks: ContentBlock[] = [
+            {
+              type: 'image',
+              media_type: parsed.source.media_type,
+              data: parsed.source.data,
+            },
+            {
+              type: 'text',
+              text: `Image: ${parsed.file_path ?? 'unknown'}`,
+            },
+          ];
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: imageContentBlocks,
+          });
+          yield {
+            type: 'tool_result' as const,
+            tool_name: toolUse.name,
+            tool_use_id: toolUse.id,
+            result: `[Image: ${parsed.file_path ?? 'unknown'}]`,
+            is_error: false,
             uuid: randomUUID(),
             session_id: sessionId,
           };

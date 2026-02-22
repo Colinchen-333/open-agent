@@ -1,4 +1,4 @@
-import { statSync } from 'fs';
+import { statSync, readFileSync } from 'fs';
 import type { ToolDefinition, ToolContext, FileReadInput } from './types.js';
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
@@ -95,27 +95,21 @@ export function createReadTool(): ToolDefinition {
           };
         }
 
-        const message = [
-          `Image file found: ${input.file_path}`,
-          `Type: ${mimeType}`,
-          `Size: ${sizeKb} KB (${stat.size} bytes)`,
-          '',
-          'This is a binary image file. Its raw contents are not returned to avoid',
-          'transmitting large amounts of binary data. To work with this image:',
-          '  - Use Bash to run image tools (e.g. `identify`, `exiftool`, `file`)',
-          '  - Use Bash with `convert` (ImageMagick) to resize or convert the image',
-          '  - If the image contains text, use `tesseract` for OCR extraction',
-        ].join('\n');
+        // Return base64-encoded image data for vision-capable LLMs.
+        // The conversation loop detects this structured result and sends it
+        // as an actual image content block so the model can "see" the image.
+        const imageBytes = readFileSync(input.file_path);
+        const base64 = imageBytes.toString('base64');
 
         return {
-          type: 'text' as const,
-          file: {
-            filePath: input.file_path,
-            content: message,
-            numLines: message.split('\n').length,
-            startLine: 1,
-            totalLines: message.split('\n').length,
+          type: 'image' as const,
+          source: {
+            type: 'base64' as const,
+            media_type: mimeType,
+            data: base64,
           },
+          file_path: input.file_path,
+          size_kb: sizeKb,
         };
       }
 

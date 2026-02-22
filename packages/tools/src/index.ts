@@ -59,3 +59,4 @@ export {
 } from './task-management.js';
 export { createToolSearchTool, type ToolSearchDeps } from './tool-search.js';
 export { createSkillTool, type SkillDeps } from './skill-tool.js';
+export { getToolPromptDescriptions } from './tool-descriptions.js';

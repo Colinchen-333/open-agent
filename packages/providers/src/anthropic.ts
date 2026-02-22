@@ -56,17 +56,38 @@ export function convertMessages(
           break;
 
         case 'tool_result': {
-          // tool_result appears in user messages
+          // tool_result appears in user messages.
+          // The content may be a plain string, an array of typed content blocks
+          // (including image blocks for vision), or any other value.
           const toolContent = block.content;
-          const contentParam: string | Anthropic.Messages.ToolResultBlockParam['content'] =
-            typeof toolContent === 'string'
-              ? toolContent
-              : Array.isArray(toolContent)
-                ? (toolContent as ContentBlock[]).map((c) => ({
-                    type: 'text' as const,
-                    text: typeof c === 'string' ? c : JSON.stringify(c),
-                  }))
-                : JSON.stringify(toolContent);
+          let contentParam: string | Anthropic.Messages.ToolResultBlockParam['content'];
+
+          if (typeof toolContent === 'string') {
+            contentParam = toolContent;
+          } else if (Array.isArray(toolContent)) {
+            // Map each inner block to the appropriate Anthropic content param type.
+            // Supports text and image blocks; anything else falls back to text/JSON.
+            contentParam = (toolContent as ContentBlock[]).map((c) => {
+              if (c.type === 'image') {
+                // Image block — pass base64 data through for vision.
+                return {
+                  type: 'image' as const,
+                  source: {
+                    type: 'base64' as const,
+                    media_type: (c.media_type as Anthropic.Messages.Base64ImageSource['media_type']) ?? 'image/png',
+                    data: c.data as string,
+                  },
+                };
+              }
+              // Default: render as text
+              return {
+                type: 'text' as const,
+                text: c.type === 'text' ? (c.text as string) : JSON.stringify(c),
+              };
+            });
+          } else {
+            contentParam = JSON.stringify(toolContent);
+          }
 
           converted.push({
             type: 'tool_result',
