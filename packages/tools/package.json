@@ -9,6 +9,7 @@
     "dev": "echo 'No dev step for tools'"
   },
   "dependencies": {
-    "@open-agent/core": "workspace:*"
+    "@open-agent/core": "workspace:*",
+    "fast-glob": "^3.3.3"
   }
 }

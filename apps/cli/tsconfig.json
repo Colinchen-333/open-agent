@@ -1,8 +1,15 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "rootDir": "./src",
-    "outDir": "./dist"
+    "outDir": "./dist",
+    "rootDir": "../../",
+    "composite": true
   },
-  "include": ["src"]
+  "include": [
+    "src",
+    "../../packages/cli/src",
+    "../../packages/core/src",
+    "../../packages/providers/src",
+    "../../packages/tools/src"
+  ]
 }

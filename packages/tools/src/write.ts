@@ -1,0 +1,49 @@
+import { mkdir } from 'fs/promises';
+import { dirname } from 'path';
+import type { ToolDefinition, ToolContext, FileWriteInput } from './types.js';
+
+export function createWriteTool(): ToolDefinition {
+  return {
+    name: 'Write',
+    description: 'Write content to a file, creating it or overwriting it entirely. Creates parent directories as needed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file_path: {
+          type: 'string',
+          description: 'Absolute path to the file to write',
+        },
+        content: {
+          type: 'string',
+          description: 'Full content to write to the file',
+        },
+      },
+      required: ['file_path', 'content'],
+    },
+
+    async execute(input: FileWriteInput, ctx: ToolContext) {
+      const file = Bun.file(input.file_path);
+      const exists = await file.exists();
+
+      let originalFile: string | null = null;
+      if (exists) {
+        originalFile = await file.text();
+      }
+
+      // Ensure parent directory exists
+      const dir = dirname(input.file_path);
+      await mkdir(dir, { recursive: true });
+
+      await Bun.write(input.file_path, input.content);
+
+      return {
+        type: exists ? ('update' as const) : ('create' as const),
+        filePath: input.file_path,
+        content: input.content,
+        // Structured patch left as empty array; diff can be computed downstream if needed
+        structuredPatch: [] as any[],
+        originalFile,
+      };
+    },
+  };
+}

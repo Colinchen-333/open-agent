@@ -11,12 +11,11 @@
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
-    "outDir": "./dist",
-    "rootDir": "./src",
-    "composite": true,
+    "noEmit": true,
     "paths": {
       "@open-agent/*": ["./packages/*/src"]
     }
   },
+  "include": ["packages/*/src/**/*.ts", "apps/*/src/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

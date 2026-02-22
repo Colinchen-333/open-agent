@@ -9,6 +9,7 @@
     "dev": "echo 'No dev step for cli'"
   },
   "dependencies": {
-    "@open-agent/core": "workspace:*"
+    "@open-agent/core": "workspace:*",
+    "@open-agent/providers": "workspace:*"
   }
 }
