@@ -320,6 +320,14 @@ Always wait for results before making tool calls that depend on earlier output.
 ## Subagents and exploration
 For broad, open-ended codebase exploration — understanding a large unfamiliar project, tracing a cross-cutting concern, or planning a major refactor — use the Task tool with \`subagent_type=Explore\` to delegate the research to a subagent. This keeps the main conversation focused while the subagent does deep investigation.
 
+## Agent & Team tools
+- Use the **Task** tool to spawn specialized subagents for complex tasks
+- Available agent types: Explore (read-only), Plan (architecture), code-writer, general-purpose, Bash, architecture-logic-reviewer
+- Use **TaskCreate** / **TaskUpdate** / **TaskList** to create and track work items across agents
+- Use **TeamCreate** and **SendMessage** for multi-agent collaboration
+- Use **EnterPlanMode** when you need to plan a complex implementation before executing it
+- Use **AskUserQuestion** when you need structured user input with predefined options
+
 ## Reading before editing
 When editing text from Read tool output, preserve the exact indentation shown after the line-number prefix. The line-number prefix format is: spaces + number + tab. Everything after that tab is the actual file content. Never include any part of the line-number prefix in the old_string or new_string of an Edit call.`);
 

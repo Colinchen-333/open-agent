@@ -174,18 +174,65 @@ const SLASH_COMMANDS: Record<
   '/permissions': {
     description: 'Show current permission mode and rules',
     handler: async (_args, ctx) => {
-      const lines = [
-        `Permission mode: ${ctx.permissionMode ?? 'default'}`,
-        '',
-        'Modes:',
-        '  default          - Ask for dangerous operations',
-        '  acceptEdits      - Auto-accept file edits',
-        '  bypassPermissions - Skip all permission checks',
-        '  plan             - Read-only planning mode',
-        '  dontAsk          - Deny unpermitted, never prompt',
-        '',
-        `Use --permission-mode <mode> to change.`,
-      ];
+      const lines: string[] = [];
+
+      if (ctx.permissionEngine) {
+        const summary = ctx.permissionEngine.getSummary();
+        lines.push(`Permission mode: ${summary.mode}`);
+        lines.push('');
+
+        const formatRule = (r: { toolName: string; ruleContent?: string }) =>
+          r.ruleContent ? `${r.toolName}(${r.ruleContent})` : r.toolName;
+
+        if (summary.allowRules.length > 0) {
+          lines.push('Allow rules:');
+          for (const r of summary.allowRules) lines.push(`  + ${formatRule(r)}`);
+          lines.push('');
+        }
+        if (summary.denyRules.length > 0) {
+          lines.push('Deny rules:');
+          for (const r of summary.denyRules) lines.push(`  - ${formatRule(r)}`);
+          lines.push('');
+        }
+        if (summary.askRules.length > 0) {
+          lines.push('Ask rules:');
+          for (const r of summary.askRules) lines.push(`  ? ${formatRule(r)}`);
+          lines.push('');
+        }
+        if (summary.allowedPaths.length > 0) {
+          lines.push('Allowed paths:');
+          for (const p of summary.allowedPaths) lines.push(`  ${p}`);
+          lines.push('');
+        }
+        if (summary.deniedPaths.length > 0) {
+          lines.push('Denied paths:');
+          for (const p of summary.deniedPaths) lines.push(`  ${p}`);
+          lines.push('');
+        }
+        if (
+          summary.allowRules.length === 0 &&
+          summary.denyRules.length === 0 &&
+          summary.askRules.length === 0 &&
+          summary.allowedPaths.length === 0 &&
+          summary.deniedPaths.length === 0
+        ) {
+          lines.push('No custom rules configured.');
+          lines.push('');
+        }
+      } else {
+        lines.push(`Permission mode: ${ctx.permissionMode ?? 'default'}`);
+        lines.push('');
+      }
+
+      lines.push('Modes:');
+      lines.push('  default           Ask for dangerous operations');
+      lines.push('  acceptEdits       Auto-accept file edits');
+      lines.push('  bypassPermissions Skip all permission checks');
+      lines.push('  plan              Read-only planning mode');
+      lines.push('  dontAsk           Deny unpermitted, never prompt');
+      lines.push('');
+      lines.push('Use --permission-mode <mode> to change.');
+
       return { handled: true, output: lines.join('\n') };
     },
   },
@@ -214,7 +261,7 @@ const SLASH_COMMANDS: Record<
         return { handled: true, output: 'Invalid level. Use: low, medium, high, max' };
       }
       // Effort is set on the loop options for the next LLM call.
-      (ctx.loop as any).options.effort = level;
+      ctx.loop.setEffort(level as 'low' | 'medium' | 'high' | 'max');
       return { handled: true, output: `Effort set to: ${level}` };
     },
   },

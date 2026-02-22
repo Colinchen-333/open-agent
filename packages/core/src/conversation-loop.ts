@@ -730,6 +730,11 @@ export class ConversationLoop {
     this.options.thinking = thinking;
   }
 
+  /** Update the effort level for subsequent LLM calls. */
+  setEffort(effort: 'low' | 'medium' | 'high' | 'max'): void {
+    this.options.effort = effort;
+  }
+
   /**
    * Update the permission mode on the underlying permission engine.
    * Has no effect if no permissionEngine was supplied at construction time.
