@@ -174,11 +174,17 @@ export class AnthropicProvider implements LLMProvider {
         thinking && thinking.type !== 'disabled';
 
       let thinkingParam: Anthropic.Messages.ThinkingConfigParam | undefined;
+      let budgetTokens = 0;
       if (useThinking) {
-        const budgetTokens =
-          thinking?.type === 'enabled'
-            ? (thinking.budgetTokens ?? 10000)
-            : effortToBudget(options.effort);
+        if (thinking?.type === 'enabled') {
+          // Explicitly enabled: respect the caller-supplied budget or use the
+          // effort-based default (full budget scale).
+          budgetTokens = thinking.budgetTokens ?? effortToBudget(options.effort);
+        } else {
+          // 'adaptive' mode: use a smaller, conservative budget so the model
+          // only thinks deeply when it genuinely needs to.
+          budgetTokens = 4000;
+        }
 
         thinkingParam = {
           type: 'enabled',
@@ -186,9 +192,16 @@ export class AnthropicProvider implements LLMProvider {
         };
       }
 
+      // When thinking is active max_tokens must exceed budget_tokens or the API
+      // will reject the request / truncate output.  Guarantee at least
+      // budget_tokens + 4096 headroom for the visible response.
+      const effectiveMaxTokens = thinkingParam
+        ? Math.max(options.maxTokens ?? 16384, budgetTokens + 4096)
+        : (options.maxTokens ?? 8096);
+
       const baseParams = {
         model: options.model,
-        max_tokens: options.maxTokens ?? (thinkingParam ? 16000 : 8096),
+        max_tokens: effectiveMaxTokens,
         messages: anthropicMessages,
         ...(system ? { system } : {}),
         ...(tools ? { tools } : {}),

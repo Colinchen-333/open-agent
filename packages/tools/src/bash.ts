@@ -1,4 +1,5 @@
-import type { ToolDefinition, ToolContext, BashInput, BashOutput } from './types.js';
+import { randomUUID } from 'crypto';
+import type { ToolDefinition, ToolContext, BashInput } from './types.js';
 import { getBackgroundTasks } from './task-management.js';
 
 const MAX_OUTPUT_LENGTH = 30000;
@@ -40,15 +41,14 @@ export function createBashTool(): ToolDefinition {
       required: ['command'],
     },
 
-    async execute(input: BashInput & { dangerouslyDisableSandbox?: boolean }, ctx: ToolContext): Promise<BashOutput> {
+    async execute(input: BashInput & { dangerouslyDisableSandbox?: boolean }, ctx: ToolContext): Promise<string> {
       const timeout = Math.min(input.timeout ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
 
       // Determine effective working directory (persistent across calls)
       const effectiveCwd = persistentCwd ?? ctx.cwd;
 
-      // Wrap command to capture final CWD after execution
-      // Append a sentinel + pwd so we can extract the final directory
-      const CWD_SENTINEL = '___CWD___';
+      // Use a UUID-based sentinel to avoid collisions with command output
+      const CWD_SENTINEL = `___CWD_${randomUUID()}___`;
       const wrappedCommand = `cd "${effectiveCwd}" && ${input.command} ; echo "${CWD_SENTINEL}" ; pwd`;
 
       // Handle background execution
@@ -89,12 +89,7 @@ export function createBashTool(): ToolDefinition {
           }
         })();
 
-        return {
-          stdout: '',
-          stderr: '',
-          interrupted: false,
-          backgroundTaskId: taskId,
-        };
+        return `Background task started (id: ${taskId})`;
       }
 
       // Foreground execution
@@ -130,11 +125,13 @@ export function createBashTool(): ToolDefinition {
       // interrupted = killed by our timer OR non-zero exit with a signal
       const interrupted = killed || (proc.exitCode !== 0 && proc.signalCode !== null);
 
-      return {
-        stdout: truncatedStdout,
-        stderr: truncatedStderr,
-        interrupted,
-      };
+      // Return a clean string that the LLM can read directly.
+      // Prefer stdout; fall back to stderr if there was no stdout output.
+      const output = truncatedStdout || truncatedStderr || '(no output)';
+      const exitInfo =
+        proc.exitCode !== 0 ? `\n(exit code: ${proc.exitCode})` : '';
+      const interruptedNote = interrupted ? '\n(command was interrupted)' : '';
+      return output + exitInfo + interruptedNote;
     },
   };
 }

@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from 'fs';
+import { statSync } from 'fs';
 import type { ToolDefinition, ToolContext, FileReadInput } from './types.js';
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
@@ -25,7 +25,7 @@ export function createReadTool(): ToolDefinition {
   return {
     name: 'Read',
     description:
-      'Read a file from the filesystem. Returns file contents with line numbers (cat -n style). For images returns base64 data. Supports PDF files, Jupyter notebooks (.ipynb), offset and limit for partial reads.',
+      'Read a file from the filesystem. Returns file contents with line numbers (cat -n style). For images returns metadata and file info. For PDF files returns size information and extraction instructions. Supports Jupyter notebooks (.ipynb), offset and limit for partial reads.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -52,15 +52,17 @@ export function createReadTool(): ToolDefinition {
     async execute(input: FileReadInput, ctx: ToolContext) {
       const ext = getExtension(input.file_path);
 
-      // Handle image files
+      // Handle image files — return metadata only, not raw binary data.
+      // Encoding megabytes of pixel data as base64 is wasteful and unhelpful
+      // for text-based LLM workflows. Use Bash + an image tool if you need
+      // to inspect actual pixel content.
       if (IMAGE_EXTENSIONS.has(ext)) {
         const file = Bun.file(input.file_path);
         const exists = await file.exists();
         if (!exists) {
           throw new Error(`File not found: ${input.file_path}`);
         }
-        const buffer = await file.arrayBuffer();
-        const base64 = Buffer.from(buffer).toString('base64');
+        const stat = statSync(input.file_path);
         const mimeMap: Record<string, string> = {
           '.png': 'image/png',
           '.jpg': 'image/jpeg',
@@ -70,34 +72,86 @@ export function createReadTool(): ToolDefinition {
           '.bmp': 'image/bmp',
           '.svg': 'image/svg+xml',
         };
+        const mimeType = mimeMap[ext] ?? 'image/octet-stream';
+        const sizeKb = (stat.size / 1024).toFixed(1);
+
+        // For SVG files we can read them as text since they are XML.
+        if (ext === '.svg') {
+          const content = await file.text();
+          const lines = content.split('\n');
+          const totalLines = lines.length;
+          const startLine = Math.max(1, input.offset ?? 1);
+          const lineLimit = input.limit ?? DEFAULT_LINE_LIMIT;
+          const sliced = lines.slice(startLine - 1, startLine - 1 + lineLimit);
+          return {
+            type: 'text' as const,
+            file: {
+              filePath: input.file_path,
+              content: formatWithLineNumbers(sliced, startLine),
+              numLines: sliced.length,
+              startLine,
+              totalLines,
+            },
+          };
+        }
+
+        const message = [
+          `Image file found: ${input.file_path}`,
+          `Type: ${mimeType}`,
+          `Size: ${sizeKb} KB (${stat.size} bytes)`,
+          '',
+          'This is a binary image file. Its raw contents are not returned to avoid',
+          'transmitting large amounts of binary data. To work with this image:',
+          '  - Use Bash to run image tools (e.g. `identify`, `exiftool`, `file`)',
+          '  - Use Bash with `convert` (ImageMagick) to resize or convert the image',
+          '  - If the image contains text, use `tesseract` for OCR extraction',
+        ].join('\n');
+
         return {
-          type: 'image' as const,
+          type: 'text' as const,
           file: {
             filePath: input.file_path,
-            base64,
-            type: mimeMap[ext] ?? 'image/png',
-            originalSize: buffer.byteLength,
+            content: message,
+            numLines: message.split('\n').length,
+            startLine: 1,
+            totalLines: message.split('\n').length,
           },
         };
       }
 
-      // Handle PDF files
+      // Handle PDF files — return metadata and extraction instructions rather
+      // than a raw base64 blob, which is useless as LLM text input.
       if (ext === '.pdf') {
         const file = Bun.file(input.file_path);
         const exists = await file.exists();
         if (!exists) {
           throw new Error(`File not found: ${input.file_path}`);
         }
-        const buffer = await file.arrayBuffer();
-        const base64 = Buffer.from(buffer).toString('base64');
         const stat = statSync(input.file_path);
+        const sizeMb = (stat.size / (1024 * 1024)).toFixed(2);
+
+        const pageHint = input.pages ? ` (requested pages: ${input.pages})` : '';
+        const message = [
+          `PDF file found: ${input.file_path}${pageHint}`,
+          `Size: ${sizeMb} MB (${stat.size} bytes)`,
+          '',
+          'PDF is a binary format. To extract readable text, use Bash with one of:',
+          '  pdftotext "' + input.file_path + '" -    # outputs text to stdout',
+          '  pdftotext -f 1 -l 5 "' + input.file_path + '" -  # pages 1-5 only',
+          '  mutool draw -F text "' + input.file_path + '"     # alternative (mutool)',
+          '',
+          'If pdftotext is not installed: brew install poppler  (macOS)',
+          '                               apt install poppler-utils  (Debian/Ubuntu)',
+        ].join('\n');
+
         return {
-          type: 'pdf' as const,
+          type: 'text' as const,
           file: {
             filePath: input.file_path,
-            base64,
-            pages: input.pages,
-            originalSize: stat.size,
+            content: message,
+            numLines: message.split('\n').length,
+            startLine: 1,
+            totalLines: message.split('\n').length,
           },
         };
       }

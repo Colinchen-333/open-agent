@@ -193,6 +193,9 @@ export class OpenAIProvider implements LLMProvider {
         model: options.model,
         messages: oaiMessages,
         stream: true,
+        // Request usage counts to be included in the final stream chunk so
+        // token tracking works correctly.
+        stream_options: { include_usage: true },
         ...(options.maxTokens !== undefined ? { max_tokens: options.maxTokens } : {}),
         ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
         ...(options.topP !== undefined ? { top_p: options.topP } : {}),

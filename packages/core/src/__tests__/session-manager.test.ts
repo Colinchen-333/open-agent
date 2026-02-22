@@ -143,7 +143,9 @@ describe('SessionManager', () => {
     const listCwd = '/tmp/list-sessions-test';
     const a = sm.createSession(listCwd, 'model-a');
     const b = sm.createSession(listCwd, 'model-b');
-    // Touch b so its lastActiveAt > a's
+    // Ensure timestamps differ, then touch b so its lastActiveAt > a's
+    const wait = (ms: number) => { const end = Date.now() + ms; while (Date.now() < end); };
+    wait(5);
     sm.touchSession(listCwd, b.id);
 
     const sessions = sm.listSessions(listCwd);
