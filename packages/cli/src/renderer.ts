@@ -103,12 +103,16 @@ function renderMarkdown(text: string): string {
       if (!inCodeBlock) {
         codeBlockLang = line.trimStart().slice(3).trim();
         const label = codeBlockLang || 'code';
+        // Calculate total border width: "╭─ label ─────╮" pattern
+        const borderWidth = 4 + label.length + 1; // "╭─ " + label + " " + trailing dashes
+        const trailingDashes = Math.max(0, 44 - borderWidth);
         result.push(
-          `${C.gray}${BOX.topLeft}${BOX.horizontal} ${label} ${BOX.horizontal.repeat(Math.max(0, 40 - label.length))}${C.reset}`,
+          `${C.gray}${BOX.topLeft}${BOX.horizontal} ${label} ${BOX.horizontal.repeat(trailingDashes)}${C.reset}`,
         );
         inCodeBlock = true;
       } else {
-        result.push(`${C.gray}${BOX.bottomLeft}${BOX.horizontal.repeat(44)}${C.reset}`);
+        // Match bottom border width to the header (always 44 chars total)
+        result.push(`${C.gray}${BOX.bottomLeft}${BOX.horizontal.repeat(43)}${C.reset}`);
         inCodeBlock = false;
         codeBlockLang = '';
       }
@@ -220,12 +224,17 @@ export class TerminalRenderer {
   }
 
   // ── Spinner ───────────────────────────────────────────────────────
+  private spinnerStartTime = 0;
+
   startSpinner(label = 'Thinking'): void {
     if (this.spinnerInterval) return;
+    this.spinnerStartTime = Date.now();
     process.stdout.write(C.hide);
     this.spinnerInterval = setInterval(() => {
       const frame = SPINNER_FRAMES[this.spinnerFrame % SPINNER_FRAMES.length];
-      process.stdout.write(`${C.clearLine}\r${C.cyan}${frame}${C.reset} ${C.dim}${label}...${C.reset}`);
+      const elapsed = Math.floor((Date.now() - this.spinnerStartTime) / 1000);
+      const timeStr = elapsed > 0 ? ` ${C.gray}(${elapsed}s)${C.reset}` : '';
+      process.stdout.write(`${C.clearLine}\r${C.cyan}${frame}${C.reset} ${C.dim}${label}...${C.reset}${timeStr}`);
       this.spinnerFrame++;
     }, 80);
   }

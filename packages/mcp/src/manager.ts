@@ -135,12 +135,18 @@ export class McpManager {
     if (!conn) throw new Error(`MCP server '${name}' not found`);
 
     if (enabled && conn.status === 'disabled') {
-      // Re-enable: restore connection using saved config
+      // Re-enable: restore connection using saved config.
+      // Save config before removal so we can restore it after.
       const savedConfig = conn.config;
       await this.removeServer(name);
-      await this.addServer(name, savedConfig);
-      const refreshed = this.connections.get(name);
-      if (refreshed) refreshed.enabled = true;
+      const refreshed = await this.addServer(name, savedConfig);
+      // If connection failed during re-enable, mark as error (not enabled)
+      // to avoid contradictory enabled=true + status=error state.
+      if (refreshed.status === 'error') {
+        refreshed.enabled = false;
+      } else {
+        refreshed.enabled = true;
+      }
     } else if (!enabled && conn.status !== 'disabled') {
       // Disable: disconnect transport but keep connection record
       const client = this.clients.get(name);

@@ -5,10 +5,35 @@ import { getBackgroundTasks } from './task-management.js';
 const MAX_OUTPUT_LENGTH = 30000;
 const MAX_TIMEOUT_MS = 600_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
+const MAX_BACKGROUND_TASKS = 100;
+const BACKGROUND_TASK_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 // Persistent CWD state across consecutive Bash calls, keyed by sessionId
 // to prevent multi-session conflicts.
 const persistentCwdBySession = new Map<string, string>();
+
+/** Prune completed background tasks older than TTL or exceeding max count. */
+function pruneBackgroundTasks(tasks: Map<string, { status: string; startTime: number }>): void {
+  const now = Date.now();
+  const expired: string[] = [];
+  for (const [id, task] of tasks) {
+    if (task.status !== 'running' && now - task.startTime > BACKGROUND_TASK_TTL_MS) {
+      expired.push(id);
+    }
+  }
+  for (const id of expired) tasks.delete(id);
+
+  // If still over limit, remove oldest completed tasks
+  if (tasks.size > MAX_BACKGROUND_TASKS) {
+    const completed = [...tasks.entries()]
+      .filter(([, t]) => t.status !== 'running')
+      .sort((a, b) => a[1].startTime - b[1].startTime);
+    const toRemove = tasks.size - MAX_BACKGROUND_TASKS;
+    for (let i = 0; i < Math.min(toRemove, completed.length); i++) {
+      tasks.delete(completed[i][0]);
+    }
+  }
+}
 
 export function createBashTool(): ToolDefinition {
   return {
@@ -54,8 +79,11 @@ export function createBashTool(): ToolDefinition {
 
       // Handle background execution
       if (input.run_in_background) {
-        const taskId = `bg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const taskId = `bg_${randomUUID().slice(0, 12)}`;
         const backgroundTasks = getBackgroundTasks();
+
+        // Auto-prune old completed tasks to prevent memory leaks
+        pruneBackgroundTasks(backgroundTasks);
 
         const proc = Bun.spawn(['bash', '-c', wrappedCommand], {
           cwd: effectiveCwd,
@@ -102,18 +130,36 @@ export function createBashTool(): ToolDefinition {
       });
 
       let killed = false;
+      let aborted = false;
       const timer = setTimeout(() => {
         killed = true;
         proc.kill();
       }, timeout);
 
-      const [rawStdout, rawStderr] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-      ]);
+      // Listen for abort signal (Ctrl+C) to kill the process promptly
+      const onAbort = () => {
+        aborted = true;
+        proc.kill();
+      };
+      ctx.abortSignal?.addEventListener('abort', onAbort, { once: true });
 
-      clearTimeout(timer);
+      let rawStdout: string;
+      let rawStderr: string;
+      try {
+        [rawStdout, rawStderr] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+        ]);
+      } finally {
+        clearTimeout(timer);
+        ctx.abortSignal?.removeEventListener('abort', onAbort);
+      }
+
       await proc.exited;
+
+      if (aborted) {
+        throw new DOMException('Bash command aborted', 'AbortError');
+      }
 
       // Extract final CWD from stdout and update persistent state
       const { cleanOutput: stdout, finalCwd } = extractCwd(rawStdout, CWD_SENTINEL);

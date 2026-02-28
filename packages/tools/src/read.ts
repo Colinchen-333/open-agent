@@ -244,7 +244,7 @@ export function createReadTool(): ToolDefinition {
         const nbLines = parts.join('\n').split('\n');
         const totalLines = nbLines.length;
         const offset = Math.max(0, (input.offset ?? 1) - 1);
-        const limit = input.limit ?? totalLines;
+        const limit = input.limit ?? DEFAULT_LINE_LIMIT;
         const sliced = nbLines.slice(offset, offset + limit);
         const nbContent = sliced.map((line, i) => `${String(offset + i + 1).padStart(6)}\t${line}`).join('\n');
         return {
@@ -266,12 +266,15 @@ export function createReadTool(): ToolDefinition {
         throw new Error(`File not found: ${input.file_path}`);
       }
 
-      // Binary file detection: read a small sample and check for null bytes.
+      // Binary file detection: read only the first 8KB to check for null bytes.
       // This prevents garbled UTF-8 from being sent to the LLM.
       const stat = statSync(input.file_path);
       const sampleSize = Math.min(8192, stat.size);
       if (sampleSize > 0) {
-        const sampleBuf = readFileSync(input.file_path, { flag: 'r' }).subarray(0, sampleSize);
+        const fd = require('fs').openSync(input.file_path, 'r');
+        const sampleBuf = Buffer.alloc(sampleSize);
+        require('fs').readSync(fd, sampleBuf, 0, sampleSize, 0);
+        require('fs').closeSync(fd);
         if (sampleBuf.includes(0)) {
           const sizeKb = (stat.size / 1024).toFixed(1);
           return {

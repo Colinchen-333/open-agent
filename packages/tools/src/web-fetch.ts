@@ -1,5 +1,37 @@
 import type { ToolDefinition } from './types.js';
 
+// Simple in-memory cache with 15-minute TTL for fetched URL content.
+const CACHE_TTL_MS = 15 * 60 * 1000;
+const MAX_CACHE_SIZE = 50;
+
+interface CacheEntry {
+  result: unknown;
+  timestamp: number;
+}
+
+const fetchCache = new Map<string, CacheEntry>();
+
+function getCached(url: string): unknown | null {
+  const entry = fetchCache.get(url);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > CACHE_TTL_MS) {
+    fetchCache.delete(url);
+    return null;
+  }
+  return entry.result;
+}
+
+function setCache(url: string, result: unknown): void {
+  // Evict oldest entries if over limit
+  if (fetchCache.size >= MAX_CACHE_SIZE) {
+    const oldest = [...fetchCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp);
+    for (let i = 0; i < Math.max(1, Math.floor(MAX_CACHE_SIZE / 4)); i++) {
+      fetchCache.delete(oldest[i][0]);
+    }
+  }
+  fetchCache.set(url, { result, timestamp: Date.now() });
+}
+
 /**
  * Convert an HTML string to Markdown-flavored plain text.
  * Order matters: block-level conversions run before tag stripping.
@@ -102,6 +134,12 @@ export function createWebFetchTool(): ToolDefinition {
         url = 'https://' + url.slice('http://'.length);
       }
 
+      // Check cache first — return cached result if available
+      const cached = getCached(url);
+      if (cached) {
+        return { ...(cached as Record<string, unknown>), fromCache: true };
+      }
+
       try {
         // Create a timeout signal (30s) combined with user abort signal
         const timeoutController = new AbortController();
@@ -110,19 +148,40 @@ export function createWebFetchTool(): ToolDefinition {
           ? AbortSignal.any([ctx.abortSignal, timeoutController.signal])
           : timeoutController.signal;
 
-        const response = await fetch(url, {
-          redirect: 'follow',
-          headers: {
-            'User-Agent':
-              'Mozilla/5.0 (compatible; OpenAgent/0.1.0; +https://github.com/open-agent)',
-            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          },
-          signal: combinedSignal,
-        });
+        // Manual redirect handling to enforce max redirect limit
+        let currentUrl = url;
+        let response: Response | null = null;
+        const MAX_REDIRECTS = 10;
+        for (let i = 0; i <= MAX_REDIRECTS; i++) {
+          response = await fetch(currentUrl, {
+            redirect: 'manual',
+            headers: {
+              'User-Agent':
+                'Mozilla/5.0 (compatible; OpenAgent/0.1.0; +https://github.com/open-agent)',
+              Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            },
+            signal: combinedSignal,
+          });
+          const location = response.headers.get('location');
+          if (location && response.status >= 300 && response.status < 400) {
+            // Resolve relative URLs
+            currentUrl = new URL(location, currentUrl).href;
+            if (i === MAX_REDIRECTS) {
+              clearTimeout(timeout);
+              return {
+                bytes: 0, code: 0, codeText: 'Error',
+                result: `Too many redirects (>${MAX_REDIRECTS}) for ${url}`,
+                durationMs: Date.now() - start, url,
+              };
+            }
+            continue;
+          }
+          break;
+        }
         clearTimeout(timeout);
 
-        const contentType = response.headers.get('content-type') || '';
-        let text = await response.text();
+        const contentType = response!.headers.get('content-type') || '';
+        let text = await response!.text();
 
         if (contentType.includes('html')) {
           text = htmlToMarkdown(text);
@@ -137,14 +196,21 @@ export function createWebFetchTool(): ToolDefinition {
           text = text.slice(0, LIMIT) + '\n\n... (content truncated)';
         }
 
-        return {
+        const result = {
           bytes: text.length,
-          code: response.status,
-          codeText: response.statusText,
+          code: response!.status,
+          codeText: response!.statusText,
           result: text,
           durationMs: Date.now() - start,
-          url: response.url ?? url, // reflect final URL after redirects
+          url: currentUrl, // reflect final URL after redirects
         };
+
+        // Cache successful responses
+        if (response!.status >= 200 && response!.status < 400) {
+          setCache(url, result);
+        }
+
+        return result;
       } catch (error: unknown) {
         return {
           bytes: 0,

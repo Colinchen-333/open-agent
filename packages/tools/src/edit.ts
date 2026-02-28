@@ -30,10 +30,10 @@ function generateSimplePatch(filePath: string, oldContent: string, newContent: s
 
   const lines: string[] = [`--- ${filePath}`, `+++ ${filePath}`];
 
-  // Emit context lines before the change.
+  // Emit context lines before the change (from old file — they are identical).
   for (let i = contextBefore; i < start; i++) {
-    if (i < newLines.length) {
-      lines.push(`  ${newLines[i]}`);
+    if (i < oldLines.length) {
+      lines.push(`  ${oldLines[i]}`);
     }
   }
 
@@ -139,7 +139,10 @@ export function createEditTool(): ToolDefinition {
         : 1;
 
       // Generate a human-readable unified diff for terminal display.
-      const patch = generateSimplePatch(input.file_path, content, newContent);
+      // Skip patch generation for very large files (>1MB) to avoid wasted work.
+      const patch = content.length > 1_000_000
+        ? `--- ${input.file_path}\n+++ ${input.file_path}\n[File too large for inline diff (${(content.length / 1024).toFixed(0)} KB). ${replacements} replacement(s) applied.]`
+        : generateSimplePatch(input.file_path, content, newContent);
 
       // Return a concise result to avoid sending full file contents back to the
       // LLM.  The patch is included for the terminal renderer but is much smaller

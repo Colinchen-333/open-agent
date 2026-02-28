@@ -67,6 +67,8 @@ export interface AgentHookExecutor {
 
 export class AgentExecutor {
   private agents = new Map<string, AgentSession>();
+  /** Abort controllers per agent — used to signal background agents to stop */
+  private agentAbortControllers = new Map<string, AbortController>();
   private baseDir: string;
   private outputDir: string;
   private hookExecutor?: AgentHookExecutor;
@@ -84,7 +86,7 @@ export class AgentExecutor {
    * Returns the agent's text result.
    */
   async execute(options: ExecuteOptions): Promise<{ agentId: string; result: string; session: AgentSession }> {
-    const agentId = options.resume || `agent-${randomUUID().slice(0, 12)}`;
+    const agentId = options.resume || `agent-${randomUUID()}`;
     const agentType = options.definition.name ?? options.definition.description ?? 'unknown';
     const session: AgentSession = {
       agentId,
@@ -176,7 +178,7 @@ export class AgentExecutor {
    * The agent writes its output to the file as it runs.
    */
   async executeInBackground(options: ExecuteOptions): Promise<{ agentId: string; outputFile: string }> {
-    const agentId = options.resume || `agent-${randomUUID().slice(0, 12)}`;
+    const agentId = options.resume || `agent-${randomUUID()}`;
     const agentType = options.definition.name ?? options.definition.description ?? 'unknown';
     const outputFile = join(this.outputDir, `${agentId}.output`);
 
@@ -200,6 +202,11 @@ export class AgentExecutor {
 
     // Fire SubagentStart hook before launching background task
     await this.fireSubagentStart(agentId, agentType, options.cwd);
+
+    // Create an abort controller for this background agent so stopAgent() can
+    // signal it to terminate.
+    const abortController = new AbortController();
+    this.agentAbortControllers.set(agentId, abortController);
 
     // Fire and forget — run in background
     (async () => {
@@ -292,10 +299,18 @@ export class AgentExecutor {
     return Array.from(this.agents.values());
   }
 
-  /** Stop a background agent (best-effort) */
+  /** Stop a background agent by sending an abort signal */
   stopAgent(agentId: string): boolean {
     const session = this.agents.get(agentId);
     if (!session || session.state !== 'running') return false;
+
+    // Signal the agent's runner to abort via its AbortController
+    const controller = this.agentAbortControllers.get(agentId);
+    if (controller) {
+      controller.abort();
+      this.agentAbortControllers.delete(agentId);
+    }
+
     session.state = 'shutdown';
     session.completedAt = new Date().toISOString();
     this.saveSession(session);

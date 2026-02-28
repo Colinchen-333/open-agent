@@ -33,10 +33,15 @@ const DANGEROUS_COMMAND_PATTERNS = [
   /\bkill\s+-9\b/,
   /\bpkill\b/,
   />\s*\/dev\//,
-  // Output redirection to a file (> or >>) — can overwrite important files
-  /[^>]>{1,2}\s*\S/,
+  // Output redirection to a file (> or >>). Require the > to appear after a
+  // space, pipe, semicolon, or at the start of the command to avoid matching
+  // shell comparison operators like `[ "$a" > "$b" ]`.
+  /(?:^|[|;&\s])>{1,2}\s*\S/,
   /\bcurl\b.*\|\s*bash\b/,
   /\bwget\b.*\|\s*bash\b/,
+  // Command substitution with network commands — potential remote code exec
+  /\$\(\s*(curl|wget)\b/,
+  /\beval\b/,
 ];
 
 // File-system tools that operate on paths — subject to allowedPaths/deniedPaths checks
