@@ -159,6 +159,21 @@ function convertTools(
   }));
 }
 
+function normalizeUsage(
+  usage: OpenAI.Chat.Completions.CompletionUsage | undefined,
+): Record<string, number> | undefined {
+  if (!usage) return undefined;
+  const normalized: Record<string, number> = {
+    input_tokens: usage.prompt_tokens ?? 0,
+    output_tokens: usage.completion_tokens ?? 0,
+  };
+  const cached = usage.prompt_tokens_details?.cached_tokens;
+  if (typeof cached === 'number') {
+    normalized.cache_read_input_tokens = cached;
+  }
+  return normalized;
+}
+
 // State for accumulating a single streaming tool call.
 interface ToolCallAccumulator {
   id: string;
@@ -201,6 +216,16 @@ export class OpenAIProvider implements LLMProvider {
         ...(options.topP !== undefined ? { top_p: options.topP } : {}),
         ...(options.stopSequences ? { stop: options.stopSequences } : {}),
         ...(tools ? { tools, tool_choice: 'auto' } : {}),
+        ...(options.responseFormat && {
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'structured_output',
+              strict: true,
+              schema: options.responseFormat.schema,
+            },
+          },
+        }),
       };
 
       const stream = await this.client.chat.completions.create(params);
@@ -296,7 +321,7 @@ export class OpenAIProvider implements LLMProvider {
               })),
               stop_reason: choice.finish_reason,
             },
-            usage: chunk.usage ?? undefined,
+            usage: normalizeUsage(chunk.usage),
           };
         }
       }

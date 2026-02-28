@@ -301,8 +301,8 @@ export class OllamaProvider implements LLMProvider {
                   : chunk.done_reason ?? 'end_turn',
               },
               usage: {
-                prompt_tokens: chunk.prompt_eval_count,
-                completion_tokens: chunk.eval_count,
+                input_tokens: chunk.prompt_eval_count ?? 0,
+                output_tokens: chunk.eval_count ?? 0,
               },
             };
           }

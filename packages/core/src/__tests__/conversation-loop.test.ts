@@ -46,6 +46,17 @@ function textResponse(text: string): StreamEvent[] {
   ];
 }
 
+function textResponseWithLegacyUsage(text: string): StreamEvent[] {
+  return [
+    { type: 'text_delta', text },
+    {
+      type: 'message_end',
+      message: {},
+      usage: { prompt_tokens: 7, completion_tokens: 11 },
+    },
+  ];
+}
+
 /** Build a tool_use response followed by a text response. */
 function toolUseResponse(
   toolId: string,
@@ -134,6 +145,17 @@ describe('ConversationLoop', () => {
 
       const userMsg = messages.find((m) => m.type === 'user') as any;
       expect(userMsg.message.content).toBe('Hello test');
+    });
+
+    it('normalizes legacy usage keys (prompt/completion tokens)', async () => {
+      const provider = makeMockProvider([textResponseWithLegacyUsage('legacy usage')]);
+      const loop = new ConversationLoop(baseOptions(provider));
+      const messages = await collectMessages(loop.run('check usage'));
+
+      const result = messages.find((m) => m.type === 'result') as any;
+      expect(result).toBeDefined();
+      expect(result.usage.input_tokens).toBe(7);
+      expect(result.usage.output_tokens).toBe(11);
     });
   });
 

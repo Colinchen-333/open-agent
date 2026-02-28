@@ -58,11 +58,40 @@ export interface ConversationLoopOptions {
   costCalculator?: (model: string, inputTokens: number, outputTokens: number, cacheCreationTokens?: number, cacheReadTokens?: number) => number;
   /** Pre-populate conversation history when resuming a session. */
   initialMessages?: Message[];
+  /** Structured output format — passed through to the provider. */
+  responseFormat?: { type: 'json_schema'; schema: Record<string, unknown> };
 }
 
 // Internal marker type for tracking open content blocks during accumulation.
 // The `_closed` flag is stripped before the block is stored in message history.
 type AccumulatingBlock = ContentBlock & { _closed?: boolean };
+
+function normalizeTokenUsage(usage: unknown): Record<string, number> {
+  if (!usage || typeof usage !== 'object') {
+    return {};
+  }
+  const raw = usage as Record<string, unknown>;
+  const toNum = (v: unknown): number | undefined =>
+    typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+
+  const inputTokens = toNum(raw.input_tokens) ?? toNum(raw.prompt_tokens) ?? 0;
+  const outputTokens = toNum(raw.output_tokens) ?? toNum(raw.completion_tokens) ?? 0;
+
+  const normalized: Record<string, number> = {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+  };
+
+  const cacheCreate = toNum(raw.cache_creation_input_tokens);
+  if (cacheCreate !== undefined) {
+    normalized.cache_creation_input_tokens = cacheCreate;
+  }
+  const cacheRead = toNum(raw.cache_read_input_tokens);
+  if (cacheRead !== undefined) {
+    normalized.cache_read_input_tokens = cacheRead;
+  }
+  return normalized;
+}
 
 export class ConversationLoop {
   private messages: Message[] = [];
@@ -219,6 +248,7 @@ export class ConversationLoop {
         effort: this.options.effort,
         systemPrompt: this.options.systemPrompt,
         signal: this.options.abortSignal,
+        responseFormat: this.options.responseFormat,
       };
 
       // Accumulate content blocks as the stream arrives.
@@ -371,14 +401,20 @@ export class ConversationLoop {
                 stopReason = (event as any).delta.stop_reason;
               }
               if ((event as any).usage) {
-                messageUsage = { ...(messageUsage ?? {}), ...(event as any).usage };
+                messageUsage = {
+                  ...(messageUsage ?? {}),
+                  ...normalizeTokenUsage((event as any).usage),
+                };
               }
               break;
             }
 
             case 'message_end': {
               if (event.usage) {
-                messageUsage = { ...(messageUsage ?? {}), ...event.usage };
+                messageUsage = {
+                  ...(messageUsage ?? {}),
+                  ...normalizeTokenUsage(event.usage),
+                };
               }
               if (!stopReason) {
                 stopReason = (event.message as any)?.stop_reason ?? null;
