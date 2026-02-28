@@ -34,24 +34,35 @@ function toSummary(sm: SessionManager, session: SessionInfo): SessionSummary {
 }
 
 function listAllSessionMetas(): SessionInfo[] {
-  const baseDir = join(homedir(), '.open-agent', 'projects');
-  if (!existsSync(baseDir)) return [];
-
   const out: SessionInfo[] = [];
-  for (const projectDir of readdirSync(baseDir, { withFileTypes: true })) {
-    if (!projectDir.isDirectory()) continue;
-    const absProjectDir = join(baseDir, projectDir.name);
-    for (const f of readdirSync(absProjectDir)) {
-      if (!f.endsWith('.meta.json')) continue;
-      try {
-        const meta = JSON.parse(readFileSync(join(absProjectDir, f), 'utf-8')) as SessionInfo;
-        if (meta?.id && meta?.cwd) out.push(meta);
-      } catch {
-        // Skip malformed metadata entries.
+
+  for (const baseDir of [
+    join(homedir(), '.claude', 'projects'),
+    join(homedir(), '.open-agent', 'projects'),
+  ]) {
+    if (!existsSync(baseDir)) continue;
+    for (const projectDir of readdirSync(baseDir, { withFileTypes: true })) {
+      if (!projectDir.isDirectory()) continue;
+      const absProjectDir = join(baseDir, projectDir.name);
+      for (const f of readdirSync(absProjectDir)) {
+        if (!f.endsWith('.meta.json')) continue;
+        try {
+          const meta = JSON.parse(readFileSync(join(absProjectDir, f), 'utf-8')) as SessionInfo;
+          if (meta?.id && meta?.cwd) out.push(meta);
+        } catch {
+          // Skip malformed metadata entries.
+        }
       }
     }
   }
-  return out;
+
+  const deduped = new Map<string, SessionInfo>();
+  for (const meta of out) {
+    if (!deduped.has(meta.id)) {
+      deduped.set(meta.id, meta);
+    }
+  }
+  return [...deduped.values()];
 }
 
 /**
@@ -72,9 +83,9 @@ export async function listSessions(
   const raw = options.dir
     ? sm.listSessions(options.dir)
     : listAllSessionMetas().sort(
-      (a, b) => new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime(),
-    );
+        (a, b) => new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime(),
+      );
 
-  const summaries = raw.map((s) => toSummary(sm, s));
-  return options.limit !== undefined ? summaries.slice(0, options.limit) : summaries;
+  const trimmed = options.limit !== undefined ? raw.slice(0, options.limit) : raw;
+  return trimmed.map((s) => toSummary(sm, s));
 }

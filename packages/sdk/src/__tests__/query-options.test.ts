@@ -395,3 +395,46 @@ describe('QueryOptions — all new options combined', () => {
     q.close();
   });
 });
+
+describe('QueryOptions permission safety', () => {
+  it('throws when bypassPermissions is requested without allowDangerouslySkipPermissions', () => {
+    expect(() =>
+      query('test', {
+        model: 'claude-sonnet-4-6',
+        permissionMode: 'bypassPermissions',
+      }),
+    ).toThrow(/allowDangerouslySkipPermissions/i);
+  });
+
+  it('throws when allowDangerouslySkipPermissions is true but permissionMode is not bypassPermissions', () => {
+    expect(() =>
+      query('test', {
+        model: 'claude-sonnet-4-6',
+        permissionMode: 'default',
+        allowDangerouslySkipPermissions: true,
+      }),
+    ).toThrow(/permissionMode="bypassPermissions"/i);
+  });
+
+  it('accepts bypassPermissions only when both flags are set', () => {
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
+    });
+    expect(q).toBeDefined();
+    q.close();
+  });
+});
+
+describe('QueryOptions continue/resume semantics', () => {
+  it('throws when continue and resume are both set', () => {
+    expect(() =>
+      query('test', {
+        model: 'claude-sonnet-4-6',
+        continue: true,
+        resume: 'session-1',
+      }),
+    ).toThrow(/mutually exclusive/i);
+  });
+});

@@ -63,18 +63,19 @@ describe('query().initializationResult()', () => {
 // ---------------------------------------------------------------------------
 
 describe('query().stopTask()', () => {
-  it('aborts the internal abort controller', async () => {
+  it('does not abort caller-provided AbortController', async () => {
     const ac = new AbortController();
     const q = query('test', { model: 'claude-sonnet-4-6', abortController: ac });
     expect(ac.signal.aborted).toBe(false);
-    await q.stopTask('task-1');
-    expect(ac.signal.aborted).toBe(true);
+    await q.stopTask();
+    expect(ac.signal.aborted).toBe(false);
     q.close();
   });
 
-  it('accepts an optional taskId parameter', async () => {
+  it('accepts optional taskId parameter', async () => {
     const q = query('test', { model: 'claude-sonnet-4-6' });
     // Should not throw with or without taskId
+    await q.stopTask();
     await q.stopTask('some-task-id');
     q.close();
   });
@@ -142,15 +143,17 @@ describe('query().rewindFiles()', () => {
 // ---------------------------------------------------------------------------
 
 describe('query().streamInput()', () => {
-  it('does not throw (logs warning to stderr)', async () => {
+  it('throws on non-stream prompt mode', async () => {
     const q = query('test', { model: 'claude-sonnet-4-6' });
-    // Should not throw
-    await q.streamInput('additional message');
+    await expect(q.streamInput('additional message')).rejects.toThrow(/async-iterable/i);
     q.close();
   });
 
   it('accepts an async iterable input stream', async () => {
-    const q = query('test', { model: 'claude-sonnet-4-6' });
+    const initialPrompt = (async function* () {
+      // keep empty so the query stays in async-iterable mode without running a provider call
+    })();
+    const q = query({ prompt: initialPrompt, options: { model: 'claude-sonnet-4-6' } });
     const stream = (async function* () {
       yield {
         type: 'user',

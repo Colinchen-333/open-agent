@@ -59,13 +59,20 @@ export interface QueryOptions {
   debug?: boolean;
   /**
    * Custom permission callback invoked before each tool use.
-   * Return `false` to deny the tool call; return `true` to fall through to
-   * the normal permission evaluation.
+   * Return `false` to deny immediately; return `true` to fall through to the
+   * normal permission evaluation.
    */
   canUseTool?: (
     tool: string,
     input: Record<string, unknown>,
-  ) => boolean | { behavior: 'allow' | 'deny' | 'ask'; reason?: string } | Promise<boolean | { behavior: 'allow' | 'deny' | 'ask'; reason?: string }>;
+    context: {
+      signal: AbortSignal;
+      toolUseId?: string;
+    },
+  ) =>
+    | boolean
+    | { behavior: 'allow' | 'deny' | 'ask'; reason?: string }
+    | Promise<boolean | { behavior: 'allow' | 'deny' | 'ask'; reason?: string }>;
   /**
    * Async permission callback used when permissionEngine returns "ask".
    * Return:
@@ -81,7 +88,7 @@ export interface QueryOptions {
   permissionPromptToolName?: string;
   /**
    * Control which settings sources are loaded when building the system prompt.
-   * Defaults to all three: ['user', 'project', 'local'].
+   * Defaults to none (no filesystem settings are loaded).
    */
   settingSources?: Array<'user' | 'project' | 'local'>;
   // Official SDK compatibility placeholders (currently best-effort support).
@@ -89,7 +96,7 @@ export interface QueryOptions {
   executable?: string;
   executableArgs?: string[];
   extraArgs?: string[];
-  promptSuggestions?: string[];
+  promptSuggestions?: boolean;
   strictMcpConfig?: boolean;
   stderr?: unknown;
   stdin?: unknown;
@@ -126,6 +133,8 @@ export interface InitializationResult {
   available_output_styles: Array<'text' | 'stream-json'>;
   /** Provider-reported model list. */
   models: ModelInfo[];
+  /** Built-in and custom agents available to this session. */
+  agents?: AgentInfo[];
   /** Account/auth context. */
   account: AccountInfo;
   /** Names of all tools registered for this session. */
@@ -187,9 +196,9 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   /**
    * Abort the current task.  For a single `query()` call this is equivalent to
    * `interrupt()`.  The optional `taskId` parameter is accepted for API
-   * symmetry with multi-task environments but is currently ignored.
+   * symmetry with multi-task environments and is currently ignored.
    */
-  stopTask(taskId: string): Promise<void>;
+  stopTask(taskId?: string): Promise<void>;
   /** Abort and clean up – equivalent to calling `interrupt()` without awaiting. */
   close(): void;
 

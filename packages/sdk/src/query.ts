@@ -61,7 +61,16 @@ export function query(
   }
 
   const cwd = options.cwd ?? process.cwd();
-  const sessionId = options.forkSession ? randomUUID() : (options.sessionId ?? randomUUID());
+  if (options.resume && options.continue) {
+    throw new Error('options.resume and options.continue are mutually exclusive.');
+  }
+  const resumeManager = new SessionManager();
+  const effectiveResumeSessionId =
+    options.resume ??
+    (options.continue ? resumeManager.getLatestSession(cwd)?.id : undefined);
+  const sessionId = options.forkSession
+    ? randomUUID()
+    : (options.sessionId ?? effectiveResumeSessionId ?? randomUUID());
   const shouldPersist = options.persistSession !== false;
 
   // Queue for best-effort streamInput support in async-iterable prompt mode.
@@ -70,7 +79,6 @@ export function query(
   let queueNotifier: (() => void) | null = null;
   let streamClosed = false;
   let sourcePumpStarted = false;
-  let sourcePumpPromise: Promise<void> | null = null;
 
   function notifyQueue(): void {
     if (queueNotifier) {
@@ -102,7 +110,7 @@ export function query(
     if (typeof prompt === 'string' || sourcePumpStarted) return;
     sourcePumpStarted = true;
     const source = prompt;
-    sourcePumpPromise = (async () => {
+    void (async () => {
       try {
         for await (const msg of source) {
           pushQueuedInput(msg);
@@ -298,9 +306,24 @@ export function query(
   // ------------------------------------------------------------------
   // Permission engine — wire from QueryOptions
   // ------------------------------------------------------------------
-  const permMode = options.allowDangerouslySkipPermissions
-    ? 'bypassPermissions'
-    : (options.permissionMode ?? 'bypassPermissions'); // SDK defaults to bypass
+  const requestedPermissionMode = options.permissionMode ?? 'default';
+  if (
+    requestedPermissionMode === 'bypassPermissions' &&
+    options.allowDangerouslySkipPermissions !== true
+  ) {
+    throw new Error(
+      'permissionMode="bypassPermissions" requires allowDangerouslySkipPermissions=true',
+    );
+  }
+  if (
+    options.allowDangerouslySkipPermissions === true &&
+    requestedPermissionMode !== 'bypassPermissions'
+  ) {
+    throw new Error(
+      'allowDangerouslySkipPermissions=true requires permissionMode="bypassPermissions"',
+    );
+  }
+  const permMode = requestedPermissionMode;
   const permissionEngine = new PermissionEngine({ mode: permMode });
   let effectivePermissionEngine: {
     evaluate: (request: { toolName: string; input: unknown }) => { behavior: 'allow' | 'deny' | 'ask'; reason?: string } | Promise<{ behavior: 'allow' | 'deny' | 'ask'; reason?: string }>;
@@ -323,6 +346,9 @@ export function query(
         const result = await options.canUseTool!(
           request.toolName,
           request.input as Record<string, unknown>,
+          {
+            signal: internalAbortController.signal,
+          },
         );
         if (result === false) {
           return { behavior: 'deny' as const, reason: 'Denied by canUseTool callback' };
@@ -352,14 +378,17 @@ export function query(
     // descriptions, safety guidelines, AGENT.md, auto-memory, etc.
     const toolNames = toolRegistry.list().map(t => t.name);
     const configLoader = new ConfigLoader();
-    let agentMdInstructions = configLoader.loadAgentMd(cwd);
+    let agentMdInstructions: string[] = [];
+    const sources = new Set(options.settingSources ?? []);
+    if (sources.size > 0) {
+      agentMdInstructions = configLoader.loadAgentMd(cwd);
+    }
 
     // Filter AGENT.md sources when settingSources is provided.
     // The ConfigLoader returns instructions in order:
     //   index 0            — user-level (~/.open-agent/AGENT.md or ~/.claude/AGENT.md)
     //   index 1..N         — project/local level (walked from cwd upward)
-    if (options.settingSources) {
-      const sources = new Set(options.settingSources);
+    if (sources.size > 0) {
       const userHome = homedir();
       const hasUserAgentMd =
         existsSync(join(userHome, '.open-agent', 'AGENT.md')) ||
@@ -372,7 +401,10 @@ export function query(
       });
     }
     const memory = new AutoMemory(cwd);
-    const memoryContent = memory.readMemory();
+    const memoryContent =
+      sources.has('project') || sources.has('local')
+        ? memory.readMemory()
+        : undefined;
 
     systemPrompt = buildSystemPrompt({
       model,
@@ -401,10 +433,10 @@ export function query(
   // Session resume — restore prior history if requested
   // ------------------------------------------------------------------
   let initialMessages: Message[] = (options as QueryOptions & { initialMessages?: Message[] }).initialMessages ?? [];
-  if (options.resume && initialMessages.length === 0) {
+  if (effectiveResumeSessionId && initialMessages.length === 0) {
     try {
       const sessionMgr = new SessionManager();
-      initialMessages = sessionMgr.loadTranscript(cwd, options.resume);
+      initialMessages = sessionMgr.loadTranscriptAnyCwd(effectiveResumeSessionId, cwd);
     } catch {
       // If transcript is corrupted or missing, start fresh.
       initialMessages = [];
@@ -495,8 +527,8 @@ export function query(
           let modelError: Error | undefined;
           try {
             for await (const msg of loop.run(prompt)) {
-              // When includePartialMessages is false, suppress incremental stream events.
-              if (options.includePartialMessages === false && msg.type === 'stream_event') {
+              // Default behavior matches official SDK: partials are off unless explicitly enabled.
+              if (options.includePartialMessages !== true && msg.type === 'stream_event') {
                 continue;
               }
               // Hold back the result message — check it for model errors first.
@@ -583,7 +615,7 @@ export function query(
           let resultMessage: SDKMessage | undefined;
           try {
             for await (const msg of loop.run(text)) {
-              if (options.includePartialMessages === false && msg.type === 'stream_event') {
+              if (options.includePartialMessages !== true && msg.type === 'stream_event') {
                 continue;
               }
               if (msg.type === 'result') {
@@ -642,7 +674,7 @@ export function query(
               resultMessage = undefined;
               try {
                 for await (const msg of loop.run(text)) {
-                  if (options.includePartialMessages === false && msg.type === 'stream_event') continue;
+                  if (options.includePartialMessages !== true && msg.type === 'stream_event') continue;
                   if (msg.type === 'result') { resultMessage = msg; continue; }
                   yield msg;
                 }
@@ -791,10 +823,11 @@ export function query(
       // Refresh the tools list now that MCP tools have been registered.
       initSnapshot.tools = toolRegistry.list().map(t => t.name);
     }
-    const [commands, models, account] = await Promise.all([
+    const [commands, models, account, agents] = await Promise.all([
       queryObj.supportedCommands(),
       queryObj.supportedModels(),
       queryObj.accountInfo(),
+      queryObj.supportedAgents(),
     ]);
     return {
       ...initSnapshot,
@@ -803,11 +836,12 @@ export function query(
       available_output_styles: ['text', 'stream-json'] as const,
       models,
       account,
+      agents,
     };
   };
 
-  queryObj.stopTask = async (_taskId: string) => {
-    abortQuery(true);
+  queryObj.stopTask = async (_taskId?: string) => {
+    abortQuery(false);
   };
 
   queryObj.close = () => {
@@ -931,10 +965,7 @@ export function query(
 
   queryObj.streamInput = async (input: AsyncIterable<SDKUserMessage> | string): Promise<void> => {
     if (typeof prompt === 'string') {
-      process.stderr.write(
-        '[open-agent/sdk] streamInput() is only effective for async-iterable prompt mode.\n',
-      );
-      return;
+      throw new Error('streamInput() requires async-iterable prompt mode.');
     }
     if (typeof input === 'string') {
       pushQueuedInput({

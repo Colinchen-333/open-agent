@@ -21,6 +21,12 @@ describe('listSessions()', () => {
     expect(Array.isArray(result)).toBe(true);
   });
 
+  it('supports limit option', async () => {
+    const result = await listSessions({ dir: '/tmp/open-agent-test-nonexistent', limit: 1 });
+    expect(Array.isArray(result)).toBe(true);
+    expect(result.length).toBeLessThanOrEqual(1);
+  });
+
   it('supports the legacy string dir signature', async () => {
     const result = await listSessions('/tmp/open-agent-test-nonexistent');
     expect(Array.isArray(result)).toBe(true);
