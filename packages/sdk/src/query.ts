@@ -10,7 +10,7 @@ import type { Message } from '@open-agent/providers';
 import { PermissionEngine } from '@open-agent/permissions';
 import { HookExecutor } from '@open-agent/hooks';
 import { McpManager } from '@open-agent/mcp';
-import type { QueryOptions, Query } from './types.js';
+import type { QueryOptions, Query, RewindFilesResult } from './types.js';
 
 // --------------------------------------------------------------------------
 // query() – V1 streaming API
@@ -788,13 +788,18 @@ export function query(
 
   queryObj.mcpServerStatus = async () => {
     if (!mcpManager) return [];
-    return mcpManager.getStatus().map(conn => ({
+    return mcpManager.getStatus().map((conn) => ({
       name: conn.name,
-      status: (conn.status === 'connected' || conn.status === 'connecting' || conn.status === 'error')
-        ? conn.status
-        : ('disconnected' as const),
-      error: conn.error,
-      tools: conn.tools.map(t => t.name),
+      status: mapMcpStatus(conn.status, conn.error),
+      ...(conn.serverInfo ? { serverInfo: conn.serverInfo } : {}),
+      ...(conn.error ? { error: conn.error } : {}),
+      config: conn.config as unknown as Record<string, unknown>,
+      scope: 'local',
+      tools: conn.tools.map((t) => ({
+        name: t.name,
+        ...(t.description ? { description: t.description } : {}),
+        ...(t.annotations ? { annotations: t.annotations } : {}),
+      })),
     }));
   };
 
@@ -837,6 +842,7 @@ export function query(
       models,
       account,
       agents,
+      fast_mode_state: undefined,
     };
   };
 
@@ -924,12 +930,10 @@ export function query(
   queryObj.rewindFiles = async (
     userMessageId: string,
     options?: { dryRun?: boolean },
-  ): Promise<{ canRewind: boolean; rewindCount: number; filesChanged: string[]; error?: string }> => {
+  ): Promise<RewindFilesResult> => {
     if (!fileCheckpoint) {
       return {
         canRewind: false,
-        rewindCount: 0,
-        filesChanged: [],
         error: 'File checkpointing is not enabled.',
       };
     }
@@ -938,8 +942,6 @@ export function query(
     if (idx === -1) {
       return {
         canRewind: false,
-        rewindCount: 0,
-        filesChanged: [],
         error: `Checkpoint not found: ${userMessageId}`,
       };
     }
@@ -948,15 +950,15 @@ export function query(
     if (options?.dryRun) {
       return {
         canRewind: true,
-        rewindCount: uniqueTarget.length,
         filesChanged: uniqueTarget,
+        rewindCount: uniqueTarget.length,
       };
     }
     const { restored, errors } = fileCheckpoint.rewindTo(userMessageId);
     return {
       canRewind: errors.length === 0,
-      rewindCount: restored.length,
       filesChanged: [...new Set(restored)],
+      rewindCount: restored.length,
       ...(errors.length > 0 ? { error: errors.join('\n') } : {}),
     };
   };
@@ -1032,6 +1034,25 @@ function isModelError(err: unknown): boolean {
     msgOriginal.includes('过载') ||
     msgOriginal.includes('不可用')
   );
+}
+
+function mapMcpStatus(
+  status: 'connected' | 'connecting' | 'failed' | 'error' | 'pending' | 'disabled' | 'disconnected',
+  error?: string,
+): 'connected' | 'failed' | 'needs-auth' | 'pending' | 'disabled' {
+  if (status === 'connected') return 'connected';
+  if (status === 'disabled') return 'disabled';
+  if (status === 'connecting' || status === 'pending') return 'pending';
+  const message = (error ?? '').toLowerCase();
+  if (
+    message.includes('auth') ||
+    message.includes('unauthorized') ||
+    message.includes('forbidden') ||
+    message.includes('login')
+  ) {
+    return 'needs-auth';
+  }
+  return 'failed';
 }
 
 /**

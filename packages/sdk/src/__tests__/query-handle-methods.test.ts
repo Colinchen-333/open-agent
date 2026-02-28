@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'bun:test';
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { SessionManager } from '@open-agent/core';
 import { query } from '../query.js';
+import { createSdkMcpServer, tool } from '../mcp-helpers.js';
 
 // ---------------------------------------------------------------------------
 // initializationResult()
@@ -19,11 +24,14 @@ describe('query().initializationResult()', () => {
     expect(result).toHaveProperty('available_output_styles');
     expect(result).toHaveProperty('models');
     expect(result).toHaveProperty('account');
+    expect(result).toHaveProperty('agents');
+    expect(result).toHaveProperty('fast_mode_state');
     expect(Array.isArray(result.tools)).toBe(true);
     expect(typeof result.model).toBe('string');
     expect(typeof result.cwd).toBe('string');
     expect(typeof result.sessionId).toBe('string');
     expect(typeof result.permissionMode).toBe('string');
+    expect(Array.isArray(result.agents)).toBe(true);
     q.close();
   });
 
@@ -100,6 +108,13 @@ describe('query().close()', () => {
 // ---------------------------------------------------------------------------
 
 describe('query() MCP methods without mcpServers', () => {
+  it('mcpServerStatus() returns empty array when no MCP manager', async () => {
+    const q = query('test', { model: 'claude-sonnet-4-6' });
+    const status = await q.mcpServerStatus();
+    expect(status).toEqual([]);
+    q.close();
+  });
+
   it('reconnectMcpServer() throws when no MCP manager', async () => {
     const q = query('test', { model: 'claude-sonnet-4-6' });
     await expect(q.reconnectMcpServer('foo')).rejects.toThrow(/MCP/i);
@@ -124,6 +139,46 @@ describe('query() MCP methods without mcpServers', () => {
   });
 });
 
+describe('query() MCP status shape', () => {
+  it('initializationResult waits for MCP tools and mcpServerStatus returns official-like shape', async () => {
+    const server = createSdkMcpServer({
+      name: 'sdk-test',
+      tools: [
+        tool(
+          'echo_status',
+          'Echoes input status',
+          { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+          async ({ text }: { text: string }) => text,
+        ) as any,
+      ],
+    });
+
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      mcpServers: {
+        sdk_test: server as any,
+      },
+    });
+
+    const init = await q.initializationResult();
+    expect(init.tools).toContain('echo_status');
+
+    const status = await q.mcpServerStatus();
+    expect(status.length).toBe(1);
+    expect(status[0].name).toBe('sdk_test');
+    expect(status[0].status).toBe('connected');
+    expect(status[0]).toHaveProperty('config');
+    expect(status[0]).toHaveProperty('scope');
+    expect(Array.isArray(status[0].tools)).toBe(true);
+    expect(status[0].tools?.[0]?.name).toBe('echo_status');
+
+    await q.toggleMcpServer('sdk_test', false);
+    const disabled = await q.mcpServerStatus();
+    expect(disabled[0].status).toBe('disabled');
+    q.close();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // rewindFiles()
 // ---------------------------------------------------------------------------
@@ -133,7 +188,61 @@ describe('query().rewindFiles()', () => {
     const q = query('test', { model: 'claude-sonnet-4-6' });
     const result = await q.rewindFiles('some-tool-use-id');
     expect(result.canRewind).toBe(false);
-    expect(Array.isArray(result.filesChanged)).toBe(true);
+    expect(result.error).toMatch(/not enabled/i);
+    expect(result.filesChanged).toBeUndefined();
+    q.close();
+  });
+
+  it('returns checkpoint-not-found when checkpointing is enabled but id is missing', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-rewind-missing-'));
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      cwd,
+      sessionId: 'rewind-missing-session',
+      enableFileCheckpointing: true,
+    });
+    const result = await q.rewindFiles('missing-tool-use-id');
+    expect(result.canRewind).toBe(false);
+    expect(result.error).toMatch(/checkpoint not found/i);
+    q.close();
+  });
+
+  it('supports dryRun and actual rewind when checkpoints exist on disk', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-rewind-dryrun-'));
+    const sessionId = 'rewind-dryrun-session';
+    const targetFile = join(cwd, 'demo.txt');
+    writeFileSync(targetFile, 'after', 'utf-8');
+
+    const sm = new SessionManager();
+    const sessionDir = sm.getSessionDir(cwd, sessionId);
+    const checkpointDir = join(sessionDir, 'checkpoints');
+    mkdirSync(checkpointDir, { recursive: true });
+    writeFileSync(
+      join(checkpointDir, 'checkpoint-1.json'),
+      JSON.stringify({
+        toolUseId: 'tool-use-1',
+        filePath: targetFile,
+        originalContent: 'before',
+        timestamp: Date.now(),
+      }),
+      'utf-8',
+    );
+
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      cwd,
+      sessionId,
+      enableFileCheckpointing: true,
+    });
+
+    const preview = await q.rewindFiles('tool-use-1', { dryRun: true });
+    expect(preview.canRewind).toBe(true);
+    expect(preview.filesChanged).toEqual([targetFile]);
+
+    const applied = await q.rewindFiles('tool-use-1');
+    expect(applied.canRewind).toBe(true);
+    expect(applied.filesChanged).toEqual([targetFile]);
+    expect(readFileSync(targetFile, 'utf-8')).toBe('before');
     q.close();
   });
 });

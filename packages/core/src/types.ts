@@ -232,11 +232,26 @@ export interface SlashCommand {
 }
 
 // MCP server runtime status
+export interface McpServerStatusTool {
+  name: string;
+  description?: string;
+  annotations?: {
+    readOnly?: boolean;
+    destructive?: boolean;
+    openWorld?: boolean;
+  };
+}
+
+export type McpServerStatusConfig = McpServerConfig | Record<string, unknown>;
+
 export interface McpServerStatus {
   name: string;
-  status: 'connected' | 'connecting' | 'error' | 'disconnected';
+  status: 'connected' | 'failed' | 'needs-auth' | 'pending' | 'disabled';
+  serverInfo?: { name: string; version: string };
   error?: string;
-  tools?: string[];
+  config?: McpServerStatusConfig;
+  scope?: string;
+  tools?: McpServerStatusTool[];
 }
 
 // Configuration scope and source

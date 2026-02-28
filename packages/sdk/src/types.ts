@@ -134,9 +134,11 @@ export interface InitializationResult {
   /** Provider-reported model list. */
   models: ModelInfo[];
   /** Built-in and custom agents available to this session. */
-  agents?: AgentInfo[];
+  agents: AgentInfo[];
   /** Account/auth context. */
   account: AccountInfo;
+  /** Fast mode state from the underlying runtime when available. */
+  fast_mode_state?: unknown;
   /** Names of all tools registered for this session. */
   tools: string[];
   /** The resolved model name used for LLM calls. */
@@ -155,9 +157,12 @@ export interface RewindFilesOptions {
 
 export interface RewindFilesResult {
   canRewind: boolean;
-  rewindCount: number;
-  filesChanged: string[];
+  filesChanged?: string[];
+  insertions?: number;
+  deletions?: number;
   error?: string;
+  /** @deprecated Non-official extension retained for back-compat. */
+  rewindCount?: number;
 }
 
 export interface AgentInfo {
