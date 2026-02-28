@@ -49,6 +49,17 @@ describe('SessionManager', () => {
     expect(retrieved!.model).toBe('gpt-4o');
   });
 
+  it('ensureSession creates metadata for a caller-provided session id', () => {
+    const forcedId = 'forced-session-id-123';
+    const ensured = sm.ensureSession(cwd, forcedId, 'claude-sonnet-4-6');
+    expect(ensured.id).toBe(forcedId);
+    expect(ensured.model).toBe('claude-sonnet-4-6');
+
+    const retrieved = sm.getSession(cwd, forcedId);
+    expect(retrieved).not.toBeNull();
+    expect(retrieved!.id).toBe(forcedId);
+  });
+
   it('getLatestSession returns the most recently touched session', () => {
     const first = sm.createSession(cwd, 'model-a');
     const second = sm.createSession(cwd, 'model-b');

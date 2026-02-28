@@ -90,6 +90,31 @@ export class SessionManager {
   }
 
   /**
+   * Ensure a specific session id has metadata on disk.
+   * If it already exists, updates `lastActiveAt`; otherwise creates it.
+   */
+  ensureSession(cwd: string, sessionId: string, model: string): SessionInfo {
+    const existing = this.getSession(cwd, sessionId);
+    if (existing) {
+      this.touchSession(cwd, sessionId);
+      return this.getSession(cwd, sessionId) ?? existing;
+    }
+
+    const now = new Date().toISOString();
+    const info: SessionInfo = {
+      id: sessionId,
+      cwd,
+      model,
+      createdAt: now,
+      lastActiveAt: now,
+    };
+    const projectDir = this.getProjectDir(cwd);
+    writeFileSync(this.metaPath(projectDir, sessionId), JSON.stringify(info, null, 2));
+    this.updateGlobalIndex(sessionId, cwd);
+    return info;
+  }
+
+  /**
    * Update the `lastActiveAt` timestamp for an existing session.
    * Silently does nothing if the session metadata file is not found.
    */

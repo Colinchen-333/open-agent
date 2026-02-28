@@ -56,6 +56,45 @@ export function resumeSession(sessionId: string, options?: QueryOptions): SDKSes
 }
 
 /**
+ * Fork an existing session — creates a new session with a new ID that starts
+ * with the same conversation history as the original.
+ *
+ * This is useful when you want to branch a conversation: e.g. try two
+ * different approaches while preserving the shared context.
+ *
+ * @param sessionId - The session to fork from.
+ * @param options   - Options for the forked session (should use same model/cwd).
+ *
+ * @example
+ * ```ts
+ * const original = createSession({ model: 'claude-sonnet-4-6', persistSession: true });
+ * for await (const msg of original.send('Analyze auth module')) { ... }
+ *
+ * // Fork to try two approaches
+ * const fork1 = forkSession(original.sessionId, { cwd: '/my/project' });
+ * const fork2 = forkSession(original.sessionId, { cwd: '/my/project' });
+ *
+ * for await (const msg of fork1.send('Refactor using JWT')) { ... }
+ * for await (const msg of fork2.send('Refactor using OAuth')) { ... }
+ * ```
+ */
+export function forkSession(sessionId: string, options?: QueryOptions): SDKSession {
+  const cwd = options?.cwd ?? process.cwd();
+  let initialMessages: Message[] = [];
+  try {
+    const sessionMgr = new SessionManager();
+    initialMessages = sessionMgr.loadTranscript(cwd, sessionId);
+  } catch {
+    // Corrupted or missing transcript — start with empty history.
+    initialMessages = [];
+  }
+
+  // Create a new session with a fresh ID but the same history
+  const forkedId = randomUUID();
+  return _buildSession(forkedId, options, initialMessages);
+}
+
+/**
  * The session handle returned by `createSession` / `resumeSession`.
  * Each call to `send()` runs one conversation turn and yields SDK messages.
  */
@@ -77,6 +116,8 @@ export interface SDKSession {
 // Internal builder
 // --------------------------------------------------------------------------
 
+const MAX_SESSION_HISTORY = 500;
+
 function _buildSession(
   sessionId: string,
   options?: QueryOptions,
@@ -91,6 +132,13 @@ function _buildSession(
   const shouldPersist = options?.persistSession ?? false;
   const sessionMgr = shouldPersist ? new SessionManager() : null;
   const cwd = options?.cwd ?? process.cwd();
+  if (sessionMgr) {
+    try {
+      sessionMgr.ensureSession(cwd, sessionId, options?.model ?? 'unknown');
+    } catch {
+      // Non-critical: keep session usable even if metadata initialization fails.
+    }
+  }
 
   return {
     get sessionId(): string {
@@ -118,6 +166,10 @@ function _buildSession(
             const msgRecord = (msg as { message?: unknown }).message;
             if (msgRecord && typeof msgRecord === 'object' && 'role' in msgRecord) {
               history.push(msgRecord as Message);
+              // Trim history to prevent unbounded memory growth.
+              if (history.length > MAX_SESSION_HISTORY) {
+                history.splice(0, history.length - MAX_SESSION_HISTORY);
+              }
               // Persist to disk if requested.
               if (sessionMgr) {
                 try {
@@ -142,6 +194,7 @@ function _buildSession(
             if (sessionMgr) {
               try {
                 sessionMgr.appendToTranscript(cwd, sessionId, msg);
+                sessionMgr.touchSession(cwd, sessionId);
               } catch { /* non-critical */ }
             }
             break;
@@ -222,7 +275,10 @@ export async function unstable_v2_prompt(
  * }
  * ```
  */
-export function unstable_v2_createSession(options: SessionOptions): Session {
+export function unstable_v2_createSession(
+  options: SessionOptions,
+  _initialMessages?: Message[],
+): Session {
   const sessionId = randomUUID();
   let closed = false;
 
@@ -260,7 +316,11 @@ export function unstable_v2_createSession(options: SessionOptions): Session {
       disallowedTools: options.disallowedTools,
       hooks: options.hooks,
       env: options.env,
-    },
+      // Pass initial messages so resumed sessions have prior conversation context.
+      ...(_initialMessages && _initialMessages.length > 0
+        ? { initialMessages: _initialMessages }
+        : {}),
+    } as QueryOptions & { initialMessages?: Message[] },
   });
 
   return {
@@ -336,9 +396,9 @@ export function unstable_v2_resumeSession(
     initialMessages = [];
   }
 
-  const session = unstable_v2_createSession({
-    ...options,
-  });
+  // Pass the loaded transcript into the session so the underlying query()
+  // feeds prior conversation history to the model on the first turn.
+  const session = unstable_v2_createSession({ ...options }, initialMessages);
 
   Object.defineProperty(session, 'sessionId', {
     value: sessionId,
