@@ -7,3 +7,6 @@ dist/
 *.tsbuildinfo
 *.js.map
 *.d.ts.map
+
+# Compiled binary
+apps/cli/open-agent
