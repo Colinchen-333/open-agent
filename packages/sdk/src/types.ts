@@ -12,6 +12,7 @@ import type {
   ThinkingConfig,
   ModelUsage,
   SlashCommand,
+  PermissionPrompter,
 } from '@open-agent/core';
 
 // --------------------------------------------------------------------------
@@ -56,6 +57,43 @@ export interface QueryOptions {
   sessionId?: string;
   systemPrompt?: string | { type: 'preset'; preset: 'claude_code'; append?: string };
   debug?: boolean;
+  /**
+   * Custom permission callback invoked before each tool use.
+   * Return `false` to deny the tool call; return `true` to fall through to
+   * the normal permission evaluation.
+   */
+  canUseTool?: (
+    tool: string,
+    input: Record<string, unknown>,
+  ) => boolean | { behavior: 'allow' | 'deny' | 'ask'; reason?: string } | Promise<boolean | { behavior: 'allow' | 'deny' | 'ask'; reason?: string }>;
+  /**
+   * Async permission callback used when permissionEngine returns "ask".
+   * Return:
+   * - 'allow'  -> allow once
+   * - 'deny'   -> deny
+   * - 'always' -> allow and persist rule in current session
+   */
+  permissionPrompter?: PermissionPrompter['prompt'];
+  /**
+   * Name of an MCP tool that should be used to prompt the user for permission
+   * decisions instead of the built-in interactive prompt.
+   */
+  permissionPromptToolName?: string;
+  /**
+   * Control which settings sources are loaded when building the system prompt.
+   * Defaults to all three: ['user', 'project', 'local'].
+   */
+  settingSources?: Array<'user' | 'project' | 'local'>;
+  // Official SDK compatibility placeholders (currently best-effort support).
+  pathToClaudeCodeExecutable?: string;
+  executable?: string;
+  executableArgs?: string[];
+  extraArgs?: string[];
+  promptSuggestions?: string[];
+  strictMcpConfig?: boolean;
+  stderr?: unknown;
+  stdin?: unknown;
+  stdout?: unknown;
 }
 
 // --------------------------------------------------------------------------
@@ -77,6 +115,48 @@ export interface SessionOptions {
 // --------------------------------------------------------------------------
 
 /**
+ * Snapshot of session initialization state, returned by `initializationResult()`.
+ */
+export interface InitializationResult {
+  /** Slash command metadata. */
+  commands: SlashCommand[];
+  /** Current output style. */
+  output_style: 'text' | 'stream-json';
+  /** Supported output styles. */
+  available_output_styles: Array<'text' | 'stream-json'>;
+  /** Provider-reported model list. */
+  models: ModelInfo[];
+  /** Account/auth context. */
+  account: AccountInfo;
+  /** Names of all tools registered for this session. */
+  tools: string[];
+  /** The resolved model name used for LLM calls. */
+  model: string;
+  /** The working directory for this session. */
+  cwd: string;
+  /** The stable session identifier. */
+  sessionId: string;
+  /** The active permission mode. */
+  permissionMode: string;
+}
+
+export interface RewindFilesOptions {
+  dryRun?: boolean;
+}
+
+export interface RewindFilesResult {
+  canRewind: boolean;
+  rewindCount: number;
+  filesChanged: string[];
+  error?: string;
+}
+
+export interface AgentInfo {
+  name: string;
+  description?: string;
+}
+
+/**
  * Returned by `query()`.  Implements `AsyncGenerator<SDKMessage>` so callers
  * can iterate with `for await … of` as well as calling control methods.
  */
@@ -93,12 +173,81 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   supportedCommands(): Promise<SlashCommand[]>;
   /** Return the provider's model list. */
   supportedModels(): Promise<ModelInfo[]>;
+  /** Return available built-in agent profiles. */
+  supportedAgents(): Promise<AgentInfo[]>;
   /** Return the runtime status of every configured MCP server. */
   mcpServerStatus(): Promise<McpServerStatus[]>;
   /** Return account/billing information for the active API key. */
   accountInfo(): Promise<AccountInfo>;
+  /**
+   * Return a snapshot of the session's initialization state (tools, model,
+   * cwd, sessionId, permissionMode).  Resolves immediately — no async I/O.
+   */
+  initializationResult(): Promise<InitializationResult>;
+  /**
+   * Abort the current task.  For a single `query()` call this is equivalent to
+   * `interrupt()`.  The optional `taskId` parameter is accepted for API
+   * symmetry with multi-task environments but is currently ignored.
+   */
+  stopTask(taskId: string): Promise<void>;
   /** Abort and clean up – equivalent to calling `interrupt()` without awaiting. */
   close(): void;
+
+  // ── MCP dynamic management ──────────────────────────────────────────────
+
+  /**
+   * Reconnect a specific MCP server by name (disconnect → reconnect).
+   * Throws if no MCP manager is configured for this query.
+   */
+  reconnectMcpServer(serverName: string): Promise<void>;
+
+  /**
+   * Enable or disable a specific MCP server without removing its config.
+   * Throws if no MCP manager is configured for this query.
+   */
+  toggleMcpServer(serverName: string, enabled: boolean): Promise<void>;
+
+  /**
+   * Dynamically replace the full set of MCP servers for this query.
+   * Creates an MCP manager on the fly if one was not configured at start-up.
+   * Returns the diff of added/removed servers and any connection errors.
+   */
+  setMcpServers(
+    servers: Record<string, McpServerConfig>,
+  ): Promise<{ added: string[]; removed: string[]; errors: Record<string, string> }>;
+
+  // ── File checkpointing ──────────────────────────────────────────────────
+
+  /**
+   * Restore all files that were modified at or after the given tool-use
+   * checkpoint back to the state they were in before that tool ran.
+   * Returns `true` when at least one file was restored, `false` if file
+   * checkpointing is not enabled or the checkpoint was not found.
+   */
+  rewindFiles(userMessageId: string, options?: RewindFilesOptions): Promise<RewindFilesResult>;
+
+  // ── Mid-stream input ─────────────────────────────────────────────────────
+
+  /**
+   * Push an additional user message into the running conversation mid-stream.
+   * If the conversation loop does not support live injection the message is
+   * queued and a warning is logged to stderr.
+   */
+  streamInput(input: AsyncIterable<SDKUserMessage> | string): Promise<void>;
+}
+
+export interface ListSessionsOptions {
+  dir?: string;
+  limit?: number;
+}
+
+export interface SessionSummary {
+  sessionId: string;
+  summary: string;
+  lastModified: number;
+  messageCount: number;
+  fileSize: number;
+  cwd: string;
 }
 
 // --------------------------------------------------------------------------

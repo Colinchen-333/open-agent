@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
 
 interface CheckpointEntry {
@@ -19,6 +19,25 @@ export class FileCheckpoint {
   constructor(sessionDir: string) {
     this.sessionDir = join(sessionDir, 'checkpoints');
     mkdirSync(this.sessionDir, { recursive: true });
+    this.loadFromDisk();
+  }
+
+  private loadFromDisk(): void {
+    if (!existsSync(this.sessionDir)) return;
+    const loaded: CheckpointEntry[] = [];
+    for (const file of readdirSync(this.sessionDir)) {
+      if (!file.endsWith('.json')) continue;
+      try {
+        const entry = JSON.parse(readFileSync(join(this.sessionDir, file), 'utf-8')) as CheckpointEntry;
+        if (entry?.toolUseId && entry?.filePath && typeof entry.timestamp === 'number') {
+          loaded.push(entry);
+        }
+      } catch {
+        // Ignore malformed checkpoint files.
+      }
+    }
+    loaded.sort((a, b) => a.timestamp - b.timestamp);
+    this.entries = loaded;
   }
 
   /** Record the current state of a file before modification. */
@@ -42,7 +61,7 @@ export class FileCheckpoint {
     writeFileSync(checkpointFile, JSON.stringify(entry), 'utf-8');
   }
 
-  /** Rewind all files modified after the given toolUseId to their prior state. */
+  /** Rewind all files modified at or after the given toolUseId to their prior state. */
   rewindTo(toolUseId: string): { restored: string[]; errors: string[] } {
     const idx = this.entries.findIndex(e => e.toolUseId === toolUseId);
     if (idx === -1) {

@@ -10,7 +10,9 @@ import { randomUUID } from 'crypto';
  * that package.
  */
 export interface PermissionChecker {
-  evaluate(request: { toolName: string; input: unknown }): { behavior: 'allow' | 'deny' | 'ask'; reason?: string };
+  evaluate(
+    request: { toolName: string; input: unknown },
+  ): { behavior: 'allow' | 'deny' | 'ask'; reason?: string } | Promise<{ behavior: 'allow' | 'deny' | 'ask'; reason?: string }>;
   addRule(behavior: 'allow' | 'deny' | 'ask', rule: { toolName: string; ruleContent?: string }): void;
 }
 
@@ -685,7 +687,7 @@ export class ConversationLoop {
         // ── Permission check ───────────────────────────────────────────────
         const { permissionEngine, permissionPrompter } = this.options;
         if (permissionEngine) {
-          const decision = permissionEngine.evaluate({
+          const decision = await permissionEngine.evaluate({
             toolName: toolUse.name,
             input: toolUse.input,
           });
@@ -1072,7 +1074,13 @@ export class ConversationLoop {
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        yield* this.options.provider.chat(messages, options);
+        for await (const event of this.options.provider.chat(messages, options)) {
+          if (event.type === 'error') {
+            const errMsg = (event as any).error?.message ?? (event as any).error ?? 'Unknown provider error';
+            throw new Error(typeof errMsg === 'string' ? errMsg : JSON.stringify(errMsg));
+          }
+          yield event;
+        }
         return;
       } catch (error: unknown) {
         // Don't retry if the user aborted.

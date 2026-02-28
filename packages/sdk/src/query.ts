@@ -1,4 +1,7 @@
 import { randomUUID } from 'crypto';
+import { existsSync } from 'fs';
+import { homedir } from 'os';
+import { join } from 'path';
 import type { SDKMessage, SDKUserMessage, SlashCommand, AccountInfo } from '@open-agent/core';
 import { ConversationLoop, SessionManager, buildSystemPrompt, ConfigLoader, AutoMemory, FileCheckpoint } from '@open-agent/core';
 import { createDefaultToolRegistry } from '@open-agent/tools';
@@ -59,6 +62,57 @@ export function query(
 
   const cwd = options.cwd ?? process.cwd();
   const sessionId = options.forkSession ? randomUUID() : (options.sessionId ?? randomUUID());
+  const shouldPersist = options.persistSession !== false;
+
+  // Queue for best-effort streamInput support in async-iterable prompt mode.
+  const queuedInputs: SDKUserMessage[] = [];
+  const STREAM_DONE = Symbol('stream-done');
+  let queueNotifier: (() => void) | null = null;
+  let streamClosed = false;
+  let sourcePumpStarted = false;
+  let sourcePumpPromise: Promise<void> | null = null;
+
+  function notifyQueue(): void {
+    if (queueNotifier) {
+      const notify = queueNotifier;
+      queueNotifier = null;
+      notify();
+    }
+  }
+
+  function pushQueuedInput(msg: SDKUserMessage): void {
+    if (streamClosed) return;
+    queuedInputs.push(msg);
+    notifyQueue();
+  }
+
+  async function readQueuedInput(): Promise<SDKUserMessage | typeof STREAM_DONE> {
+    while (!streamClosed && queuedInputs.length === 0) {
+      await new Promise<void>((resolve) => {
+        queueNotifier = resolve;
+      });
+    }
+    if (queuedInputs.length > 0) {
+      return queuedInputs.shift()!;
+    }
+    return STREAM_DONE;
+  }
+
+  function startSourcePromptPumpIfNeeded(): void {
+    if (typeof prompt === 'string' || sourcePumpStarted) return;
+    sourcePumpStarted = true;
+    const source = prompt;
+    sourcePumpPromise = (async () => {
+      try {
+        for await (const msg of source) {
+          pushQueuedInput(msg);
+        }
+      } finally {
+        streamClosed = true;
+        notifyQueue();
+      }
+    })();
+  }
 
   // ------------------------------------------------------------------
   // Env — apply caller-supplied environment overrides BEFORE provider
@@ -232,6 +286,14 @@ export function query(
   const model =
     options.model ??
     (provider.name === 'anthropic' ? 'claude-sonnet-4-6' : 'gpt-4o');
+  const sessionMgr = shouldPersist ? new SessionManager() : null;
+  if (sessionMgr) {
+    try {
+      sessionMgr.ensureSession(cwd, sessionId, model);
+    } catch {
+      // Non-fatal: keep query usable even if session metadata init fails.
+    }
+  }
 
   // ------------------------------------------------------------------
   // Permission engine — wire from QueryOptions
@@ -240,6 +302,11 @@ export function query(
     ? 'bypassPermissions'
     : (options.permissionMode ?? 'bypassPermissions'); // SDK defaults to bypass
   const permissionEngine = new PermissionEngine({ mode: permMode });
+  let effectivePermissionEngine: {
+    evaluate: (request: { toolName: string; input: unknown }) => { behavior: 'allow' | 'deny' | 'ask'; reason?: string } | Promise<{ behavior: 'allow' | 'deny' | 'ask'; reason?: string }>;
+    addRule: (behavior: 'allow' | 'deny' | 'ask', rule: { toolName: string; ruleContent?: string }) => void;
+    setMode?: (mode: string) => void;
+  } = permissionEngine as any;
 
   // Wire permissionPromptToolName into the permission engine when provided.
   if (options.permissionPromptToolName) {
@@ -251,15 +318,22 @@ export function query(
   // canUseTool returning true → fall through to normal evaluation.
   if (options.canUseTool) {
     const originalEvaluate = permissionEngine.evaluate.bind(permissionEngine);
-    permissionEngine.evaluate = (request) => {
-      const result = options.canUseTool!(
-        request.toolName,
-        request.input as Record<string, unknown>,
-      );
-      if (result === false) {
-        return { behavior: 'deny' as const, reason: 'Denied by canUseTool callback' };
-      }
-      return originalEvaluate(request);
+    effectivePermissionEngine = {
+      evaluate: async (request) => {
+        const result = await options.canUseTool!(
+          request.toolName,
+          request.input as Record<string, unknown>,
+        );
+        if (result === false) {
+          return { behavior: 'deny' as const, reason: 'Denied by canUseTool callback' };
+        }
+        if (typeof result === 'object' && result !== null && 'behavior' in result) {
+          return result as { behavior: 'allow' | 'deny' | 'ask'; reason?: string };
+        }
+        return originalEvaluate(request as any);
+      },
+      addRule: permissionEngine.addRule.bind(permissionEngine),
+      setMode: (permissionEngine as any).setMode?.bind(permissionEngine),
     };
   }
 
@@ -286,11 +360,11 @@ export function query(
     //   index 1..N         — project/local level (walked from cwd upward)
     if (options.settingSources) {
       const sources = new Set(options.settingSources);
-      const userHome = require('os').homedir();
+      const userHome = homedir();
       const hasUserAgentMd =
-        require('fs').existsSync(require('path').join(userHome, '.open-agent', 'AGENT.md')) ||
-        require('fs').existsSync(require('path').join(userHome, '.claude', 'AGENT.md')) ||
-        require('fs').existsSync(require('path').join(userHome, '.claude', 'CLAUDE.md'));
+        existsSync(join(userHome, '.open-agent', 'AGENT.md')) ||
+        existsSync(join(userHome, '.claude', 'AGENT.md')) ||
+        existsSync(join(userHome, '.claude', 'CLAUDE.md'));
       const userCount = hasUserAgentMd ? 1 : 0;
       agentMdInstructions = agentMdInstructions.filter((_instruction, idx) => {
         if (idx < userCount) return sources.has('user');
@@ -387,7 +461,7 @@ export function query(
     cwd,
     sessionId,
     abortSignal: internalAbortController.signal,
-    permissionEngine,
+    permissionEngine: effectivePermissionEngine,
     permissionPrompter,
     initialMessages: initialMessages.length > 0 ? initialMessages : undefined,
     hookExecutor: effectiveHookExecutor,
@@ -496,9 +570,12 @@ export function query(
           break; // normal completion
         }
       } else {
-        // Multi-turn mode: consume user messages from the async iterable.
+        // Multi-turn mode: consume user messages from the merged input queue.
+        startSourcePromptPumpIfNeeded();
         let multiturnUsedFallback = false;
-        for await (const userMsg of prompt) {
+        while (true) {
+          const userMsg = await readQueuedInput();
+          if (userMsg === STREAM_DONE) break;
           const text = extractUserMessageText(userMsg);
           if (!text) continue;
 
@@ -589,13 +666,35 @@ export function query(
       if (mcpManager) {
         mcpManager.disconnectAll().catch(() => {});
       }
+      streamClosed = true;
+      notifyQueue();
       removeCallerAbortListener();
       // Restore any env vars that were overridden by options.env or options.debug.
       restoreEnv();
     }
   }
 
-  const gen = generateMessages();
+  const rawGen = generateMessages();
+  const gen = sessionMgr
+    ? (async function* persistAndYield(): AsyncGenerator<SDKMessage, void> {
+        try {
+          for await (const msg of rawGen) {
+            try {
+              sessionMgr.appendToTranscript(cwd, sessionId, msg);
+            } catch {
+              // Non-fatal: never fail the request on transcript write errors.
+            }
+            yield msg;
+          }
+        } finally {
+          try {
+            sessionMgr.touchSession(cwd, sessionId);
+          } catch {
+            // Non-fatal
+          }
+        }
+      })()
+    : rawGen;
 
   // ------------------------------------------------------------------
   // Attach control methods to make the generator satisfy Query
@@ -627,6 +726,10 @@ export function query(
   };
 
   queryObj.supportedCommands = async () => getDefaultSlashCommands();
+
+  queryObj.supportedAgents = async () => [
+    { name: 'general-purpose', description: 'General-purpose coding agent' },
+  ];
 
   queryObj.supportedModels = async () => provider.listModels();
 
@@ -667,17 +770,39 @@ export function query(
       // Refresh the tools list now that MCP tools have been registered.
       initSnapshot.tools = toolRegistry.list().map(t => t.name);
     }
-    return { ...initSnapshot };
+    const [commands, models, account] = await Promise.all([
+      queryObj.supportedCommands(),
+      queryObj.supportedModels(),
+      queryObj.accountInfo(),
+    ]);
+    return {
+      ...initSnapshot,
+      commands,
+      output_style: 'text' as const,
+      available_output_styles: ['text', 'stream-json'] as const,
+      models,
+      account,
+    };
   };
 
-  queryObj.stopTask = async (_taskId?: string) => {
+  queryObj.stopTask = async (_taskId: string) => {
     abortQuery(true);
   };
 
   queryObj.close = () => {
     abortQuery(false);
+    streamClosed = true;
+    notifyQueue();
+    if (mcpManager) {
+      mcpManager.disconnectAll().catch(() => {});
+    }
     removeCallerAbortListener();
     restoreEnv();
+    // Trigger generator finally blocks even if caller never iterated.
+    const returnPromise = queryObj.return?.(undefined as any) as Promise<IteratorResult<SDKMessage, void>> | undefined;
+    if (returnPromise) {
+      void returnPromise.catch(() => {});
+    }
   };
 
   // ── MCP dynamic management ────────────────────────────────────────────────
@@ -741,22 +866,68 @@ export function query(
 
   // ── File checkpointing ────────────────────────────────────────────────────
 
-  queryObj.rewindFiles = async (toolUseId: string): Promise<boolean> => {
+  queryObj.rewindFiles = async (
+    userMessageId: string,
+    options?: { dryRun?: boolean },
+  ): Promise<{ canRewind: boolean; rewindCount: number; filesChanged: string[]; error?: string }> => {
     if (!fileCheckpoint) {
-      return false;
+      return {
+        canRewind: false,
+        rewindCount: 0,
+        filesChanged: [],
+        error: 'File checkpointing is not enabled.',
+      };
     }
-    const { restored } = fileCheckpoint.rewindTo(toolUseId);
-    return restored.length > 0;
+    const checkpoints = fileCheckpoint.list();
+    const idx = checkpoints.findIndex(c => c.toolUseId === userMessageId);
+    if (idx === -1) {
+      return {
+        canRewind: false,
+        rewindCount: 0,
+        filesChanged: [],
+        error: `Checkpoint not found: ${userMessageId}`,
+      };
+    }
+    const target = checkpoints.slice(idx).map(c => c.filePath);
+    const uniqueTarget = [...new Set(target)];
+    if (options?.dryRun) {
+      return {
+        canRewind: true,
+        rewindCount: uniqueTarget.length,
+        filesChanged: uniqueTarget,
+      };
+    }
+    const { restored, errors } = fileCheckpoint.rewindTo(userMessageId);
+    return {
+      canRewind: errors.length === 0,
+      rewindCount: restored.length,
+      filesChanged: [...new Set(restored)],
+      ...(errors.length > 0 ? { error: errors.join('\n') } : {}),
+    };
   };
 
   // ── Mid-stream input ──────────────────────────────────────────────────────
 
-  queryObj.streamInput = async (message: string): Promise<void> => {
-    // ConversationLoop does not expose a live-injection API.
-    // Log a warning so the caller is aware the message was not processed.
-    process.stderr.write(
-      `[open-agent/sdk] streamInput("${message}"): live message injection is not yet supported — message discarded.\n`,
-    );
+  queryObj.streamInput = async (input: AsyncIterable<SDKUserMessage> | string): Promise<void> => {
+    if (typeof prompt === 'string') {
+      process.stderr.write(
+        '[open-agent/sdk] streamInput() is only effective for async-iterable prompt mode.\n',
+      );
+      return;
+    }
+    if (typeof input === 'string') {
+      pushQueuedInput({
+        type: 'user',
+        message: input,
+        parent_tool_use_id: null,
+        session_id: sessionId,
+        uuid: randomUUID(),
+      } as SDKUserMessage);
+      return;
+    }
+    for await (const msg of input) {
+      pushQueuedInput(msg);
+    }
   };
 
   return queryObj;

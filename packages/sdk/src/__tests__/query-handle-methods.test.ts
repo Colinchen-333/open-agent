@@ -14,6 +14,11 @@ describe('query().initializationResult()', () => {
     expect(result).toHaveProperty('cwd');
     expect(result).toHaveProperty('sessionId');
     expect(result).toHaveProperty('permissionMode');
+    expect(result).toHaveProperty('commands');
+    expect(result).toHaveProperty('output_style');
+    expect(result).toHaveProperty('available_output_styles');
+    expect(result).toHaveProperty('models');
+    expect(result).toHaveProperty('account');
     expect(Array.isArray(result.tools)).toBe(true);
     expect(typeof result.model).toBe('string');
     expect(typeof result.cwd).toBe('string');
@@ -62,7 +67,7 @@ describe('query().stopTask()', () => {
     const ac = new AbortController();
     const q = query('test', { model: 'claude-sonnet-4-6', abortController: ac });
     expect(ac.signal.aborted).toBe(false);
-    await q.stopTask();
+    await q.stopTask('task-1');
     expect(ac.signal.aborted).toBe(true);
     q.close();
   });
@@ -126,7 +131,8 @@ describe('query().rewindFiles()', () => {
   it('returns false when file checkpointing is not enabled', async () => {
     const q = query('test', { model: 'claude-sonnet-4-6' });
     const result = await q.rewindFiles('some-tool-use-id');
-    expect(result).toBe(false);
+    expect(result.canRewind).toBe(false);
+    expect(Array.isArray(result.filesChanged)).toBe(true);
     q.close();
   });
 });
@@ -140,6 +146,21 @@ describe('query().streamInput()', () => {
     const q = query('test', { model: 'claude-sonnet-4-6' });
     // Should not throw
     await q.streamInput('additional message');
+    q.close();
+  });
+
+  it('accepts an async iterable input stream', async () => {
+    const q = query('test', { model: 'claude-sonnet-4-6' });
+    const stream = (async function* () {
+      yield {
+        type: 'user',
+        message: 'hello',
+        parent_tool_use_id: null,
+        session_id: 's',
+        uuid: 'u',
+      } as any;
+    })();
+    await q.streamInput(stream);
     q.close();
   });
 });

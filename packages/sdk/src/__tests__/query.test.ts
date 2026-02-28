@@ -51,6 +51,17 @@ describe('query().supportedCommands()', () => {
   });
 });
 
+describe('query().supportedAgents()', () => {
+  it('returns at least one built-in agent descriptor', async () => {
+    const q = query('test', { model: 'claude-sonnet-4-6' });
+    const agents = await q.supportedAgents();
+    expect(Array.isArray(agents)).toBe(true);
+    expect(agents.length).toBeGreaterThan(0);
+    expect(typeof agents[0].name).toBe('string');
+    q.close();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // accountInfo() — verify apiKeySource determination
 // ---------------------------------------------------------------------------
@@ -130,6 +141,7 @@ describe('query() provider resolution (smoke)', () => {
     expect(typeof q.setMaxThinkingTokens).toBe('function');
     expect(typeof q.supportedCommands).toBe('function');
     expect(typeof q.supportedModels).toBe('function');
+    expect(typeof q.supportedAgents).toBe('function');
     expect(typeof q.mcpServerStatus).toBe('function');
     expect(typeof q.accountInfo).toBe('function');
     q.close();

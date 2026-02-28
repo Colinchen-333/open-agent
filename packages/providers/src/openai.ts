@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { randomUUID } from 'crypto';
 import type { ModelInfo } from '@open-agent/core';
 import type {
   ChatOptions,
@@ -275,7 +276,7 @@ export class OpenAIProvider implements LLMProvider {
             if (!toolAccumulators.has(idx)) {
               // First chunk for this tool call: id and name are provided here
               const acc: ToolCallAccumulator = {
-                id: tc.id ?? '',
+                id: tc.id ?? `openai-tool-${idx}-${randomUUID().slice(0, 8)}`,
                 name: tc.function?.name ?? '',
                 argumentsJson: tc.function?.arguments ?? '',
                 started: false,
@@ -286,7 +287,7 @@ export class OpenAIProvider implements LLMProvider {
             const acc = toolAccumulators.get(idx)!;
 
             // Accumulate id/name/arguments across chunks
-            if (tc.id) acc.id = tc.id;
+            if (tc.id && !acc.started) acc.id = tc.id;
             if (tc.function?.name) acc.name = tc.function.name;
             if (tc.function?.arguments) {
               acc.argumentsJson += tc.function.arguments;
