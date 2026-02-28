@@ -7,6 +7,102 @@ import { describe, it, expect } from 'bun:test';
 // Import the module to verify exports compile correctly.
 import { query } from '../query.js';
 
+// ---------------------------------------------------------------------------
+// supportedCommands() — verify the slash command list
+// ---------------------------------------------------------------------------
+
+describe('query().supportedCommands()', () => {
+  it('returns an array of 22 commands', async () => {
+    const q = query('test', { model: 'claude-sonnet-4-6' });
+    const commands = await q.supportedCommands();
+    expect(Array.isArray(commands)).toBe(true);
+    expect(commands).toHaveLength(22);
+    q.close();
+  });
+
+  it('every command has name, description, and argumentHint fields', async () => {
+    const q = query('test', { model: 'claude-sonnet-4-6' });
+    const commands = await q.supportedCommands();
+    for (const cmd of commands) {
+      expect(typeof cmd.name).toBe('string');
+      expect(typeof cmd.description).toBe('string');
+      expect(typeof cmd.argumentHint).toBe('string');
+    }
+    q.close();
+  });
+
+  it('all command names start with /', async () => {
+    const q = query('test', { model: 'claude-sonnet-4-6' });
+    const commands = await q.supportedCommands();
+    for (const cmd of commands) {
+      expect(cmd.name.startsWith('/')).toBe(true);
+    }
+    q.close();
+  });
+
+  it('includes known commands: /help, /model, /exit', async () => {
+    const q = query('test', { model: 'claude-sonnet-4-6' });
+    const commands = await q.supportedCommands();
+    const names = commands.map(c => c.name);
+    expect(names).toContain('/help');
+    expect(names).toContain('/model');
+    expect(names).toContain('/exit');
+    q.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// accountInfo() — verify apiKeySource determination
+// ---------------------------------------------------------------------------
+
+describe('query().accountInfo()', () => {
+  it('returns "direct" apiKeySource when options.apiKey is provided', async () => {
+    const q = query('test', { model: 'claude-sonnet-4-6', apiKey: 'sk-test-key' });
+    const info = await q.accountInfo();
+    expect(info.apiKeySource).toBe('direct');
+    q.close();
+  });
+
+  it('returns "env_override" when env contains an API_KEY key', async () => {
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      env: { TEST_API_KEY: 'override-value' },
+    });
+    const info = await q.accountInfo();
+    expect(info.apiKeySource).toBe('env_override');
+    q.close();
+  });
+
+  it('accountInfo returns tokenSource and organization fields', async () => {
+    const q = query('test', { model: 'claude-sonnet-4-6', apiKey: 'sk-abc' });
+    const info = await q.accountInfo();
+    expect(typeof info.tokenSource).toBe('string');
+    expect(typeof info.organization).toBe('string');
+    q.close();
+  });
+});
+
+describe('query() env/debug lifecycle', () => {
+  it('restores env overrides on close() even when not iterated', () => {
+    const originalFoo = process.env.SDK_ENV_RESTORE_TEST;
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      env: { SDK_ENV_RESTORE_TEST: 'temporary-value' },
+    });
+    expect(process.env.SDK_ENV_RESTORE_TEST).toBe('temporary-value');
+    q.close();
+    expect(process.env.SDK_ENV_RESTORE_TEST).toBe(originalFoo);
+  });
+
+  it('restores DEBUG after debug=true + close() without iteration', () => {
+    const originalDebug = process.env.DEBUG;
+    const q = query('test', { model: 'claude-sonnet-4-6', debug: true });
+    expect(process.env.DEBUG).toContain('open-agent:*');
+    q.close();
+    expect(process.env.DEBUG).toBe(originalDebug);
+  });
+});
+
 describe('query()', () => {
   it('is a function with the expected signature', () => {
     expect(typeof query).toBe('function');
