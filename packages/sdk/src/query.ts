@@ -276,11 +276,19 @@ export function query(
         let usedFallback = false;
         // Retry loop — runs once normally; a second time with fallbackModel on model errors.
         while (true) {
+          // Buffer the result message so we can inspect it for model errors before
+          // deciding whether to yield it or retry with the fallback model.
+          let resultMessage: SDKMessage | undefined;
           let modelError: Error | undefined;
           try {
             for await (const msg of loop.run(prompt)) {
               // When includePartialMessages is false, suppress incremental stream events.
               if (options.includePartialMessages === false && msg.type === 'stream_event') {
+                continue;
+              }
+              // Hold back the result message — check it for model errors first.
+              if (msg.type === 'result') {
+                resultMessage = msg;
                 continue;
               }
               yield msg;
@@ -313,6 +321,21 @@ export function query(
             modelError = err instanceof Error ? err : new Error(String(err));
           }
 
+          // Check if the result message signals a model error that warrants
+          // a fallback retry.  ConversationLoop yields result messages instead
+          // of throwing for provider errors, so we must inspect the result too.
+          if (
+            !modelError &&
+            resultMessage &&
+            (resultMessage as any).is_error === true &&
+            (resultMessage as any).stop_reason === 'error'
+          ) {
+            const errText = ((resultMessage as any).errors as string[] | undefined)?.join(' ') ?? '';
+            if (isModelError(new Error(errText))) {
+              modelError = new Error(errText);
+            }
+          }
+
           if (modelError) {
             // Switch to fallbackModel and retry once if this looks like a model error.
             if (options.fallbackModel && !usedFallback && isModelError(modelError)) {
@@ -321,9 +344,15 @@ export function query(
               // Reset conversation history so that the user prompt is not
               // duplicated when loop.run(prompt) is called again below.
               loop.resetMessages(initialMessages.length > 0 ? initialMessages : undefined);
+              resultMessage = undefined; // discard the error result — will retry
               continue; // retry with fallback model
             }
-            throw modelError;
+            // Not retrying — yield the buffered result if we have one, then surface error.
+            if (resultMessage) yield resultMessage;
+            if (!resultMessage) throw modelError;
+          } else {
+            // Normal completion — yield the buffered result message.
+            if (resultMessage) yield resultMessage;
           }
           break; // normal completion
         }
@@ -449,16 +478,24 @@ function extractUserMessageText(userMsg: SDKUserMessage): string {
 /**
  * Heuristic: decide if an error looks like a model-level failure (e.g. model
  * not found, overloaded) where switching to a fallback model might help.
+ * Handles both English and Chinese error messages from various providers.
  */
 function isModelError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+  const msgOriginal = err instanceof Error ? err.message : String(err);
   return (
+    // English keywords
     msg.includes('model') ||
     msg.includes('not found') ||
     msg.includes('overloaded') ||
     msg.includes('capacity') ||
     msg.includes('unavailable') ||
-    msg.includes('529') // Anthropic overloaded HTTP status
+    msg.includes('529') || // Anthropic overloaded HTTP status
+    // Chinese keywords (e.g. zhipu/bigmodel API)
+    msgOriginal.includes('模型') ||
+    msgOriginal.includes('不存在') ||
+    msgOriginal.includes('过载') ||
+    msgOriginal.includes('不可用')
   );
 }
 
