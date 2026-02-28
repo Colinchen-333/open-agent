@@ -82,8 +82,9 @@ export class ConversationLoop {
   constructor(options: ConversationLoopOptions) {
     this.options = options;
     // Restore prior conversation history when resuming a session.
+    // Filter out _transient messages so they are not replayed on resume.
     if (options.initialMessages && options.initialMessages.length > 0) {
-      this.messages = [...options.initialMessages];
+      this.messages = options.initialMessages.filter(m => !(m as any)._transient);
     }
   }
 
@@ -171,6 +172,11 @@ export class ConversationLoop {
     while (true) {
       this.turnCount++;
 
+      // Hard message count ceiling: force compaction if messages exceed 500.
+      if (this.messages.length > 500) {
+        await this.compact();
+      }
+
       // Check if context needs compaction
       const threshold = this.options.compactThreshold ?? 100000;
       if (this.estimateTokens() > threshold) {
@@ -222,9 +228,10 @@ export class ConversationLoop {
       let currentToolUse: { id: string; name: string; input: string } | null = null;
       let messageUsage: any = null;
       let stopReason: string | null = null;
-      // Signature from the most recent thinking content_block_start, used to
-      // attach the signature to the accumulated thinking block.
-      let pendingThinkingSignature: string | undefined;
+      // Map from content block index to thinking signature, supporting interleaved
+      // thinking blocks without overwriting each other.
+      const pendingThinkingSignatures = new Map<number, string>();
+      let contentBlockIndex = -1;
 
       try {
         for await (const event of this.chatWithRetry(this.messages, chatOptions)) {
@@ -261,10 +268,11 @@ export class ConversationLoop {
           // Update the in-progress content accumulation based on the event type.
           switch (event.type) {
             case 'content_block_start': {
+              contentBlockIndex++;
               // Capture the signature from thinking blocks so we can attach it
               // to the accumulated thinking content later.
-              if (event.content_block?.type === 'thinking') {
-                pendingThinkingSignature = event.content_block.signature;
+              if (event.content_block?.type === 'thinking' && event.content_block.signature) {
+                pendingThinkingSignatures.set(contentBlockIndex, event.content_block.signature);
               }
               break;
             }
@@ -289,14 +297,15 @@ export class ConversationLoop {
                 .reverse()
                 .find((b) => b.type === 'thinking' && !b._closed);
               if (!thinkBlock) {
+                const signature = pendingThinkingSignatures.get(contentBlockIndex) ?? '';
+                pendingThinkingSignatures.delete(contentBlockIndex);
                 thinkBlock = {
                   type: 'thinking',
                   thinking: '',
-                  signature: pendingThinkingSignature ?? '',
+                  signature,
                   _closed: false,
                 };
                 assistantContent.push(thinkBlock);
-                pendingThinkingSignature = undefined;
               }
               (thinkBlock as any).thinking += event.thinking;
               break;

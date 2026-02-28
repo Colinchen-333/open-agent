@@ -153,6 +153,9 @@ export class SessionManager {
     const messages: Message[] = [];
 
     for (const entry of raw) {
+      // Skip transient messages (e.g. "Continue." prompts) to avoid replaying them on resume.
+      if ((entry as any)._transient === true) continue;
+
       if (entry.type === 'user') {
         const content = (entry as any).message?.content;
         if (content === undefined || content === null) continue;

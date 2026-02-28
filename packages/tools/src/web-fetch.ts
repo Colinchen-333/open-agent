@@ -122,10 +122,14 @@ export function createWebFetchTool(): ToolDefinition {
           description: 'Describe what information you want to extract from the page. ' +
             'This guides your interpretation of the returned content.',
         },
+        no_cache: {
+          type: 'boolean',
+          description: 'When true, skip the cache and always fetch fresh content. The result is also not stored in cache.',
+        },
       },
       required: ['url', 'prompt'],
     },
-    async execute(input: { url: string; prompt: string }, ctx) {
+    async execute(input: { url: string; prompt: string; no_cache?: boolean }, ctx) {
       const start = Date.now();
 
       // Upgrade HTTP to HTTPS
@@ -134,10 +138,12 @@ export function createWebFetchTool(): ToolDefinition {
         url = 'https://' + url.slice('http://'.length);
       }
 
-      // Check cache first — return cached result if available
-      const cached = getCached(url);
-      if (cached) {
-        return { ...(cached as Record<string, unknown>), fromCache: true };
+      // Check cache first — return cached result if available (unless no_cache is set)
+      if (!input.no_cache) {
+        const cached = getCached(url);
+        if (cached) {
+          return { ...(cached as Record<string, unknown>), fromCache: true };
+        }
       }
 
       try {
@@ -205,8 +211,8 @@ export function createWebFetchTool(): ToolDefinition {
           url: currentUrl, // reflect final URL after redirects
         };
 
-        // Cache successful responses
-        if (response!.status >= 200 && response!.status < 400) {
+        // Cache successful responses (unless no_cache was requested)
+        if (!input.no_cache && response!.status >= 200 && response!.status < 400) {
           setCache(url, result);
         }
 

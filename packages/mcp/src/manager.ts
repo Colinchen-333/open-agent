@@ -15,6 +15,7 @@ type AnyMcpClient = McpStdioClient | McpHttpClient | McpSseClient;
 export class McpManager {
   private connections: Map<string, McpServerConnection> = new Map();
   private clients: Map<string, AnyMcpClient> = new Map();
+  private _setupChain: Promise<void> = Promise.resolve();
 
   // ── Server lifecycle ──────────────────────────────────────────────────────
 
@@ -60,8 +61,28 @@ export class McpManager {
   /**
    * Set the full server configuration, connecting new servers and
    * disconnecting servers no longer present in the config.
+   * Calls are serialized via a promise chain to prevent race conditions.
    */
   async setServers(servers: Record<string, McpServerConfig>): Promise<{
+    added: string[];
+    removed: string[];
+    errors: Record<string, string>;
+  }> {
+    let resolve!: (result: { added: string[]; removed: string[]; errors: Record<string, string> }) => void;
+    let reject!: (err: unknown) => void;
+    const resultPromise = new Promise<{ added: string[]; removed: string[]; errors: Record<string, string> }>(
+      (res, rej) => { resolve = res; reject = rej; }
+    );
+
+    this._setupChain = this._setupChain
+      .then(() => this._doSetServers(servers))
+      .then(resolve, reject)
+      .catch(() => {});
+
+    return resultPromise;
+  }
+
+  private async _doSetServers(servers: Record<string, McpServerConfig>): Promise<{
     added: string[];
     removed: string[];
     errors: Record<string, string>;

@@ -76,3 +76,18 @@ export function createDefaultToolRegistry(_cwd: string): ToolRegistry {
   registry.register(createEnterWorktreeTool());
   return registry;
 }
+
+// The following tools are NOT included in createDefaultToolRegistry() because they
+// require runtime dependencies injected by ConversationLoop or AgentRunner:
+//
+//   ToolSearch  (tool-search.ts)   — needs searchTools/selectTool callbacks from the MCP/deferred tool system
+//   Skill       (skill-tool.ts)    — needs a skill-lookup callback provided by the CLI layer
+//
+//   EnterPlanMode / ExitPlanMode   (plan-mode.ts)   — need a PlanModeManager instance
+//
+//   TeamCreate / TeamDelete / SendMessage  (team-tools.ts)  — need a TeamManager instance
+//
+//   TaskCreate / TaskUpdate / TaskGet / TaskList  (task-tools.ts) — need a TaskManager instance
+//
+// These are registered at runtime by ConversationLoop (or the relevant subsystem) after
+// the required dependency objects have been constructed.

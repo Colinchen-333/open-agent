@@ -5,6 +5,8 @@ import { createDefaultToolRegistry } from '@open-agent/tools';
 import { autoDetectProvider, createProvider, calculateCost } from '@open-agent/providers';
 import type { Message } from '@open-agent/providers';
 import { PermissionEngine } from '@open-agent/permissions';
+import { HookExecutor } from '@open-agent/hooks';
+import { McpManager } from '@open-agent/mcp';
 import type { QueryOptions, Query } from './types.js';
 
 // --------------------------------------------------------------------------
@@ -100,6 +102,65 @@ export function query(
   }
 
   // ------------------------------------------------------------------
+  // Hooks — wire from QueryOptions
+  // ------------------------------------------------------------------
+  let hookExecutor: InstanceType<typeof HookExecutor> | undefined;
+  if (options.hooks) {
+    hookExecutor = new HookExecutor();
+    hookExecutor.loadFromConfig(options.hooks);
+  }
+  // Adapt HookExecutor to LoopHookExecutor interface (loose → strict input type).
+  const loopHookExecutor = hookExecutor
+    ? { execute: (event: string, input: Record<string, unknown>, toolUseId?: string) => hookExecutor!.execute(event as any, input as any, toolUseId) }
+    : undefined;
+
+  // ------------------------------------------------------------------
+  // MCP servers — connect and discover tools
+  // ------------------------------------------------------------------
+  let mcpManager: McpManager | undefined;
+  // Stored as a promise so the async work completes inside the generator
+  // without blocking the synchronous query() call.
+  let mcpReadyPromise: Promise<void> | undefined;
+  if (options.mcpServers && Object.keys(options.mcpServers).length > 0) {
+    mcpManager = new McpManager();
+    mcpReadyPromise = mcpManager.setServers(options.mcpServers).then(() => {
+      // Register each MCP tool as a ToolDefinition in the registry.
+      for (const mcpTool of mcpManager!.getAllTools()) {
+        toolRegistry.register({
+          name: mcpTool.name,
+          description: mcpTool.description ?? '',
+          inputSchema: mcpTool.inputSchema,
+          execute: (input: Record<string, unknown>) =>
+            mcpManager!.callTool(mcpTool.serverName, mcpTool.name, input),
+        });
+      }
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // Env — apply caller-supplied environment overrides
+  // ------------------------------------------------------------------
+  const savedEnv: Record<string, string | undefined> = {};
+  if (options.env) {
+    for (const [key, value] of Object.entries(options.env)) {
+      savedEnv[key] = process.env[key];
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Debug — set DEBUG env var when requested
+  // ------------------------------------------------------------------
+  if (options.debug) {
+    savedEnv['DEBUG'] ??= process.env['DEBUG'];
+    process.env['DEBUG'] = 'open-agent:*';
+  }
+
+  // ------------------------------------------------------------------
   // Model resolution
   // ------------------------------------------------------------------
   const model =
@@ -176,13 +237,14 @@ export function query(
     model,
     systemPrompt,
     maxTurns: options.maxTurns,
-    thinking: options.thinking ?? { type: 'adaptive' },
+    thinking: options.thinking ?? (options.maxThinkingTokens ? { type: 'enabled', budgetTokens: options.maxThinkingTokens } : { type: 'adaptive' }),
     effort: options.effort,
     cwd,
     sessionId,
     abortSignal: internalAbortController.signal,
     permissionEngine,
     initialMessages: initialMessages.length > 0 ? initialMessages : undefined,
+    hookExecutor: loopHookExecutor,
     costCalculator: (m, inTok, outTok, cacheCreate, cacheRead) =>
       calculateCost(m, inTok, outTok, cacheCreate, cacheRead),
   });
@@ -191,41 +253,80 @@ export function query(
   // Core generator – iterates over all SDKMessages
   // ------------------------------------------------------------------
   async function* generateMessages(): AsyncGenerator<SDKMessage, void> {
+    // Wait for MCP servers to connect and register their tools into the loop
+    // before the first LLM call. This runs once when iteration starts.
+    if (mcpReadyPromise) {
+      await mcpReadyPromise;
+      // Push MCP tools into the live loop tool map.
+      for (const t of toolRegistry.list()) {
+        loop.addTool(t);
+      }
+    }
+
     try {
       if (typeof prompt === 'string') {
-        for await (const msg of loop.run(prompt)) {
-          yield msg;
-          // Enforce maxBudgetUsd: check cumulative cost after each message.
-          if (maxBudgetUsd !== undefined) {
-            const { totalCostUsd } = loop.getTotalCost();
-            if (totalCostUsd >= maxBudgetUsd) {
-              internalAbortController.abort();
-              yield {
-                type: 'result',
-                subtype: 'error_max_budget_usd',
-                duration_ms: 0,
-                duration_api_ms: 0,
-                is_error: true,
-                num_turns: loop.getTurnCount(),
-                stop_reason: 'max_budget_usd',
-                total_cost_usd: totalCostUsd,
-                usage: { input_tokens: 0, output_tokens: 0 },
-                modelUsage: {},
-                permission_denials: [],
-                errors: [`Budget limit exceeded: $${totalCostUsd.toFixed(4)} >= $${maxBudgetUsd}`],
-                uuid: randomUUID(),
-                session_id: sessionId,
-              };
-              return;
+        let usedFallback = false;
+        // Retry loop — runs once normally; a second time with fallbackModel on model errors.
+        while (true) {
+          let modelError: Error | undefined;
+          try {
+            for await (const msg of loop.run(prompt)) {
+              // When includePartialMessages is false, suppress incremental stream events.
+              if (options.includePartialMessages === false && msg.type === 'stream_event') {
+                continue;
+              }
+              yield msg;
+              // Enforce maxBudgetUsd: check cumulative cost after each message.
+              if (maxBudgetUsd !== undefined) {
+                const { totalCostUsd } = loop.getTotalCost();
+                if (totalCostUsd >= maxBudgetUsd) {
+                  internalAbortController.abort();
+                  yield {
+                    type: 'result',
+                    subtype: 'error_max_budget_usd',
+                    duration_ms: 0,
+                    duration_api_ms: 0,
+                    is_error: true,
+                    num_turns: loop.getTurnCount(),
+                    stop_reason: 'max_budget_usd',
+                    total_cost_usd: totalCostUsd,
+                    usage: { input_tokens: 0, output_tokens: 0 },
+                    modelUsage: {},
+                    permission_denials: [],
+                    errors: [`Budget limit exceeded: $${totalCostUsd.toFixed(4)} >= $${maxBudgetUsd}`],
+                    uuid: randomUUID(),
+                    session_id: sessionId,
+                  };
+                  return;
+                }
+              }
             }
+          } catch (err) {
+            modelError = err instanceof Error ? err : new Error(String(err));
           }
+
+          if (modelError) {
+            // Switch to fallbackModel and retry once if this looks like a model error.
+            if (options.fallbackModel && !usedFallback && isModelError(modelError)) {
+              usedFallback = true;
+              loop.setModel(options.fallbackModel);
+              continue; // retry with fallback model
+            }
+            throw modelError;
+          }
+          break; // normal completion
         }
       } else {
         // Multi-turn mode: consume user messages from the async iterable.
         for await (const userMsg of prompt) {
           const text = extractUserMessageText(userMsg);
           if (text) {
-            yield* loop.run(text);
+            for await (const msg of loop.run(text)) {
+              if (options.includePartialMessages === false && msg.type === 'stream_event') {
+                continue;
+              }
+              yield msg;
+            }
           }
         }
       }
@@ -234,6 +335,18 @@ export function query(
       // child processes are cleaned up when the caller stops iterating early.
       if (!internalAbortController.signal.aborted) {
         internalAbortController.abort();
+      }
+      // Disconnect MCP servers when the conversation ends.
+      if (mcpManager) {
+        mcpManager.disconnectAll().catch(() => {});
+      }
+      // Restore any env vars that were overridden by options.env or options.debug.
+      for (const [key, original] of Object.entries(savedEnv)) {
+        if (original === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = original;
+        }
       }
     }
   }
@@ -269,13 +382,26 @@ export function query(
     }
   };
 
+  // TODO: return registered slash commands once command registry is implemented
   queryObj.supportedCommands = async () => [];
 
   queryObj.supportedModels = async () => provider.listModels();
 
-  queryObj.mcpServerStatus = async () => [];
+  queryObj.mcpServerStatus = async () => {
+    if (!mcpManager) return [];
+    return mcpManager.getStatus().map(conn => ({
+      name: conn.name,
+      status: (conn.status === 'connected' || conn.status === 'connecting' || conn.status === 'error')
+        ? conn.status
+        : ('disconnected' as const),
+      error: conn.error,
+      tools: conn.tools.map(t => t.name),
+    }));
+  };
 
-  queryObj.accountInfo = async () => ({});
+  queryObj.accountInfo = async () => ({
+    tokenSource: provider.name,
+  });
 
   queryObj.close = () => {
     internalAbortController.abort();
@@ -307,6 +433,22 @@ function extractUserMessageText(userMsg: SDKUserMessage): string {
     }
   }
   return '';
+}
+
+/**
+ * Heuristic: decide if an error looks like a model-level failure (e.g. model
+ * not found, overloaded) where switching to a fallback model might help.
+ */
+function isModelError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+  return (
+    msg.includes('model') ||
+    msg.includes('not found') ||
+    msg.includes('overloaded') ||
+    msg.includes('capacity') ||
+    msg.includes('unavailable') ||
+    msg.includes('529') // Anthropic overloaded HTTP status
+  );
 }
 
 /**

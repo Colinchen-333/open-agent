@@ -6,6 +6,9 @@ import type {
   HookOutput,
 } from './types';
 
+// Module-level cache for compiled RegExp objects to avoid recompilation per execution.
+const regexpCache = new Map<string, RegExp>();
+
 // ---------------------------------------------------------------------------
 // HookExecutor
 // ---------------------------------------------------------------------------
@@ -146,7 +149,12 @@ export class HookExecutor {
     const toolName = (input as { tool_name: string }).tool_name;
     if (toolName === pattern) return true;
     try {
-      return new RegExp(pattern).test(toolName);
+      let re = regexpCache.get(pattern);
+      if (!re) {
+        re = new RegExp(pattern);
+        regexpCache.set(pattern, re);
+      }
+      return re.test(toolName);
     } catch {
       // Invalid regex — treat as no match to avoid silent breakage.
       console.warn(`[HookExecutor] Invalid matcher pattern: "${pattern}"`);
@@ -205,8 +213,13 @@ export class HookExecutor {
     proc.stdin.end();
 
     // Kill the process if it exceeds the timeout.
+    // Send SIGTERM first, then follow up with SIGKILL after a 5s grace period.
+    let sigkillTimer: ReturnType<typeof setTimeout> | undefined;
     const timer = setTimeout(() => {
-      proc.kill();
+      proc.kill('SIGTERM');
+      sigkillTimer = setTimeout(() => {
+        proc.kill('SIGKILL');
+      }, 5000);
     }, timeoutMs);
 
     let stdout = '';
@@ -220,6 +233,7 @@ export class HookExecutor {
       await proc.exited;
     } finally {
       clearTimeout(timer);
+      if (sigkillTimer !== undefined) clearTimeout(sigkillTimer);
     }
 
     if (stderr.trim()) {

@@ -268,6 +268,12 @@ export class AgentExecutor {
         await this.fireSubagentStop(agentId, agentType, session.error, options.cwd);
       }
 
+      // Clean up abort controller entry for this agent
+      this.agentAbortControllers.delete(agentId);
+      if (this.agentAbortControllers.size > 200) {
+        console.warn(`[AgentExecutor] agentAbortControllers Map has ${this.agentAbortControllers.size} entries — possible leak`);
+      }
+
       // Clean up worktree for background agents
       if (options.worktreePath && options.onWorktreeCleanup) {
         try {
