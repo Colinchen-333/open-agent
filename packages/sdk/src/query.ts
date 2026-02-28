@@ -727,9 +727,30 @@ export function query(
 
   queryObj.supportedCommands = async () => getDefaultSlashCommands();
 
-  queryObj.supportedAgents = async () => [
-    { name: 'general-purpose', description: 'General-purpose coding agent' },
-  ];
+  queryObj.supportedAgents = async () => {
+    const builtIns = [
+      { name: 'explore', description: 'Read-only repo exploration agent' },
+      { name: 'plan', description: 'Planning-focused read-only agent' },
+      { name: 'bash', description: 'Shell-focused execution agent' },
+      { name: 'open-agent-guide', description: 'Project guidance and docs agent' },
+      { name: 'statusline-setup', description: 'Statusline configuration helper' },
+      { name: 'code-writer', description: 'Code authoring agent' },
+      { name: 'general-purpose', description: 'General-purpose coding agent' },
+      { name: 'architecture-logic-reviewer', description: 'Architecture and logic review agent' },
+    ];
+    const custom = options.agents
+      ? Object.entries(options.agents).map(([name, def]) => ({
+          name,
+          description: def?.description,
+        }))
+      : [];
+    const merged = [...builtIns, ...custom];
+    const deduped = new Map<string, { name: string; description?: string }>();
+    for (const agent of merged) {
+      if (!deduped.has(agent.name)) deduped.set(agent.name, agent);
+    }
+    return [...deduped.values()];
+  };
 
   queryObj.supportedModels = async () => provider.listModels();
 
