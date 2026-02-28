@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import type { SDKMessage, SDKUserMessage, SDKResultMessage } from '@open-agent/core';
 import { SessionManager } from '@open-agent/core';
+import type { Message } from '@open-agent/providers';
 import type { SessionOptions, Session, QueryOptions } from './types.js';
 import { query } from './query.js';
 
@@ -42,8 +43,14 @@ export function createSession(options?: QueryOptions): SDKSession {
  */
 export function resumeSession(sessionId: string, options?: QueryOptions): SDKSession {
   const cwd = options?.cwd ?? process.cwd();
-  const sessionMgr = new SessionManager();
-  const initialMessages = sessionMgr.loadTranscript(cwd, sessionId);
+  let initialMessages: Message[] = [];
+  try {
+    const sessionMgr = new SessionManager();
+    initialMessages = sessionMgr.loadTranscript(cwd, sessionId);
+  } catch {
+    // Corrupted or missing transcript — start fresh rather than crashing.
+    initialMessages = [];
+  }
 
   return _buildSession(sessionId, options, initialMessages);
 }
@@ -62,6 +69,8 @@ export interface SDKSession {
   send(message: string): AsyncGenerator<SDKMessage, void>;
   /** Terminate the session and release resources. */
   close(): void;
+  /** Supports `await using session = …` (TC39 explicit resource management). */
+  [Symbol.asyncDispose](): Promise<void>;
 }
 
 // --------------------------------------------------------------------------
@@ -71,11 +80,17 @@ export interface SDKSession {
 function _buildSession(
   sessionId: string,
   options?: QueryOptions,
-  initialMessages?: import('@open-agent/providers').Message[],
+  initialMessages?: Message[],
 ): SDKSession {
   let closed = false;
+  const abortController = options?.abortController ?? new AbortController();
   // Conversation history accumulates across turns so the model retains context.
-  const history: import('@open-agent/providers').Message[] = initialMessages ? [...initialMessages] : [];
+  const history: Message[] = initialMessages ? [...initialMessages] : [];
+
+  // Session manager for persisting transcripts when requested.
+  const shouldPersist = options?.persistSession ?? false;
+  const sessionMgr = shouldPersist ? new SessionManager() : null;
+  const cwd = options?.cwd ?? process.cwd();
 
   return {
     get sessionId(): string {
@@ -92,27 +107,60 @@ function _buildSession(
       const q = query(message, {
         ...options,
         sessionId,
-        initialMessages: history as any,
-      } as QueryOptions & { initialMessages: any });
+        abortController,
+        initialMessages: history,
+      } as QueryOptions & { initialMessages: Message[] });
 
-      for await (const msg of q) {
-        // Capture user/assistant turns into history for the next send().
-        if (msg.type === 'user' || msg.type === 'assistant') {
-          const msgRecord = (msg as any).message;
-          if (msgRecord) {
-            history.push(msgRecord as import('@open-agent/providers').Message);
+      try {
+        for await (const msg of q) {
+          // Capture user/assistant turns into history for the next send().
+          if (msg.type === 'user' || msg.type === 'assistant') {
+            const msgRecord = (msg as { message?: unknown }).message;
+            if (msgRecord && typeof msgRecord === 'object' && 'role' in msgRecord) {
+              history.push(msgRecord as Message);
+              // Persist to disk if requested.
+              if (sessionMgr) {
+                try {
+                  sessionMgr.appendToTranscript(cwd, sessionId, msg);
+                } catch {
+                  // Non-critical: don't crash if disk write fails.
+                }
+              }
+            }
+          }
+
+          // Persist tool results as well so transcripts are complete.
+          if (msg.type === 'tool_result' && sessionMgr) {
+            try {
+              sessionMgr.appendToTranscript(cwd, sessionId, msg);
+            } catch { /* non-critical */ }
+          }
+
+          yield msg;
+          // Stop iterating this turn once we get the result.
+          if (msg.type === 'result') {
+            if (sessionMgr) {
+              try {
+                sessionMgr.appendToTranscript(cwd, sessionId, msg);
+              } catch { /* non-critical */ }
+            }
+            break;
           }
         }
-        yield msg;
-        // Stop iterating this turn once we get the result.
-        if (msg.type === 'result') break;
+      } finally {
+        q.close();
       }
-
-      q.close();
     },
 
     close(): void {
       closed = true;
+      if (!abortController.signal.aborted) {
+        abortController.abort();
+      }
+    },
+
+    async [Symbol.asyncDispose](): Promise<void> {
+      this.close();
     },
   };
 }
@@ -139,6 +187,7 @@ export async function unstable_v2_prompt(
     prompt: message,
     options: {
       model: options.model,
+      cwd: options.cwd,
       permissionMode: options.permissionMode,
       allowedTools: options.allowedTools,
       disallowedTools: options.disallowedTools,
@@ -148,10 +197,14 @@ export async function unstable_v2_prompt(
   });
 
   let result: SDKResultMessage | undefined;
-  for await (const msg of q) {
-    if (msg.type === 'result') {
-      result = msg;
+  try {
+    for await (const msg of q) {
+      if (msg.type === 'result') {
+        result = msg;
+      }
     }
+  } finally {
+    q.close();
   }
   return result;
 }
@@ -175,15 +228,23 @@ export function unstable_v2_createSession(options: SessionOptions): Session {
 
   const messageQueue: SDKUserMessage[] = [];
   let resolveNext: ((msg: SDKUserMessage) => void) | null = null;
+  // Track the pending promise's reject so we can settle it on close().
+  let rejectNext: ((err: Error) => void) | null = null;
 
   async function* userMessages(): AsyncIterable<SDKUserMessage> {
     while (!closed) {
       if (messageQueue.length > 0) {
         yield messageQueue.shift()!;
       } else {
-        yield await new Promise<SDKUserMessage>((resolve) => {
-          resolveNext = resolve;
-        });
+        try {
+          yield await new Promise<SDKUserMessage>((resolve, reject) => {
+            resolveNext = resolve;
+            rejectNext = reject;
+          });
+        } catch {
+          // Promise was rejected by close() — stop iterating.
+          return;
+        }
       }
     }
   }
@@ -192,6 +253,7 @@ export function unstable_v2_createSession(options: SessionOptions): Session {
     prompt: userMessages(),
     options: {
       model: options.model,
+      cwd: options.cwd,
       sessionId,
       permissionMode: options.permissionMode,
       allowedTools: options.allowedTools,
@@ -207,6 +269,9 @@ export function unstable_v2_createSession(options: SessionOptions): Session {
     },
 
     async send(message: string | SDKUserMessage): Promise<void> {
+      if (closed) {
+        throw new Error(`Session ${sessionId} is closed.`);
+      }
       const msg: SDKUserMessage =
         typeof message === 'string'
           ? {
@@ -221,6 +286,7 @@ export function unstable_v2_createSession(options: SessionOptions): Session {
       if (resolveNext) {
         const resolve = resolveNext;
         resolveNext = null;
+        rejectNext = null;
         resolve(msg);
       } else {
         messageQueue.push(msg);
@@ -232,7 +298,16 @@ export function unstable_v2_createSession(options: SessionOptions): Session {
     },
 
     close(): void {
+      if (closed) return;
       closed = true;
+      // Settle any pending promise so the userMessages() generator exits cleanly
+      // instead of leaking a dangling promise.
+      if (rejectNext) {
+        const reject = rejectNext;
+        resolveNext = null;
+        rejectNext = null;
+        reject(new Error('Session closed'));
+      }
       q.close();
     },
 
@@ -250,16 +325,20 @@ export function unstable_v2_resumeSession(
   sessionId: string,
   options: SessionOptions,
 ): Session {
-  // Restore conversation transcript from disk before creating session
+  // Restore conversation transcript from disk before creating session.
   const cwd = options?.cwd ?? process.cwd();
-  const sessionMgr = new SessionManager();
-  const initialMessages = sessionMgr.loadTranscript(cwd, sessionId);
+  let initialMessages: Message[] = [];
+  try {
+    const sessionMgr = new SessionManager();
+    initialMessages = sessionMgr.loadTranscript(cwd, sessionId);
+  } catch {
+    // Corrupted transcript — start fresh.
+    initialMessages = [];
+  }
 
   const session = unstable_v2_createSession({
     ...options,
-    resume: sessionId,
-    initialMessages,
-  } as any);
+  });
 
   Object.defineProperty(session, 'sessionId', {
     value: sessionId,

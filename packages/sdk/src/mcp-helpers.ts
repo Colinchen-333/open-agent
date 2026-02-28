@@ -8,11 +8,11 @@ import type { McpServerConfig } from '@open-agent/core';
  * Full definition of a tool that can be registered in an SDK-hosted MCP
  * server.  Mirrors the shape used by the MCP SDK's `server.tool()` API.
  */
-export interface SdkMcpToolDefinition {
+export interface SdkMcpToolDefinition<TInput = Record<string, unknown>> {
   name: string;
   description: string;
-  inputSchema: Record<string, any>;
-  handler: (args: any, extra: unknown) => Promise<any>;
+  inputSchema: Record<string, unknown>;
+  handler: (args: TInput, extra: unknown) => Promise<unknown>;
 }
 
 /**
@@ -38,6 +38,10 @@ export function createSdkMcpServer(options: {
   version?: string;
   tools?: SdkMcpToolDefinition[];
 }): McpServerConfig & { instance: SdkMcpServerInstance } {
+  if (!options.name) {
+    throw new Error('createSdkMcpServer: name is required');
+  }
+
   const instance: SdkMcpServerInstance = {
     name: options.name,
     version: options.version ?? '1.0.0',
@@ -79,11 +83,13 @@ export interface SdkMcpServerInstance {
  * );
  * ```
  */
-export function tool(
+export function tool<TInput = Record<string, unknown>>(
   name: string,
   description: string,
-  inputSchema: Record<string, any>,
-  handler: (args: any, extra: unknown) => Promise<any>,
-): SdkMcpToolDefinition {
+  inputSchema: Record<string, unknown>,
+  handler: (args: TInput, extra: unknown) => Promise<unknown>,
+): SdkMcpToolDefinition<TInput> {
+  if (!name) throw new Error('tool: name is required');
+  if (!description) throw new Error('tool: description is required');
   return { name, description, inputSchema, handler };
 }

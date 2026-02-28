@@ -2,7 +2,8 @@ import { randomUUID } from 'crypto';
 import type { SDKMessage, SDKUserMessage } from '@open-agent/core';
 import { ConversationLoop, SessionManager, buildSystemPrompt, ConfigLoader, AutoMemory } from '@open-agent/core';
 import { createDefaultToolRegistry } from '@open-agent/tools';
-import { autoDetectProvider, createProvider } from '@open-agent/providers';
+import { autoDetectProvider, createProvider, calculateCost } from '@open-agent/providers';
+import type { Message } from '@open-agent/providers';
 import { PermissionEngine } from '@open-agent/permissions';
 import type { QueryOptions, Query } from './types.js';
 
@@ -62,11 +63,11 @@ export function query(
   // ------------------------------------------------------------------
   const providerName = guessProviderFromModel(options.model);
   const provider = providerName
-    ? createProvider({ provider: providerName, apiKey: (options as any).apiKey })
+    ? createProvider({ provider: providerName, apiKey: (options as Record<string, unknown>).apiKey as string | undefined })
     : autoDetectProvider();
 
   // ------------------------------------------------------------------
-  // Tool registry
+  // Tool registry — use public unregister() API, never touch internals.
   // ------------------------------------------------------------------
   const toolRegistry = createDefaultToolRegistry(cwd);
 
@@ -75,15 +76,26 @@ export function query(
     const allowed = new Set(options.allowedTools);
     for (const tool of toolRegistry.list()) {
       if (!allowed.has(tool.name)) {
-        (toolRegistry as any).tools.delete(tool.name);
+        toolRegistry.unregister(tool.name);
       }
     }
   }
 
   // Apply disallowedTools: remove each named tool.
   if (options.disallowedTools) {
+    // Validate: warn if a tool appears in both lists (programming error).
+    if (options.allowedTools) {
+      const allowedSet = new Set(options.allowedTools);
+      for (const name of options.disallowedTools) {
+        if (allowedSet.has(name)) {
+          console.warn(
+            `[open-agent/sdk] Tool "${name}" is in both allowedTools and disallowedTools — it will be removed.`,
+          );
+        }
+      }
+    }
     for (const name of options.disallowedTools) {
-      (toolRegistry as any).tools.delete(name);
+      toolRegistry.unregister(name);
     }
   }
 
@@ -99,7 +111,7 @@ export function query(
   // ------------------------------------------------------------------
   const permMode = options.allowDangerouslySkipPermissions
     ? 'bypassPermissions'
-    : (options.permissionMode as any) ?? 'bypassPermissions'; // SDK defaults to bypass
+    : (options.permissionMode ?? 'bypassPermissions'); // SDK defaults to bypass
   const permissionEngine = new PermissionEngine({ mode: permMode });
 
   // ------------------------------------------------------------------
@@ -136,16 +148,27 @@ export function query(
   // ------------------------------------------------------------------
   // Session resume — restore prior history if requested
   // ------------------------------------------------------------------
-  let initialMessages: import('@open-agent/providers').Message[] = (options as any).initialMessages ?? [];
+  let initialMessages: Message[] = (options as QueryOptions & { initialMessages?: Message[] }).initialMessages ?? [];
   if (options.resume && initialMessages.length === 0) {
-    const sessionMgr = new SessionManager();
-    initialMessages = sessionMgr.loadTranscript(cwd, options.resume);
+    try {
+      const sessionMgr = new SessionManager();
+      initialMessages = sessionMgr.loadTranscript(cwd, options.resume);
+    } catch {
+      // If transcript is corrupted or missing, start fresh.
+      initialMessages = [];
+    }
   }
 
   // ------------------------------------------------------------------
   // Conversation loop
   // ------------------------------------------------------------------
+  // Respect the caller's AbortController when provided; otherwise create one
+  // internally so interrupt() / close() can still abort the loop.
   const internalAbortController = options.abortController ?? new AbortController();
+
+  // Wire up a cost calculator so ConversationLoop can track spending and
+  // enforce maxBudgetUsd.
+  const maxBudgetUsd = options.maxBudgetUsd;
 
   const loop = new ConversationLoop({
     provider,
@@ -160,26 +183,57 @@ export function query(
     abortSignal: internalAbortController.signal,
     permissionEngine,
     initialMessages: initialMessages.length > 0 ? initialMessages : undefined,
+    costCalculator: (m, inTok, outTok, cacheCreate, cacheRead) =>
+      calculateCost(m, inTok, outTok, cacheCreate, cacheRead),
   });
 
   // ------------------------------------------------------------------
   // Core generator – iterates over all SDKMessages
   // ------------------------------------------------------------------
   async function* generateMessages(): AsyncGenerator<SDKMessage, void> {
-    if (typeof prompt === 'string') {
-      yield* loop.run(prompt);
-    } else {
-      // Multi-turn mode: consume user messages from the async iterable.
-      for await (const userMsg of prompt) {
-        const text =
-          typeof userMsg.message === 'string'
-            ? userMsg.message
-            : typeof (userMsg.message as any)?.content === 'string'
-              ? (userMsg.message as any).content
-              : '';
-        if (text) {
-          yield* loop.run(text);
+    try {
+      if (typeof prompt === 'string') {
+        for await (const msg of loop.run(prompt)) {
+          yield msg;
+          // Enforce maxBudgetUsd: check cumulative cost after each message.
+          if (maxBudgetUsd !== undefined) {
+            const { totalCostUsd } = loop.getTotalCost();
+            if (totalCostUsd >= maxBudgetUsd) {
+              internalAbortController.abort();
+              yield {
+                type: 'result',
+                subtype: 'error_max_budget_usd',
+                duration_ms: 0,
+                duration_api_ms: 0,
+                is_error: true,
+                num_turns: loop.getTurnCount(),
+                stop_reason: 'max_budget_usd',
+                total_cost_usd: totalCostUsd,
+                usage: { input_tokens: 0, output_tokens: 0 },
+                modelUsage: {},
+                permission_denials: [],
+                errors: [`Budget limit exceeded: $${totalCostUsd.toFixed(4)} >= $${maxBudgetUsd}`],
+                uuid: randomUUID(),
+                session_id: sessionId,
+              };
+              return;
+            }
+          }
         }
+      } else {
+        // Multi-turn mode: consume user messages from the async iterable.
+        for await (const userMsg of prompt) {
+          const text = extractUserMessageText(userMsg);
+          if (text) {
+            yield* loop.run(text);
+          }
+        }
+      }
+    } finally {
+      // Ensure the abort controller fires so any dangling HTTP requests or
+      // child processes are cleaned up when the caller stops iterating early.
+      if (!internalAbortController.signal.aborted) {
+        internalAbortController.abort();
       }
     }
   }
@@ -235,6 +289,27 @@ export function query(
 // --------------------------------------------------------------------------
 
 /**
+ * Extract the plain-text content from an SDKUserMessage.
+ * Handles both string and Anthropic-style content blocks.
+ */
+function extractUserMessageText(userMsg: SDKUserMessage): string {
+  const msg = userMsg.message;
+  if (typeof msg === 'string') return msg;
+  if (msg && typeof msg === 'object') {
+    // { role, content: string | ContentBlock[] }
+    const content = (msg as Record<string, unknown>).content;
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+      return content
+        .filter((b: Record<string, unknown>) => b.type === 'text')
+        .map((b: Record<string, unknown>) => b.text as string)
+        .join('\n');
+    }
+  }
+  return '';
+}
+
+/**
  * Infer the provider backend from well-known model name prefixes.
  * Returns `null` when the model is unknown (caller falls back to auto-detect).
  */
@@ -246,10 +321,10 @@ function guessProviderFromModel(
   if (
     model.startsWith('gpt') ||
     model.startsWith('o1') ||
-    model.startsWith('o3')
+    model.startsWith('o3') ||
+    model.startsWith('o4')
   ) {
     return 'openai';
   }
   return null;
 }
-
