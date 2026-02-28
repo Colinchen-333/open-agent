@@ -22,6 +22,8 @@ export interface CliArgs {
   cwd?: string;
   noMarkdown?: boolean;
   inputFormat?: 'text' | 'stream-json';
+  addDirs?: string[];
+  permissionPromptTool?: string;
 }
 
 /**
@@ -108,7 +110,7 @@ function isBooleanFlag(key: string): boolean {
 }
 
 function isBooleanShort(key: string): boolean {
-  return ['c', 'h', 'v', 'p'].includes(key);
+  return ['c', 'h', 'v'].includes(key);
 }
 
 function applyLongFlag(result: CliArgs, key: string, value: string | undefined): void {
@@ -194,6 +196,15 @@ function applyLongFlag(result: CliArgs, key: string, value: string | undefined):
         result.inputFormat = value;
       }
       break;
+    case 'add-dir':
+    case 'addDir':
+      if (!result.addDirs) result.addDirs = [];
+      if (value && value !== 'true') result.addDirs.push(value);
+      break;
+    case 'permission-prompt-tool':
+    case 'permissionPromptTool':
+      result.permissionPromptTool = value;
+      break;
     // Unknown flags are silently ignored
   }
 }
@@ -210,8 +221,7 @@ function applyShortFlag(result: CliArgs, key: string, value: string | undefined)
       result.continue = value !== 'false';
       break;
     case 'p':
-      result.print = true;
-      // If a value was passed (e.g. -p "query"), treat it as the prompt too
+      // -p is the short alias for --prompt.
       if (value && value !== 'true') result.prompt = value;
       break;
     case 'h':

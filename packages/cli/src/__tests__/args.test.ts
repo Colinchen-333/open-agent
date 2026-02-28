@@ -34,7 +34,9 @@ describe('parseArgs', () => {
     });
 
     it('parses -p short alias', () => {
-      expect(parseArgs(['-p', 'say hi']).prompt).toBe('say hi');
+      const result = parseArgs(['-p', 'say hi']);
+      expect(result.prompt).toBe('say hi');
+      expect(result.print).toBeUndefined();
     });
 
     it('treats positional arguments as prompt text', () => {
@@ -257,6 +259,57 @@ describe('parseArgs', () => {
   describe('--print', () => {
     it('sets print to true when flag is present', () => {
       expect(parseArgs(['--print']).print).toBe(true);
+    });
+
+    it('does not treat -p as --print', () => {
+      const result = parseArgs(['-p', 'hello']);
+      expect(result.print).toBeUndefined();
+      expect(result.prompt).toBe('hello');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // --add-dir
+  // ---------------------------------------------------------------------------
+
+  describe('--add-dir', () => {
+    it('parses a single --add-dir value', () => {
+      const result = parseArgs(['--add-dir', '/tmp/extra']);
+      expect(result.addDirs).toEqual(['/tmp/extra']);
+    });
+
+    it('accumulates multiple --add-dir flags into an array', () => {
+      const result = parseArgs(['--add-dir', '/a', '--add-dir', '/b']);
+      expect(result.addDirs).toEqual(['/a', '/b']);
+    });
+
+    it('accumulates three --add-dir flags', () => {
+      const result = parseArgs(['--add-dir', '/a', '--add-dir', '/b', '--add-dir', '/c']);
+      expect(result.addDirs).toEqual(['/a', '/b', '/c']);
+    });
+
+    it('addDirs is undefined when no --add-dir flags are given', () => {
+      expect(parseArgs(['--model', 'test']).addDirs).toBeUndefined();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // --permission-prompt-tool
+  // ---------------------------------------------------------------------------
+
+  describe('--permission-prompt-tool', () => {
+    it('parses --permission-prompt-tool value', () => {
+      const result = parseArgs(['--permission-prompt-tool', 'my-tool']);
+      expect(result.permissionPromptTool).toBe('my-tool');
+    });
+
+    it('parses --permission-prompt-tool=value (equals form)', () => {
+      const result = parseArgs(['--permission-prompt-tool=custom-tool']);
+      expect(result.permissionPromptTool).toBe('custom-tool');
+    });
+
+    it('permissionPromptTool is undefined when flag is absent', () => {
+      expect(parseArgs([]).permissionPromptTool).toBeUndefined();
     });
   });
 });

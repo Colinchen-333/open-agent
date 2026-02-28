@@ -867,6 +867,11 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  if (isStreamJson) {
+    console.error('stream-json output mode requires a prompt (--prompt) or stdin with --input-format stream-json.');
+    process.exit(1);
+  }
+
   // ------------------------------------------------------------------
   // Interactive REPL mode
   // ------------------------------------------------------------------
@@ -959,7 +964,9 @@ async function executePrompt(
   cwd: string,
   sessionId: string,
 ): Promise<void> {
-  renderer.startSpinner('Thinking');
+  if (!isStreamJson) {
+    renderer.startSpinner('Thinking');
+  }
   for await (const message of loop.run(prompt)) {
     if (isStreamJson) {
       emitStreamJson(message);
@@ -969,7 +976,9 @@ async function executePrompt(
     // Persist every message to the on-disk transcript.
     sessionMgr.appendToTranscript(cwd, sessionId, message);
   }
-  renderer.stopSpinner();
+  if (!isStreamJson) {
+    renderer.stopSpinner();
+  }
   // Touch session to update lastActiveAt so --continue picks the right session.
   sessionMgr.touchSession(cwd, sessionId);
 }
