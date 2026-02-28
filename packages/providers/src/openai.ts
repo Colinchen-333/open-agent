@@ -160,7 +160,14 @@ function convertTools(
 }
 
 function normalizeUsage(
-  usage: OpenAI.Chat.Completions.CompletionUsage | undefined,
+  usage:
+    | {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        prompt_tokens_details?: { cached_tokens?: number };
+      }
+    | null
+    | undefined,
 ): Record<string, number> | undefined {
   if (!usage) return undefined;
   const normalized: Record<string, number> = {

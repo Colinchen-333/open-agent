@@ -40,6 +40,10 @@ const VERSION = '0.1.0';
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
+  if (args.verbose) {
+    process.env.DEBUG = 'open-agent:*';
+  }
+
   if (args.help) {
     printHelp();
     process.exit(0);
@@ -66,6 +70,7 @@ async function main(): Promise<void> {
   // (settings must be loaded before model selection so defaults apply)
   // ------------------------------------------------------------------
   const cwd = args.cwd ? require('path').resolve(args.cwd) : process.cwd();
+  const additionalDirectories = (args.addDirs ?? []).map((d: string) => require('path').resolve(cwd, d));
   const configLoader = new ConfigLoader();
   const settings = configLoader.loadSettings(cwd);
 
@@ -265,32 +270,36 @@ async function main(): Promise<void> {
 
   // Load MCP server configs from settings (key: mcpServers)
   const mcpServers = (settings.mcpServers ?? {}) as Record<string, any>;
-  if (Object.keys(mcpServers).length > 0) {
-    // Connect MCP servers and register their tools into the tool registry.
-    // We use .then() so CLI startup is not blocked — MCP tools become
-    // available shortly after the REPL is ready.
-    mcpManager.setServers(mcpServers).then(async () => {
-      try {
-        const mcpTools = mcpManager.getAllTools();
-        for (const mcpTool of mcpTools) {
-          // Namespace MCP tools as mcp__<server>__<tool> to match Claude Code convention.
-          const namespacedName = `mcp__${mcpTool.serverName}__${mcpTool.name}`;
-          // Avoid overwriting built-in or already-registered tools.
-          if (toolRegistry.get(namespacedName)) continue;
-          toolRegistry.register({
-            name: namespacedName,
-            description: mcpTool.description ?? '',
-            inputSchema: mcpTool.inputSchema ?? { type: 'object', properties: {} },
-            execute: async (input: any) => {
-              const result = await mcpManager.callTool(mcpTool.serverName, mcpTool.name, input);
-              return typeof result === 'string' ? result : JSON.stringify(result);
-            },
-          });
-        }
-      } catch {
-        // MCP tool registration failed — not fatal, continue without them.
+  const registerMcpTools = async (): Promise<void> => {
+    try {
+      const mcpTools = mcpManager.getAllTools();
+      for (const mcpTool of mcpTools) {
+        // Namespace MCP tools as mcp__<server>__<tool> to match Claude Code convention.
+        const namespacedName = `mcp__${mcpTool.serverName}__${mcpTool.name}`;
+        // Avoid overwriting built-in or already-registered tools.
+        if (toolRegistry.get(namespacedName)) continue;
+        toolRegistry.register({
+          name: namespacedName,
+          description: mcpTool.description ?? '',
+          inputSchema: mcpTool.inputSchema ?? { type: 'object', properties: {} },
+          execute: async (input: any) => {
+            const result = await mcpManager.callTool(mcpTool.serverName, mcpTool.name, input);
+            return typeof result === 'string' ? result : JSON.stringify(result);
+          },
+        });
       }
-    }).catch(() => {});
+    } catch {
+      // MCP tool registration failed — not fatal, continue without them.
+    }
+  };
+  let mcpReadyPromise: Promise<void> | undefined;
+  if (Object.keys(mcpServers).length > 0) {
+    // Ensure MCP tools are ready before loop creation so they appear in the
+    // system prompt and initial tool map from the first turn.
+    mcpReadyPromise = mcpManager
+      .setServers(mcpServers)
+      .then(registerMcpTools)
+      .catch(() => {});
   }
 
   toolRegistry.register(createListMcpResourcesTool({
@@ -572,6 +581,19 @@ async function main(): Promise<void> {
   if (settings.permissions?.deniedPaths) {
     permissionEngine.setDeniedPaths(settings.permissions.deniedPaths as string[]);
   }
+  // Allow file access in additional directories specified via --add-dir
+  if (additionalDirectories.length > 0) {
+    const currentAllowed = permissionEngine.getSummary().allowedPaths;
+    // Always add --add-dir paths, even when no allowedPaths are configured yet.
+    // When allowedPaths is empty the engine allows all paths, but once we add
+    // explicit entries it starts enforcing — so include cwd to preserve access.
+    const base = currentAllowed.length > 0 ? currentAllowed : [cwd];
+    permissionEngine.setAllowedPaths([...base, ...additionalDirectories]);
+  }
+  // Wire --permission-prompt-tool: store the tool name in the permission engine
+  if (args.permissionPromptTool) {
+    permissionEngine.setPermissionPromptToolName(args.permissionPromptTool);
+  }
   const permissionPrompter = new TerminalPermissionPrompter();
 
   // ------------------------------------------------------------------
@@ -710,7 +732,13 @@ async function main(): Promise<void> {
     }
   }
 
-  const toolNames = toolRegistry.list().map(t => t.name);
+  if (mcpReadyPromise) {
+    await mcpReadyPromise;
+  }
+
+  const isPrintMode = Boolean(args.print && args.prompt);
+  const availableTools = isPrintMode ? [] : toolRegistry.list();
+  const toolNames = availableTools.map(t => t.name);
 
   // ------------------------------------------------------------------
   // Conversation loop
@@ -718,14 +746,20 @@ async function main(): Promise<void> {
   const loop = new ConversationLoop({
     provider,
     // Pass the full tool map; ConversationLoop expects Map<name, ToolDefinition>.
-    tools: new Map(toolRegistry.list().map((t) => [t.name, t])),
+    tools: new Map(availableTools.map((t) => [t.name, t])),
     model,
     systemPrompt: buildSystemPrompt({
       cwd,
       model,
       tools: toolNames,
       permissionMode: effectivePermissionMode,
-      agentInstructions: [...agentInstructions, ...customInstructionsList],
+      agentInstructions: [
+        ...agentInstructions,
+        ...customInstructionsList,
+        ...(additionalDirectories.length > 0
+          ? [`Additional working directories:\n${additionalDirectories.map((d: string) => `  - ${d}`).join('\n')}\nYou may read, search, and edit files in these directories in addition to the primary working directory.`]
+          : []),
+      ],
       memoryContent,
       memoryDir: autoMemory.getDir(),
       isGitRepo: isGitRepository(cwd),
@@ -1003,6 +1037,8 @@ Options:
       --max-turns <n>         Maximum conversation turns
       --print                 Print-only mode (no tool calls)
       --verbose, --debug      Enable verbose output
+      --add-dir <path>        Additional working directory (can be repeated)
+      --permission-prompt-tool <name>  MCP tool for permission decisions
   -h, --help                  Show this help message
   -v, --version               Show version number
 
