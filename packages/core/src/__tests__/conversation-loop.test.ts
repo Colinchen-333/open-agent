@@ -221,6 +221,59 @@ describe('ConversationLoop', () => {
       // The second LLM call received the error and replied with text.
       expect(result.result).toBe('Sorry, that tool is unknown.');
     });
+
+    it('handles interleaved multiple tool_use streams without mixing inputs', async () => {
+      const executed: Array<{ tool: string; input: any }> = [];
+      const toolA = {
+        name: 'ToolA',
+        description: 'A',
+        inputSchema: { type: 'object', properties: { a: { type: 'number' } }, required: ['a'] },
+        async execute(input: any) {
+          executed.push({ tool: 'ToolA', input });
+          return `A:${input.a}`;
+        },
+      };
+      const toolB = {
+        name: 'ToolB',
+        description: 'B',
+        inputSchema: { type: 'object', properties: { b: { type: 'number' } }, required: ['b'] },
+        async execute(input: any) {
+          executed.push({ tool: 'ToolB', input });
+          return `B:${input.b}`;
+        },
+      };
+
+      const provider = makeMockProvider([
+        [
+          { type: 'tool_use_start', id: 't1', name: 'ToolA' },
+          { type: 'tool_use_start', id: 't2', name: 'ToolB' },
+          { type: 'tool_use_delta', id: 't1', partial_json: '{"a":' },
+          { type: 'tool_use_delta', id: 't2', partial_json: '{"b":' },
+          { type: 'tool_use_delta', id: 't1', partial_json: '1}' },
+          { type: 'tool_use_delta', id: 't2', partial_json: '2}' },
+          { type: 'tool_use_end', id: 't1' },
+          { type: 'tool_use_end', id: 't2' },
+          { type: 'message_end', message: {}, usage: { input_tokens: 5, output_tokens: 7 } },
+        ],
+        textResponse('Done with both tools.'),
+      ]);
+
+      const tools = new Map<string, any>([
+        ['ToolA', toolA],
+        ['ToolB', toolB],
+      ]);
+      const loop = new ConversationLoop(baseOptions(provider, tools));
+      const messages = await collectMessages(loop.run('run two tools'));
+
+      expect(executed).toHaveLength(2);
+      expect(executed.find((e) => e.tool === 'ToolA')?.input).toEqual({ a: 1 });
+      expect(executed.find((e) => e.tool === 'ToolB')?.input).toEqual({ b: 2 });
+
+      const result = messages.find((m) => m.type === 'result') as any;
+      expect(result).toBeDefined();
+      expect(result.subtype).toBe('success');
+      expect(result.result).toBe('Done with both tools.');
+    });
   });
 
   describe('maxTurns limit', () => {

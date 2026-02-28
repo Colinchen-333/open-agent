@@ -245,8 +245,19 @@ export class OpenAIProvider implements LLMProvider {
       yield { type: 'message_start', message: { model: options.model } };
 
       for await (const chunk of stream) {
+        const normalizedUsage = normalizeUsage(chunk.usage);
         const choice = chunk.choices[0];
-        if (!choice) continue;
+        if (!choice) {
+          // OpenAI may send a final usage-only chunk with no choices.
+          if (normalizedUsage) {
+            yield {
+              type: 'message_delta',
+              delta: {},
+              usage: normalizedUsage,
+            };
+          }
+          continue;
+        }
 
         const delta = choice.delta;
 
@@ -328,7 +339,7 @@ export class OpenAIProvider implements LLMProvider {
               })),
               stop_reason: choice.finish_reason,
             },
-            usage: normalizeUsage(chunk.usage),
+            usage: normalizedUsage,
           };
         }
       }

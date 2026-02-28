@@ -253,9 +253,11 @@ export class ConversationLoop {
 
       // Accumulate content blocks as the stream arrives.
       let assistantContent: AccumulatingBlock[] = [];
-      // Tracks the currently-streaming tool_use block while its JSON input is
-      // being delivered via tool_use_delta events.
-      let currentToolUse: { id: string; name: string; input: string } | null = null;
+      // Tracks streaming tool_use blocks by id so interleaved deltas from
+      // providers (e.g. multiple OpenAI tool calls in one response) do not
+      // overwrite each other.
+      const activeToolUses = new Map<string, { id: string; name: string; input: string }>();
+      const toolUseOrder: string[] = [];
       let messageUsage: any = null;
       let stopReason: string | null = null;
       // Map from content block index to thinking signature, supporting interleaved
@@ -361,34 +363,47 @@ export class ConversationLoop {
                   b._closed = true;
                 }
               }
-              currentToolUse = { id: event.id, name: event.name, input: '' };
-              break;
-            }
-
-            case 'tool_use_delta': {
-              // Accumulate the partial JSON input for the active tool_use block.
-              if (currentToolUse) {
-                currentToolUse.input += event.partial_json;
+              if (!activeToolUses.has(event.id)) {
+                activeToolUses.set(event.id, { id: event.id, name: event.name, input: '' });
+                toolUseOrder.push(event.id);
+              } else {
+                const existing = activeToolUses.get(event.id)!;
+                existing.name = event.name;
               }
               break;
             }
 
+            case 'tool_use_delta': {
+              // Accumulate partial JSON for the specific tool_use id.
+              const toolUse =
+                activeToolUses.get(event.id) ??
+                (() => {
+                  const fallback = { id: event.id, name: '', input: '' };
+                  activeToolUses.set(event.id, fallback);
+                  toolUseOrder.push(event.id);
+                  return fallback;
+                })();
+              toolUse.input += event.partial_json;
+              break;
+            }
+
             case 'tool_use_end': {
-              if (currentToolUse) {
+              const finishedToolUse = activeToolUses.get(event.id);
+              if (finishedToolUse) {
                 let parsedInput: Record<string, unknown> = {};
                 try {
-                  parsedInput = JSON.parse(currentToolUse.input || '{}');
+                  parsedInput = JSON.parse(finishedToolUse.input || '{}');
                 } catch {
                   // Leave parsedInput as {} if JSON is malformed — the tool
                   // implementation should handle missing fields gracefully.
                 }
                 assistantContent.push({
                   type: 'tool_use',
-                  id: currentToolUse.id,
-                  name: currentToolUse.name,
+                  id: finishedToolUse.id,
+                  name: finishedToolUse.name,
                   input: parsedInput,
                 });
-                currentToolUse = null;
+                activeToolUses.delete(event.id);
               }
               break;
             }
@@ -436,16 +451,18 @@ export class ConversationLoop {
         }
 
         // Force-close any dangling tool_use if the stream was truncated mid-tool.
-        if (currentToolUse) {
+        for (const toolUseId of toolUseOrder) {
+          const dangling = activeToolUses.get(toolUseId);
+          if (!dangling) continue;
           let parsedInput: Record<string, unknown> = {};
-          try { parsedInput = JSON.parse(currentToolUse.input || '{}'); } catch { /* partial JSON */ }
+          try { parsedInput = JSON.parse(dangling.input || '{}'); } catch { /* partial JSON */ }
           assistantContent.push({
             type: 'tool_use',
-            id: currentToolUse.id,
-            name: currentToolUse.name,
+            id: dangling.id,
+            name: dangling.name,
             input: parsedInput,
           });
-          currentToolUse = null;
+          activeToolUses.delete(toolUseId);
         }
       } catch (error: unknown) {
         // Abort errors should stop the loop immediately and yield a clean result.
