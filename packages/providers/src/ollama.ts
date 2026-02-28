@@ -209,6 +209,7 @@ export class OllamaProvider implements LLMProvider {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        signal: options.signal,
       });
 
       if (!response.ok) {
@@ -240,6 +241,50 @@ export class OllamaProvider implements LLMProvider {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      const handleChunk = function* (chunk: OllamaChatChunk): Generator<StreamEvent> {
+        const msgContent = chunk.message?.content;
+
+        // Text delta
+        if (msgContent) {
+          yield { type: 'text_delta', text: msgContent };
+        }
+
+        // Tool calls (non-streaming tool responses come in a single done=true chunk)
+        if (chunk.message?.tool_calls) {
+          for (const tc of chunk.message.tool_calls) {
+            const name = tc.function.name;
+            const argsJson = JSON.stringify(tc.function.arguments);
+            const id = `ollama-${randomUUID().slice(0, 12)}`;
+
+            yield { type: 'tool_use_start', id, name };
+            yield { type: 'tool_use_delta', id, partial_json: argsJson };
+            yield { type: 'tool_use_end', id };
+          }
+        }
+
+        if (chunk.done) {
+          // Flush any leftover tool accumulators
+          for (const [id, acc] of toolCallAccumulators) {
+            if (acc.started) {
+              yield { type: 'tool_use_end', id };
+            }
+          }
+
+          yield {
+            type: 'message_end',
+            message: {
+              model: chunk.model,
+              stop_reason: chunk.done_reason === 'stop' ? 'end_turn'
+                : chunk.done_reason === 'length' ? 'max_tokens'
+                : chunk.done_reason ?? 'end_turn',
+            },
+            usage: {
+              input_tokens: chunk.prompt_eval_count ?? 0,
+              output_tokens: chunk.eval_count ?? 0,
+            },
+          };
+        }
+      };
 
       while (true) {
         const { done, value } = await reader.read();
@@ -263,49 +308,18 @@ export class OllamaProvider implements LLMProvider {
             // Malformed line — skip
             continue;
           }
+          yield* handleChunk(chunk);
+        }
+      }
 
-          const msgContent = chunk.message?.content;
-
-          // Text delta
-          if (msgContent) {
-            yield { type: 'text_delta', text: msgContent };
-          }
-
-          // Tool calls (non-streaming tool responses come in a single done=true chunk)
-          if (chunk.message?.tool_calls) {
-            for (const tc of chunk.message.tool_calls) {
-              const name = tc.function.name;
-              const argsJson = JSON.stringify(tc.function.arguments);
-              const id = `ollama-${randomUUID().slice(0, 12)}`;
-
-              yield { type: 'tool_use_start', id, name };
-              yield { type: 'tool_use_delta', id, partial_json: argsJson };
-              yield { type: 'tool_use_end', id };
-            }
-          }
-
-          if (chunk.done) {
-            // Flush any leftover tool accumulators
-            for (const [id, acc] of toolCallAccumulators) {
-              if (acc.started) {
-                yield { type: 'tool_use_end', id };
-              }
-            }
-
-            yield {
-              type: 'message_end',
-              message: {
-                model: chunk.model,
-                stop_reason: chunk.done_reason === 'stop' ? 'end_turn'
-                  : chunk.done_reason === 'length' ? 'max_tokens'
-                  : chunk.done_reason ?? 'end_turn',
-              },
-              usage: {
-                input_tokens: chunk.prompt_eval_count ?? 0,
-                output_tokens: chunk.eval_count ?? 0,
-              },
-            };
-          }
+      // Process the trailing NDJSON line even when response stream has no final newline.
+      const trailing = buffer.trim();
+      if (trailing.length > 0) {
+        try {
+          const chunk = JSON.parse(trailing) as OllamaChatChunk;
+          yield* handleChunk(chunk);
+        } catch {
+          // Ignore malformed trailing chunk.
         }
       }
     } catch (err: unknown) {

@@ -127,3 +127,105 @@ describe('OpenAIProvider tool id stability', () => {
     expect(end.message.tool_calls[0].id).toBe(start.id);
   });
 });
+
+describe('OpenAIProvider request compatibility', () => {
+  it('serializes image-only user content as a valid multimodal array', async () => {
+    let capturedParams: any;
+    const provider = new OpenAIProvider({ apiKey: 'test-key' });
+    (provider as any).client = {
+      chat: {
+        completions: {
+          create: async (params: any) => {
+            capturedParams = params;
+            return (async function* () {
+              yield {
+                choices: [{ delta: {}, finish_reason: 'stop' }],
+                usage: null,
+              };
+            })();
+          },
+        },
+      },
+    };
+
+    const events = await collect(provider.chat(
+      [
+        {
+          role: 'user',
+          content: [{ type: 'image', media_type: 'image/png', data: 'AAA=' }] as any,
+        },
+      ],
+      { model: 'gpt-4o' },
+    ));
+
+    expect(events.some((e) => e.type === 'message_end')).toBe(true);
+    expect(Array.isArray(capturedParams.messages)).toBe(true);
+    expect(capturedParams.messages[0].role).toBe('user');
+    expect(capturedParams.messages[0].content).toEqual([
+      {
+        type: 'image_url',
+        image_url: { url: 'data:image/png;base64,AAA=' },
+      },
+    ]);
+  });
+
+  it('passes AbortSignal to OpenAI create request options', async () => {
+    const ac = new AbortController();
+    let capturedReqOptions: any;
+    const provider = new OpenAIProvider({ apiKey: 'test-key' });
+    (provider as any).client = {
+      chat: {
+        completions: {
+          create: async (_params: any, reqOptions: any) => {
+            capturedReqOptions = reqOptions;
+            return (async function* () {
+              yield {
+                choices: [{ delta: {}, finish_reason: 'stop' }],
+                usage: null,
+              };
+            })();
+          },
+        },
+      },
+    };
+
+    await collect(provider.chat([{ role: 'user', content: 'hello' }], {
+      model: 'gpt-4o',
+      signal: ac.signal,
+    }));
+
+    expect(capturedReqOptions?.signal).toBe(ac.signal);
+  });
+
+  it('retries once without stream_options on 400 compatibility errors', async () => {
+    const calls: any[] = [];
+    const provider = new OpenAIProvider({ apiKey: 'test-key' });
+    (provider as any).client = {
+      chat: {
+        completions: {
+          create: async (params: any) => {
+            calls.push(params);
+            if (calls.length === 1) {
+              const err = new Error('Unknown parameter: stream_options') as Error & { status?: number };
+              err.status = 400;
+              throw err;
+            }
+            return (async function* () {
+              yield {
+                choices: [{ delta: {}, finish_reason: 'stop' }],
+                usage: null,
+              };
+            })();
+          },
+        },
+      },
+    };
+
+    const events = await collect(provider.chat([{ role: 'user', content: 'hello' }], { model: 'gpt-4o' }));
+
+    expect(calls.length).toBe(2);
+    expect(calls[0].stream_options).toEqual({ include_usage: true });
+    expect(calls[1].stream_options).toBeUndefined();
+    expect(events.some((e) => e.type === 'message_end')).toBe(true);
+  });
+});

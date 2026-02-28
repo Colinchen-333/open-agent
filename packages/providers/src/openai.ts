@@ -61,7 +61,7 @@ function convertUserMessage(
   }
 
   const blocks = msg.content as ContentBlock[];
-  const textParts: OpenAI.Chat.Completions.ChatCompletionContentPartText[] = [];
+  const contentParts: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [];
   const toolResults: OpenAI.Chat.Completions.ChatCompletionToolMessageParam[] = [];
 
   for (const block of blocks) {
@@ -77,10 +77,10 @@ function convertUserMessage(
         content,
       });
     } else if (block.type === 'text') {
-      textParts.push({ type: 'text', text: block.text as string });
+      contentParts.push({ type: 'text', text: block.text as string });
     } else if (block.type === 'image') {
       // Images are included inline in user messages
-      (textParts as OpenAI.Chat.Completions.ChatCompletionContentPart[]).push({
+      contentParts.push({
         type: 'image_url',
         image_url: {
           url: `data:${block.media_type ?? 'image/png'};base64,${block.data}`,
@@ -92,10 +92,14 @@ function convertUserMessage(
   const out: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [];
 
   // If there are any text parts alongside tool results, emit user message first
-  if (textParts.length > 0) {
+  if (contentParts.length > 0) {
+    const singleText =
+      contentParts.length === 1 && contentParts[0]?.type === 'text'
+        ? contentParts[0]
+        : null;
     out.push({
       role: 'user',
-      content: textParts.length === 1 ? textParts[0].text : (textParts as OpenAI.Chat.Completions.ChatCompletionContentPart[]),
+      content: singleText ? singleText.text : contentParts,
     });
   }
 
@@ -190,6 +194,17 @@ interface ToolCallAccumulator {
   started: boolean;
 }
 
+function shouldRetryWithoutStreamOptions(err: unknown): boolean {
+  const status = (err as any)?.status;
+  const msg = String((err as any)?.message ?? '').toLowerCase();
+  return (
+    status === 400 &&
+    (msg.includes('stream_options') ||
+      msg.includes('include_usage') ||
+      msg.includes('unknown parameter'))
+  );
+}
+
 export class OpenAIProvider implements LLMProvider {
   readonly name = 'openai';
   private client: OpenAI;
@@ -216,9 +231,6 @@ export class OpenAIProvider implements LLMProvider {
         model: options.model,
         messages: oaiMessages,
         stream: true,
-        // Request usage counts to be included in the final stream chunk so
-        // token tracking works correctly.
-        stream_options: { include_usage: true },
         ...(options.maxTokens !== undefined ? { max_tokens: options.maxTokens } : {}),
         ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
         ...(options.topP !== undefined ? { top_p: options.topP } : {}),
@@ -236,7 +248,19 @@ export class OpenAIProvider implements LLMProvider {
         }),
       };
 
-      const stream = await this.client.chat.completions.create(params);
+      let stream: AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>;
+      try {
+        stream = await this.client.chat.completions.create(
+          {
+            ...params,
+            stream_options: { include_usage: true },
+          },
+          { signal: options.signal },
+        );
+      } catch (err) {
+        if (!shouldRetryWithoutStreamOptions(err)) throw err;
+        stream = await this.client.chat.completions.create(params, { signal: options.signal });
+      }
 
       // Accumulated tool call state keyed by index in the delta array
       const toolAccumulators = new Map<number, ToolCallAccumulator>();
