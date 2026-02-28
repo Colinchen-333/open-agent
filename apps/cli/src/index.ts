@@ -122,7 +122,7 @@ async function main(): Promise<void> {
         prompt,
         cwd: effectiveCwd,
         name,
-        model: agentModel,
+        model: agentModel ?? model, // inherit parent model when not specified
         maxTurns,
         mode: mode ?? agentDef.mode,
         teamName,
@@ -803,8 +803,11 @@ async function main(): Promise<void> {
       } else if (message.type === 'result' && (message as any).result) {
         // Final text only if we haven't been streaming deltas
       }
+      // Persist transcript so --resume can restore this session.
+      sessionMgr.appendToTranscript(cwd, sessionId, message);
     }
     if (!isStreamJson) process.stdout.write('\n');
+    sessionMgr.touchSession(cwd, sessionId);
     process.exit(0);
   }
 

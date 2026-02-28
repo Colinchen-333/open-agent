@@ -61,12 +61,41 @@ export function query(
   const sessionId = options.sessionId ?? randomUUID();
 
   // ------------------------------------------------------------------
+  // Env — apply caller-supplied environment overrides BEFORE provider
+  // resolution so that OPENAI_API_KEY, ANTHROPIC_API_KEY etc. are
+  // visible to autoDetectProvider() / createProvider().
+  // ------------------------------------------------------------------
+  const savedEnv: Record<string, string | undefined> = {};
+  if (options.env) {
+    for (const [key, value] of Object.entries(options.env)) {
+      savedEnv[key] = process.env[key];
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+
+  // Apply debug env before provider creation too.
+  if (options.debug) {
+    savedEnv['DEBUG'] ??= process.env['DEBUG'];
+    process.env['DEBUG'] = 'open-agent:*';
+  }
+
+  // ------------------------------------------------------------------
   // Provider resolution
   // ------------------------------------------------------------------
-  const providerName = guessProviderFromModel(options.model);
-  const provider = providerName
-    ? createProvider({ provider: providerName, apiKey: (options as Record<string, unknown>).apiKey as string | undefined })
-    : autoDetectProvider();
+  // If the caller explicitly specifies a provider, use it directly.
+  // Otherwise fall back to model-name heuristics → environment auto-detect.
+  const provider = options.provider
+    ? createProvider({ provider: options.provider, apiKey: options.apiKey, baseURL: options.baseUrl })
+    : (() => {
+        const providerName = guessProviderFromModel(options.model);
+        return providerName
+          ? createProvider({ provider: providerName, apiKey: options.apiKey, baseURL: options.baseUrl })
+          : autoDetectProvider();
+      })();
 
   // ------------------------------------------------------------------
   // Tool registry — use public unregister() API, never touch internals.
@@ -137,28 +166,7 @@ export function query(
     });
   }
 
-  // ------------------------------------------------------------------
-  // Env — apply caller-supplied environment overrides
-  // ------------------------------------------------------------------
-  const savedEnv: Record<string, string | undefined> = {};
-  if (options.env) {
-    for (const [key, value] of Object.entries(options.env)) {
-      savedEnv[key] = process.env[key];
-      if (value === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = value;
-      }
-    }
-  }
-
-  // ------------------------------------------------------------------
-  // Debug — set DEBUG env var when requested
-  // ------------------------------------------------------------------
-  if (options.debug) {
-    savedEnv['DEBUG'] ??= process.env['DEBUG'];
-    process.env['DEBUG'] = 'open-agent:*';
-  }
+  // (env and debug overrides already applied above, before provider resolution)
 
   // ------------------------------------------------------------------
   // Model resolution
@@ -310,6 +318,9 @@ export function query(
             if (options.fallbackModel && !usedFallback && isModelError(modelError)) {
               usedFallback = true;
               loop.setModel(options.fallbackModel);
+              // Reset conversation history so that the user prompt is not
+              // duplicated when loop.run(prompt) is called again below.
+              loop.resetMessages(initialMessages.length > 0 ? initialMessages : undefined);
               continue; // retry with fallback model
             }
             throw modelError;

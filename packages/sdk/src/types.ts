@@ -43,6 +43,12 @@ export interface QueryOptions {
   maxBudgetUsd?: number;
   mcpServers?: Record<string, McpServerConfig>;
   model?: string;
+  /** Explicitly specify the LLM provider backend. */
+  provider?: 'anthropic' | 'openai' | 'ollama';
+  /** API key to use with the specified provider. */
+  apiKey?: string;
+  /** Custom base URL for the provider API (e.g. a proxy or self-hosted endpoint). */
+  baseUrl?: string;
   outputFormat?: { type: 'json_schema'; schema: Record<string, unknown> };
   permissionMode?: PermissionMode;
   allowDangerouslySkipPermissions?: boolean;

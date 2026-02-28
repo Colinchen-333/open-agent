@@ -120,14 +120,20 @@ export class AgentRunner {
   }
 
   private resolveModel(model?: string): string {
-    // Map shorthand to full model names
+    // Map shorthand to full model names (Claude shortcuts)
     switch (model) {
       case 'sonnet': return 'claude-sonnet-4-6';
       case 'opus': return 'claude-opus-4-6';
       case 'haiku': return 'claude-haiku-4-5-20251001';
       default:
+        // Use the model as-is (supports any provider's model names).
+        // Fallback to provider-appropriate defaults only as last resort.
         if (model && model.length > 0) return model;
-        return this.options.provider.name === 'anthropic' ? 'claude-sonnet-4-6' : 'gpt-4o';
+        return this.options.provider.name === 'anthropic'
+          ? 'claude-sonnet-4-6'
+          : this.options.provider.name === 'ollama'
+            ? 'llama3'
+            : 'gpt-4o';
     }
   }
 

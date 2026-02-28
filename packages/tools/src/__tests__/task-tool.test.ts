@@ -121,13 +121,13 @@ describe('Task tool', () => {
       expect(mode.enum).toContain('plan');
     });
 
-    it('has model field with valid enum values', () => {
+    it('has model field as free-form string (supports any provider model)', () => {
       const tool = createTaskTool(makeDeps());
       const { model } = tool.inputSchema.properties;
       expect(model).toBeDefined();
-      expect(model.enum).toContain('sonnet');
-      expect(model.enum).toContain('opus');
-      expect(model.enum).toContain('haiku');
+      expect(model.type).toBe('string');
+      // No enum restriction — accepts any model name (Claude shortcuts, OpenAI, Ollama, etc.)
+      expect(model.enum).toBeUndefined();
     });
 
     it('has name field', () => {

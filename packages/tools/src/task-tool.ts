@@ -64,8 +64,7 @@ export function createTaskTool(deps: TaskToolDeps): ToolDefinition {
         },
         model: {
           type: 'string',
-          enum: ['sonnet', 'opus', 'haiku'],
-          description: 'Optional model to use for this agent.',
+          description: 'Optional model to use for this agent. If not specified, inherits from parent.',
         },
         name: {
           type: 'string',

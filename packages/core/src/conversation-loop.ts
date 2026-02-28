@@ -956,6 +956,16 @@ export class ConversationLoop {
     this.options.model = model;
   }
 
+  /**
+   * Reset conversation messages to initial state (or empty) so that a
+   * fallback retry starts with a clean history rather than duplicating the
+   * user prompt that was already appended in a failed run() call.
+   */
+  resetMessages(initialMessages?: Message[]): void {
+    this.messages = initialMessages ? [...initialMessages] : [];
+    this.turnCount = 0;
+  }
+
   /** Update the thinking configuration. */
   setThinking(thinking: ThinkingConfig): void {
     this.options.thinking = thinking;
