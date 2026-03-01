@@ -67,6 +67,7 @@ export function query(
   }
 
   const cwd = options.cwd ?? process.cwd();
+  assertUnsupportedOptions(options);
   if (options.resume && options.continue) {
     throw new Error('options.resume and options.continue are mutually exclusive.');
   }
@@ -200,6 +201,21 @@ export function query(
   // ------------------------------------------------------------------
   const toolRegistry = createDefaultToolRegistry(cwd);
 
+  // Apply `tools` baseline first (official semantics): explicit list limits the
+  // available set before allowedTools/disallowedTools are layered on top.
+  if (options.tools) {
+    if (Array.isArray(options.tools)) {
+      const baseline = new Set(options.tools);
+      for (const tool of toolRegistry.list()) {
+        if (!baseline.has(tool.name)) {
+          toolRegistry.unregister(tool.name);
+        }
+      }
+    } else if (options.tools.type !== 'preset' || options.tools.preset !== 'claude_code') {
+      throw new Error('Unsupported tools preset.');
+    }
+  }
+
   // Apply allowedTools: discard everything not in the list.
   if (Array.isArray(options.allowedTools) && options.allowedTools.length > 0) {
     const allowed = new Set(options.allowedTools);
@@ -332,7 +348,7 @@ export function query(
   const permMode = requestedPermissionMode;
   const permissionEngine = new PermissionEngine({ mode: permMode });
   let effectivePermissionEngine: {
-    evaluate: (request: { toolName: string; input: unknown }) => { behavior: 'allow' | 'deny' | 'ask'; reason?: string } | Promise<{ behavior: 'allow' | 'deny' | 'ask'; reason?: string }>;
+    evaluate: (request: { toolName: string; input: unknown; toolUseId?: string }) => { behavior: 'allow' | 'deny' | 'ask'; reason?: string } | Promise<{ behavior: 'allow' | 'deny' | 'ask'; reason?: string }>;
     addRule: (behavior: 'allow' | 'deny' | 'ask', rule: { toolName: string; ruleContent?: string }) => void;
     setMode?: (mode: string) => void;
   } = permissionEngine as any;
@@ -349,20 +365,46 @@ export function query(
     const originalEvaluate = permissionEngine.evaluate.bind(permissionEngine);
     effectivePermissionEngine = {
       evaluate: async (request) => {
+        const baselineDecision = await originalEvaluate(request as any);
+        const normalizedInput = request.input as Record<string, unknown>;
         const result = await options.canUseTool!(
           request.toolName,
-          request.input as Record<string, unknown>,
+          normalizedInput,
           {
             signal: internalAbortController.signal,
+            suggestions: undefined,
+            decisionReason: baselineDecision.reason,
+            toolUseID: request.toolUseId ?? randomUUID(),
           },
         );
+        if (result && typeof result === 'object' && 'behavior' in result) {
+          if (result.behavior === 'allow') {
+            return {
+              behavior: 'allow' as const,
+              reason: 'Allowed by canUseTool callback',
+            };
+          }
+          if (result.behavior === 'deny') {
+            const denyMessage = 'message' in result && typeof result.message === 'string'
+              ? result.message
+              : ('reason' in result && typeof result.reason === 'string'
+                ? result.reason
+                : 'Denied by canUseTool callback');
+            return { behavior: 'deny' as const, reason: denyMessage };
+          }
+        }
         if (result === false) {
           return { behavior: 'deny' as const, reason: 'Denied by canUseTool callback' };
         }
-        if (typeof result === 'object' && result !== null && 'behavior' in result) {
-          return result as { behavior: 'allow' | 'deny' | 'ask'; reason?: string };
+        if (
+          typeof result === 'object' &&
+          result !== null &&
+          'behavior' in result &&
+          (result as any).behavior === 'ask'
+        ) {
+          return { behavior: 'ask' as const, reason: (result as any).reason };
         }
-        return originalEvaluate(request as any);
+        return baselineDecision;
       },
       addRule: permissionEngine.addRule.bind(permissionEngine),
       setMode: (permissionEngine as any).setMode?.bind(permissionEngine),
@@ -837,7 +879,7 @@ export function query(
     };
   };
 
-  queryObj.stopTask = async (_taskId?: string) => {
+  queryObj.stopTask = async (_taskId: string) => {
     abortQuery(false);
   };
 
@@ -1124,6 +1166,23 @@ function resolveRewindCheckpointId(
     }
   }
   return userMessageId;
+}
+
+function assertUnsupportedOptions(options: QueryOptions): void {
+  const unsupportedKeys: Array<keyof QueryOptions> = [
+    'betas',
+    'onElicitation',
+    'plugins',
+    'resumeSessionAt',
+    'sandbox',
+    'debugFile',
+    'spawnClaudeCodeProcess',
+  ];
+  for (const key of unsupportedKeys) {
+    if ((options as Record<string, unknown>)[key] !== undefined) {
+      throw new Error(`Option "${String(key)}" is not supported yet in open-agent/sdk.`);
+    }
+  }
 }
 
 function readFileMaybe(filePath: string): string | null {

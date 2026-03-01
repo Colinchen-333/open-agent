@@ -31,6 +31,15 @@ describe('query().initializationResult()', () => {
   it('returns official-style initialization keys only', async () => {
     const q = query('test', { model: 'claude-haiku-4-5' });
     const result = await q.initializationResult();
+    expect(Object.keys(result).sort()).toEqual([
+      'account',
+      'agents',
+      'available_output_styles',
+      'commands',
+      'fast_mode_state',
+      'models',
+      'output_style',
+    ].sort());
     expect((result as any).model).toBeUndefined();
     expect((result as any).cwd).toBeUndefined();
     expect((result as any).sessionId).toBeUndefined();
@@ -57,15 +66,15 @@ describe('query().stopTask()', () => {
     const ac = new AbortController();
     const q = query('test', { model: 'claude-sonnet-4-6', abortController: ac });
     expect(ac.signal.aborted).toBe(false);
-    await q.stopTask();
+    await q.stopTask('task-1');
     expect(ac.signal.aborted).toBe(false);
     q.close();
   });
 
-  it('accepts optional taskId parameter', async () => {
+  it('accepts required taskId parameter', async () => {
     const q = query('test', { model: 'claude-sonnet-4-6' });
-    // Should not throw with or without taskId
-    await q.stopTask();
+    // Should not throw with taskId
+    await q.stopTask('task-1');
     await q.stopTask('some-task-id');
     q.close();
   });

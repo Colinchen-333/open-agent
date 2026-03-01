@@ -438,3 +438,14 @@ describe('QueryOptions continue/resume semantics', () => {
     ).toThrow(/mutually exclusive/i);
   });
 });
+
+describe('QueryOptions unsupported official placeholders', () => {
+  it('throws for unsupported betas option to avoid silent no-op', () => {
+    expect(() =>
+      query('test', {
+        model: 'claude-sonnet-4-6',
+        betas: ['x-test-beta'],
+      } as QueryOptions),
+    ).toThrow(/not supported yet/i);
+  });
+});

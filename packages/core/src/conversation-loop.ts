@@ -11,7 +11,7 @@ import { randomUUID } from 'crypto';
  */
 export interface PermissionChecker {
   evaluate(
-    request: { toolName: string; input: unknown },
+    request: { toolName: string; input: unknown; toolUseId?: string },
   ): { behavior: 'allow' | 'deny' | 'ask'; reason?: string } | Promise<{ behavior: 'allow' | 'deny' | 'ask'; reason?: string }>;
   addRule(behavior: 'allow' | 'deny' | 'ask', rule: { toolName: string; ruleContent?: string }): void;
 }
@@ -690,6 +690,7 @@ export class ConversationLoop {
           const decision = await permissionEngine.evaluate({
             toolName: toolUse.name,
             input: toolUse.input,
+            toolUseId: toolUse.id,
           });
 
           if (decision.behavior === 'deny') {

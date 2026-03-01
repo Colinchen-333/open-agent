@@ -15,6 +15,27 @@ import type {
   PermissionPrompter,
 } from '@open-agent/core';
 
+export type PermissionUpdate = {
+  type: 'addRules' | 'replaceRules' | 'removeRules';
+  rules: Array<{ toolName: string; ruleContent?: string }>;
+  behavior: 'allow' | 'deny' | 'ask';
+  destination?: string;
+};
+
+export type PermissionResult =
+  | {
+      behavior: 'allow';
+      updatedInput?: Record<string, unknown>;
+      updatedPermissions?: PermissionUpdate[];
+      toolUseID?: string;
+    }
+  | {
+      behavior: 'deny';
+      message: string;
+      interrupt?: boolean;
+      toolUseID?: string;
+    };
+
 // --------------------------------------------------------------------------
 // V1 API Options (query())
 // --------------------------------------------------------------------------
@@ -67,12 +88,17 @@ export interface QueryOptions {
     input: Record<string, unknown>,
     context: {
       signal: AbortSignal;
-      toolUseId?: string;
+      suggestions?: PermissionUpdate[];
+      blockedPath?: string;
+      decisionReason?: string;
+      toolUseID: string;
+      agentID?: string;
     },
   ) =>
+    | PermissionResult
     | boolean
     | { behavior: 'allow' | 'deny' | 'ask'; reason?: string }
-    | Promise<boolean | { behavior: 'allow' | 'deny' | 'ask'; reason?: string }>;
+    | Promise<PermissionResult | boolean | { behavior: 'allow' | 'deny' | 'ask'; reason?: string }>;
   /**
    * Async permission callback used when permissionEngine returns "ask".
    * Return:
@@ -95,7 +121,14 @@ export interface QueryOptions {
   pathToClaudeCodeExecutable?: string;
   executable?: string;
   executableArgs?: string[];
-  extraArgs?: string[];
+  extraArgs?: Record<string, string | null>;
+  betas?: string[];
+  onElicitation?: unknown;
+  plugins?: unknown[];
+  resumeSessionAt?: unknown;
+  sandbox?: unknown;
+  debugFile?: string;
+  spawnClaudeCodeProcess?: unknown;
   promptSuggestions?: boolean;
   strictMcpConfig?: boolean;
   stderr?: unknown;
@@ -204,7 +237,7 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
    * `interrupt()`.  The optional `taskId` parameter is accepted for API
    * symmetry with multi-task environments and is currently ignored.
    */
-  stopTask(taskId?: string): Promise<void>;
+  stopTask(taskId: string): Promise<void>;
   /** Abort and clean up – equivalent to calling `interrupt()` without awaiting. */
   close(): void;
 
