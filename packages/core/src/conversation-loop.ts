@@ -722,8 +722,9 @@ export class ConversationLoop {
               stop_reason: stopReason ?? 'end_turn',
               result: resultText,
             });
-          } catch {
-            // Hook errors must not prevent the result from being yielded.
+          } catch (e) {
+            if (e instanceof DOMException && e.name === 'AbortError') throw e;
+            // Non-abort hook errors must not prevent the result from being yielded.
           }
         }
         // ── End Stop hook ───────────────────────────────────────────────────
@@ -940,25 +941,40 @@ export class ConversationLoop {
 
           // ── PreToolUse hook ──────────────────────────────────────────────
           if (this.options.hookExecutor) {
-            const hookResult = await this.options.hookExecutor.execute(
-              'PreToolUse',
-              { ...this.hookBase(), hook_event_name: 'PreToolUse', tool_name: toolUse.name, tool_input: toolUse.input },
-              toolUse.id,
-            );
+            try {
+              const hookResult = await this.options.hookExecutor.execute(
+                'PreToolUse',
+                { ...this.hookBase(), hook_event_name: 'PreToolUse', tool_name: toolUse.name, tool_input: toolUse.input },
+                toolUse.id,
+              );
 
-            if (hookResult.continue === false) {
+              if (hookResult.continue === false) {
+                return {
+                  toolUse,
+                  resultStr: hookResult.decision ?? 'Blocked by hook',
+                  isError: true,
+                  blocked: true,
+                  blockReason: hookResult.decision ?? 'Blocked by hook',
+                };
+              }
+
+              // Allow the hook to mutate the tool input before execution.
+              if (hookResult.updatedInput) {
+                toolUse.input = { ...(toolUse.input as Record<string, unknown>), ...hookResult.updatedInput };
+              }
+            } catch (hookErr) {
+              // Re-throw abort errors so Ctrl+C still works.
+              if (hookErr instanceof DOMException && hookErr.name === 'AbortError') throw hookErr;
+              if (this.options.abortSignal?.aborted) throw new DOMException('Aborted', 'AbortError');
+              // Non-abort hook crash → treat as a blocked tool to avoid
+              // crashing the entire run() generator.
               return {
                 toolUse,
-                resultStr: hookResult.decision ?? 'Blocked by hook',
+                resultStr: `PreToolUse hook error: ${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
                 isError: true,
                 blocked: true,
-                blockReason: hookResult.decision ?? 'Blocked by hook',
+                blockReason: `Hook error: ${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
               };
-            }
-
-            // Allow the hook to mutate the tool input before execution.
-            if (hookResult.updatedInput) {
-              toolUse.input = { ...(toolUse.input as Record<string, unknown>), ...hookResult.updatedInput };
             }
           }
           // ── End PreToolUse hook ──────────────────────────────────────────
@@ -981,8 +997,9 @@ export class ConversationLoop {
                   },
                   toolUse.id,
                 );
-              } catch {
-                // Hook errors must not prevent tool results from reaching the LLM.
+              } catch (e) {
+                if (e instanceof DOMException && e.name === 'AbortError') throw e;
+                // Non-abort hook errors must not prevent tool results from reaching the LLM.
               }
             }
             // ── End PostToolUse hook ─────────────────────────────────────
@@ -1028,8 +1045,9 @@ export class ConversationLoop {
                   },
                   toolUse.id,
                 );
-              } catch {
-                // Hook errors must not prevent error results from reaching the LLM.
+              } catch (e) {
+                if (e instanceof DOMException && e.name === 'AbortError') throw e;
+                // Non-abort hook errors must not prevent error results from reaching the LLM.
               }
             }
             // ── End PostToolUseFailure hook ────────────────────────────
