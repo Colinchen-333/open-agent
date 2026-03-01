@@ -313,7 +313,7 @@ export function query(
           prompt: agentPrompt,
           cwd: effectiveAgentCwd,
           name,
-          model: agentModel ?? model,
+          model: agentModel ?? resolveAgentModel(agentDef.model) ?? model,
           maxTurns,
           mode: mode ?? agentDef.mode,
           teamName,
