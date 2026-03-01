@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { SessionManager } from '@open-agent/core';
-import { __internal_isToolAllowedByPolicies, query } from '../query.js';
+import { __internal_extractUserMessagePrompt, __internal_isToolAllowedByPolicies, query } from '../query.js';
 import type { QueryOptions, PermissionUpdate } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -757,5 +757,43 @@ describe('__internal_isToolAllowedByPolicies()', () => {
         disallowedTools: ['Read'],
       }),
     ).toBe(false);
+  });
+});
+
+describe('__internal_extractUserMessagePrompt()', () => {
+  it('returns string prompt for string user message', () => {
+    const prompt = __internal_extractUserMessagePrompt({
+      type: 'user',
+      message: 'hello',
+      parent_tool_use_id: null,
+      session_id: '11111111-1111-4111-8111-111111111147',
+      uuid: 'u1',
+    } as any);
+    expect(prompt).toBe('hello');
+  });
+
+  it('preserves non-text content blocks instead of dropping them', () => {
+    const blocks = [
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'abc' } },
+    ];
+    const prompt = __internal_extractUserMessagePrompt({
+      type: 'user',
+      message: { role: 'user', content: blocks },
+      parent_tool_use_id: null,
+      session_id: '11111111-1111-4111-8111-111111111148',
+      uuid: 'u2',
+    } as any);
+    expect(prompt).toEqual(blocks);
+  });
+
+  it('returns undefined when content blocks are empty', () => {
+    const prompt = __internal_extractUserMessagePrompt({
+      type: 'user',
+      message: { role: 'user', content: [] },
+      parent_tool_use_id: null,
+      session_id: '11111111-1111-4111-8111-111111111149',
+      uuid: 'u3',
+    } as any);
+    expect(prompt).toBeUndefined();
   });
 });

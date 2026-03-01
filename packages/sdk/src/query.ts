@@ -850,14 +850,14 @@ export function query(
         while (true) {
           const userMsg = await readQueuedInput();
           if (userMsg === STREAM_DONE) break;
-          const text = extractUserMessageText(userMsg);
-          if (!text) continue;
+          const userPrompt = __internal_extractUserMessagePrompt(userMsg);
+          if (userPrompt === undefined) continue;
           const preTurnMessages = loop.getMessages();
 
           let modelError: Error | undefined;
           let resultMessage: SDKMessage | undefined;
           try {
-            for await (const msg of loop.run(text)) {
+            for await (const msg of loop.run(userPrompt)) {
               if (options.includePartialMessages !== true && msg.type === 'stream_event') {
                 continue;
               }
@@ -917,7 +917,7 @@ export function query(
               loop.resetMessages(preTurnMessages.length > 0 ? preTurnMessages : undefined);
               resultMessage = undefined;
               try {
-                for await (const msg of loop.run(text)) {
+                for await (const msg of loop.run(userPrompt)) {
                   if (options.includePartialMessages !== true && msg.type === 'stream_event') continue;
                   if (msg.type === 'result') { resultMessage = msg; continue; }
                   yield msg;
@@ -1278,11 +1278,9 @@ function applyUpdatedInput(
   Object.assign(targetInput as Record<string, unknown>, updatedInput as Record<string, unknown>);
 }
 
-/**
- * Extract the plain-text content from an SDKUserMessage.
- * Handles both string and Anthropic-style content blocks.
- */
-function extractUserMessageText(userMsg: SDKUserMessage): string {
+export function __internal_extractUserMessagePrompt(
+  userMsg: SDKUserMessage,
+): string | Message['content'] | undefined {
   const msg = userMsg.message;
   if (typeof msg === 'string') return msg;
   if (msg && typeof msg === 'object') {
@@ -1290,13 +1288,10 @@ function extractUserMessageText(userMsg: SDKUserMessage): string {
     const content = (msg as Record<string, unknown>).content;
     if (typeof content === 'string') return content;
     if (Array.isArray(content)) {
-      return content
-        .filter((b: Record<string, unknown>) => b.type === 'text')
-        .map((b: Record<string, unknown>) => b.text as string)
-        .join('\n');
+      return content.length > 0 ? (content as Message['content']) : undefined;
     }
   }
-  return '';
+  return undefined;
 }
 
 /**
