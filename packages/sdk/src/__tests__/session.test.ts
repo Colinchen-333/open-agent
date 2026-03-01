@@ -5,7 +5,9 @@ import {
   forkSession,
   unstable_v2_createSession,
   unstable_v2_resumeSession,
+  __internal_appendSdkMessageToHistory,
   __internal_buildSessionTurnQueryOptions,
+  __internal_loadInitialMessages,
 } from '../session.js';
 
 describe('createSession()', () => {
@@ -188,5 +190,89 @@ describe('__internal_buildSessionTurnQueryOptions()', () => {
     expect(opts.sessionId).toBe('11111111-1111-4111-8111-111111111144');
     expect(opts.abortController).toBe(ac);
     expect(opts.initialMessages).toHaveLength(1);
+  });
+});
+
+describe('__internal_loadInitialMessages()', () => {
+  it('prefers loadTranscriptAnyCwd when available', () => {
+    const calls: string[] = [];
+    const messages = __internal_loadInitialMessages(
+      {
+        loadTranscript: (_cwd: string, _sessionId: string) => {
+          calls.push('loadTranscript');
+          return [{ role: 'user', content: 'from-loadTranscript' }] as any;
+        },
+        loadTranscriptAnyCwd: (_sessionId: string, _cwd: string) => {
+          calls.push('loadTranscriptAnyCwd');
+          return [{ role: 'user', content: 'from-loadTranscriptAnyCwd' }] as any;
+        },
+      } as any,
+      '/tmp/b',
+      '11111111-1111-4111-8111-111111111145',
+    );
+
+    expect(calls).toEqual(['loadTranscriptAnyCwd']);
+    expect(messages).toEqual([{ role: 'user', content: 'from-loadTranscriptAnyCwd' }]);
+  });
+
+  it('falls back to empty history on load error', () => {
+    const messages = __internal_loadInitialMessages(
+      {
+        loadTranscript: () => {
+          throw new Error('broken');
+        },
+        loadTranscriptAnyCwd: () => {
+          throw new Error('broken-any-cwd');
+        },
+      } as any,
+      '/tmp/b',
+      '11111111-1111-4111-8111-111111111146',
+    );
+    expect(messages).toEqual([]);
+  });
+});
+
+describe('__internal_appendSdkMessageToHistory()', () => {
+  it('appends user/assistant messages and tool_result blocks', () => {
+    const history: any[] = [];
+
+    __internal_appendSdkMessageToHistory(history, {
+      type: 'user',
+      message: { role: 'user', content: 'hi' },
+    } as any);
+    __internal_appendSdkMessageToHistory(history, {
+      type: 'assistant',
+      message: { role: 'assistant', content: 'ok' },
+    } as any);
+    __internal_appendSdkMessageToHistory(history, {
+      type: 'tool_result',
+      tool_use_id: 'tool-1',
+      result: 'done',
+      is_error: false,
+    } as any);
+    __internal_appendSdkMessageToHistory(history, {
+      type: 'tool_result',
+      tool_use_id: 'tool-2',
+      result: 'done-2',
+      is_error: true,
+    } as any);
+
+    expect(history).toHaveLength(3);
+    expect(history[0]).toEqual({ role: 'user', content: 'hi' });
+    expect(history[1]).toEqual({ role: 'assistant', content: 'ok' });
+    expect(history[2].role).toBe('user');
+    expect(Array.isArray(history[2].content)).toBe(true);
+    expect(history[2].content).toHaveLength(2);
+    expect(history[2].content[0]).toEqual({
+      type: 'tool_result',
+      tool_use_id: 'tool-1',
+      content: 'done',
+    });
+    expect(history[2].content[1]).toEqual({
+      type: 'tool_result',
+      tool_use_id: 'tool-2',
+      content: 'done-2',
+      is_error: true,
+    });
   });
 });

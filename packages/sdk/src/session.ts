@@ -43,14 +43,8 @@ export function createSession(options?: QueryOptions): SDKSession {
  */
 export function resumeSession(sessionId: string, options?: QueryOptions): SDKSession {
   const cwd = options?.cwd ?? process.cwd();
-  let initialMessages: Message[] = [];
-  try {
-    const sessionMgr = new SessionManager();
-    initialMessages = sessionMgr.loadTranscript(cwd, sessionId);
-  } catch {
-    // Corrupted or missing transcript — start fresh rather than crashing.
-    initialMessages = [];
-  }
+  const sessionMgr = new SessionManager();
+  const initialMessages = __internal_loadInitialMessages(sessionMgr, cwd, sessionId);
 
   return _buildSession(sessionId, options, initialMessages);
 }
@@ -80,14 +74,8 @@ export function resumeSession(sessionId: string, options?: QueryOptions): SDKSes
  */
 export function forkSession(sessionId: string, options?: QueryOptions): SDKSession {
   const cwd = options?.cwd ?? process.cwd();
-  let initialMessages: Message[] = [];
-  try {
-    const sessionMgr = new SessionManager();
-    initialMessages = sessionMgr.loadTranscript(cwd, sessionId);
-  } catch {
-    // Corrupted or missing transcript — start with empty history.
-    initialMessages = [];
-  }
+  const sessionMgr = new SessionManager();
+  const initialMessages = __internal_loadInitialMessages(sessionMgr, cwd, sessionId);
 
   // Create a new session with a fresh ID but the same history
   const forkedId = randomUUID();
@@ -135,6 +123,63 @@ export function __internal_buildSessionTurnQueryOptions(
   };
 }
 
+export function __internal_loadInitialMessages(
+  sessionManager: Pick<SessionManager, 'loadTranscript' | 'loadTranscriptAnyCwd'>,
+  cwd: string,
+  sessionId: string,
+): Message[] {
+  try {
+    if (typeof sessionManager.loadTranscriptAnyCwd === 'function') {
+      return sessionManager.loadTranscriptAnyCwd(sessionId, cwd);
+    }
+    return sessionManager.loadTranscript(cwd, sessionId);
+  } catch {
+    // Corrupted or missing transcript — start fresh rather than crashing.
+    return [];
+  }
+}
+
+export function __internal_appendSdkMessageToHistory(
+  history: Message[],
+  msg: SDKMessage,
+): void {
+  if (msg.type === 'user' || msg.type === 'assistant') {
+    const rawMessage = (msg as { message?: unknown }).message;
+    if (typeof rawMessage === 'string') {
+      history.push({
+        role: msg.type,
+        content: rawMessage,
+      });
+    } else if (rawMessage && typeof rawMessage === 'object' && 'role' in rawMessage) {
+      history.push(rawMessage as Message);
+    }
+  } else if (msg.type === 'tool_result') {
+    const toolUseId = (msg as any).tool_use_id;
+    const result = (msg as any)._fullResult ?? (msg as any).result ?? '';
+    const isError = (msg as any).is_error === true;
+    const toolResultBlock = {
+      type: 'tool_result' as const,
+      tool_use_id: toolUseId,
+      content: typeof result === 'string' ? result : JSON.stringify(result),
+      ...(isError ? { is_error: true } : {}),
+    };
+    const lastMsg = history[history.length - 1];
+    if (
+      lastMsg?.role === 'user' &&
+      Array.isArray(lastMsg.content) &&
+      lastMsg.content.length > 0 &&
+      (lastMsg.content[0] as any)?.type === 'tool_result'
+    ) {
+      (lastMsg.content as any[]).push(toolResultBlock);
+    } else {
+      history.push({ role: 'user', content: [toolResultBlock] as any });
+    }
+  }
+  if (history.length > MAX_SESSION_HISTORY) {
+    history.splice(0, history.length - MAX_SESSION_HISTORY);
+  }
+}
+
 function _buildSession(
   sessionId: string,
   options?: QueryOptions,
@@ -177,30 +222,16 @@ function _buildSession(
       try {
         for await (const msg of q) {
           // Capture user/assistant turns into history for the next send().
-          if (msg.type === 'user' || msg.type === 'assistant') {
-            const msgRecord = (msg as { message?: unknown }).message;
-            if (msgRecord && typeof msgRecord === 'object' && 'role' in msgRecord) {
-              history.push(msgRecord as Message);
-              // Trim history to prevent unbounded memory growth.
-              if (history.length > MAX_SESSION_HISTORY) {
-                history.splice(0, history.length - MAX_SESSION_HISTORY);
-              }
-              // Persist to disk if requested.
-              if (sessionMgr) {
-                try {
-                  sessionMgr.appendToTranscript(cwd, sessionId, msg);
-                } catch {
-                  // Non-critical: don't crash if disk write fails.
-                }
+          if (msg.type === 'user' || msg.type === 'assistant' || msg.type === 'tool_result') {
+            __internal_appendSdkMessageToHistory(history, msg);
+            // Persist to disk if requested.
+            if (sessionMgr) {
+              try {
+                sessionMgr.appendToTranscript(cwd, sessionId, msg);
+              } catch {
+                // Non-critical: don't crash if disk write fails.
               }
             }
-          }
-
-          // Persist tool results as well so transcripts are complete.
-          if (msg.type === 'tool_result' && sessionMgr) {
-            try {
-              sessionMgr.appendToTranscript(cwd, sessionId, msg);
-            } catch { /* non-critical */ }
           }
 
           yield msg;
@@ -409,14 +440,8 @@ export function unstable_v2_resumeSession(
 ): Session {
   // Restore conversation transcript from disk before creating session.
   const cwd = options?.cwd ?? process.cwd();
-  let initialMessages: Message[] = [];
-  try {
-    const sessionMgr = new SessionManager();
-    initialMessages = sessionMgr.loadTranscript(cwd, sessionId);
-  } catch {
-    // Corrupted transcript — start fresh.
-    initialMessages = [];
-  }
+  const sessionMgr = new SessionManager();
+  const initialMessages = __internal_loadInitialMessages(sessionMgr, cwd, sessionId);
 
   // Pass the loaded transcript into the session so the underlying query()
   // feeds prior conversation history to the model on the first turn.
