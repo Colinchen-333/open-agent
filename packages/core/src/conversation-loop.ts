@@ -1,4 +1,4 @@
-import type { LLMProvider, ChatOptions, Message, ContentBlock } from '@open-agent/providers';
+import type { LLMProvider, ChatOptions, Message, ContentBlock, ServerToolSpec } from '@open-agent/providers';
 import type { ToolDefinition, ToolContext } from '@open-agent/tools';
 import type { ThinkingConfig } from './types.js';
 import type { SDKMessage } from './types.js';
@@ -63,6 +63,8 @@ export interface ConversationLoopOptions {
   initialMessages?: Message[];
   /** Structured output format — passed through to the provider. */
   responseFormat?: { type: 'json_schema'; schema: Record<string, unknown> };
+  /** Server-side tools (e.g. Anthropic native web search) — executed by the provider, not locally. */
+  serverTools?: ServerToolSpec[];
 }
 
 // Internal marker type for tracking open content blocks during accumulation.
@@ -253,6 +255,7 @@ export class ConversationLoop {
         model: this.options.model,
         maxTokens: this.options.maxTokens ?? 16384,
         tools: toolSpecs.length > 0 ? toolSpecs : undefined,
+        serverTools: this.options.serverTools,
         thinking: this.options.thinking,
         effort: this.options.effort,
         systemPrompt: this.options.systemPrompt,
@@ -446,6 +449,39 @@ export class ConversationLoop {
               break;
             }
 
+            case 'server_tool_use': {
+              // A server-side tool (e.g. Anthropic native web search) was invoked.
+              // The server executes it and its result will appear in the same assistant
+              // message as a `web_search_tool_result` block — no local execution needed.
+              // Close any open text/thinking blocks so subsequent content starts fresh.
+              for (const b of assistantContent) {
+                if (b.type === 'text' || b.type === 'thinking') {
+                  b._closed = true;
+                }
+              }
+              // Record the server_tool_use block in assistant content so it's preserved
+              // in message history and forwarded to the provider on the next turn.
+              assistantContent.push({
+                type: 'server_tool_use',
+                id: (event as any).id,
+                name: (event as any).name,
+                input: (event as any).input ?? {},
+              } as any);
+              break;
+            }
+
+            case 'web_search_result': {
+              // The web search result from a server-side tool invocation. The result
+              // is already embedded in the assistant message by the provider — record
+              // it in assistantContent so it flows through to message history intact.
+              assistantContent.push({
+                type: 'web_search_tool_result',
+                tool_use_id: (event as any).tool_use_id,
+                content: (event as any).content ?? [],
+              } as any);
+              break;
+            }
+
             case 'error': {
               // Provider-level errors during streaming (429, 500, overloaded).
               // Throw so the outer catch block surfaces a proper error result
@@ -608,6 +644,8 @@ export class ConversationLoop {
       }
 
       // Determine whether the model requested any tool calls.
+      // Only collect `tool_use` blocks for local execution — `server_tool_use` blocks
+      // are already executed server-side and their results appear in the same message.
       const toolUses = cleanContent.filter((b) => b.type === 'tool_use');
 
       if (toolUses.length === 0) {

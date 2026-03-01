@@ -8,6 +8,7 @@ export type {
   StreamEvent,
   ChatOptions,
   ToolSpec,
+  ServerToolSpec,
 } from './types.js';
 
 export { AnthropicProvider } from './anthropic.js';

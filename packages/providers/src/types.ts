@@ -12,7 +12,7 @@ export interface Message {
 }
 
 export interface ContentBlock {
-  type: 'text' | 'image' | 'tool_use' | 'tool_result' | 'thinking' | 'redacted_thinking';
+  type: 'text' | 'image' | 'tool_use' | 'tool_result' | 'thinking' | 'redacted_thinking' | 'server_tool_use' | 'web_search_tool_result';
   [key: string]: any;
 }
 
@@ -22,6 +22,8 @@ export type StreamEvent =
   | { type: 'tool_use_start'; id: string; name: string }
   | { type: 'tool_use_delta'; id: string; partial_json: string }
   | { type: 'tool_use_end'; id: string }
+  | { type: 'server_tool_use'; id: string; name: string; input?: any }
+  | { type: 'web_search_result'; tool_use_id: string; content: any }
   | { type: 'message_start'; message: any }
   | { type: 'message_end'; message: any; usage?: any }
   | { type: 'content_block_start'; index: number; content_block: any }
@@ -36,6 +38,8 @@ export interface ChatOptions {
   temperature?: number;
   topP?: number;
   tools?: ToolSpec[];
+  /** Server-side tools executed by the API provider (e.g. Anthropic native web search). */
+  serverTools?: ServerToolSpec[];
   thinking?: ThinkingConfig;
   effort?: 'low' | 'medium' | 'high' | 'max';
   systemPrompt?: string;
@@ -50,4 +54,11 @@ export interface ToolSpec {
   name: string;
   description: string;
   input_schema: Record<string, any>;
+}
+
+/** Server-side tool executed by the API provider, not locally. */
+export interface ServerToolSpec {
+  type: string;
+  name: string;
+  max_uses?: number;
 }

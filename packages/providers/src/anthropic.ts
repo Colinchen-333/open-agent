@@ -5,6 +5,7 @@ import type {
   ContentBlock,
   LLMProvider,
   Message,
+  ServerToolSpec,
   StreamEvent,
   ToolSpec,
 } from './types.js';
@@ -112,6 +113,25 @@ export function convertMessages(
           break;
         }
 
+        case 'server_tool_use':
+          // Server-side tool blocks must be passed back verbatim to the API.
+          converted.push({
+            type: 'server_tool_use',
+            id: block.id as string,
+            name: block.name as string,
+            input: block.input ?? {},
+          } as any);
+          break;
+
+        case 'web_search_tool_result':
+          // Web search results from server-side execution — pass back as-is.
+          converted.push({
+            type: 'web_search_tool_result',
+            tool_use_id: block.tool_use_id as string,
+            content: block.content ?? [],
+          } as any);
+          break;
+
         case 'image':
           // Support base64-encoded images
           converted.push({
@@ -202,9 +222,14 @@ export class AnthropicProvider implements LLMProvider {
     try {
       const system = extractSystemPrompt(messages, options);
       const anthropicMessages = convertMessages(messages);
-      const tools =
+      const regularTools =
         options.tools && options.tools.length > 0
           ? convertTools(options.tools)
+          : [];
+      const serverTools: ServerToolSpec[] = options.serverTools ?? [];
+      const tools =
+        regularTools.length > 0 || serverTools.length > 0
+          ? [...regularTools, ...serverTools]
           : undefined;
 
       // Determine thinking configuration
@@ -336,6 +361,20 @@ export class AnthropicProvider implements LLMProvider {
             // Record the mapping so content_block_stop can look up the id.
             blockIndexToToolUseId.set(event.index, block.id);
             yield { type: 'tool_use_start', id: block.id, name: block.name };
+          } else if ((block as any).type === 'server_tool_use') {
+            yield {
+              type: 'server_tool_use',
+              id: (block as any).id,
+              name: (block as any).name,
+              input: (block as any).input,
+            };
+          } else if ((block as any).type === 'web_search_tool_result') {
+            // web_search_tool_result blocks arrive as complete blocks at content_block_start
+            yield {
+              type: 'web_search_result',
+              tool_use_id: (block as any).tool_use_id,
+              content: (block as any).content,
+            };
           }
           break;
         }

@@ -182,6 +182,8 @@ export interface QueryOptions {
   plugins?: unknown[];
   resumeSessionAt?: string;
   sandbox?: SandboxConfig;
+  /** Server-side tools executed by the API provider (e.g. Anthropic native web search). */
+  serverTools?: import('@open-agent/providers').ServerToolSpec[];
   debugFile?: string;
   spawnClaudeCodeProcess?: unknown;
   promptSuggestions?: boolean;

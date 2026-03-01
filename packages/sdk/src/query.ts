@@ -890,6 +890,7 @@ export function query(
     costCalculator: (m, inTok, outTok, cacheCreate, cacheRead) =>
       calculateCost(m, inTok, outTok, cacheCreate, cacheRead),
     responseFormat: options.outputFormat ? { type: options.outputFormat.type, schema: options.outputFormat.schema } : undefined,
+    serverTools: options.serverTools,
   });
 
   const syncLoopToolsFromRegistry = () => {
