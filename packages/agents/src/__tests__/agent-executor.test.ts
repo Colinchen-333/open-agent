@@ -38,10 +38,15 @@ const mockRunResult = {
   durationMs: 100,
 };
 
+// Capture constructor options for assertions (A2 test)
+let lastRunnerOptions: any = null;
+
 // Mock the agent-runner module
 mock.module('../agent-runner.js', () => ({
   AgentRunner: class MockAgentRunner {
-    constructor(_opts: any) {}
+    constructor(opts: any) {
+      lastRunnerOptions = opts;
+    }
     async run(_prompt: string) {
       return mockRunResult;
     }
@@ -56,6 +61,7 @@ describe('AgentExecutor', () => {
 
   beforeEach(() => {
     executor = new AgentExecutor();
+    lastRunnerOptions = null;
   });
 
   describe('execute()', () => {
@@ -144,10 +150,12 @@ describe('AgentExecutor', () => {
         })
       ).rejects.toThrow('Runner failed');
 
-      // Restore mock
+      // Restore mock (must capture options for A2 tests)
       mock.module('../agent-runner.js', () => ({
         AgentRunner: class MockAgentRunner {
-          constructor(_opts: any) {}
+          constructor(opts: any) {
+            lastRunnerOptions = opts;
+          }
           async run(_prompt: string) {
             return mockRunResult;
           }
@@ -315,6 +323,39 @@ describe('AgentExecutor', () => {
       }
     });
 
+    it('A2: executeInBackground 传递 onEvent 给 AgentRunner', async () => {
+      const onEvent = (_e: any) => {};
+      await executor.executeInBackground({
+        definition: mockDefinition,
+        provider: mockProvider as any,
+        tools: mockTools,
+        prompt: 'Background with onEvent',
+        cwd: '/tmp',
+        onEvent,
+      });
+
+      // 后台 agent 异步执行，等它启动
+      await new Promise((r) => setTimeout(r, 100));
+
+      expect(lastRunnerOptions).not.toBeNull();
+      expect(lastRunnerOptions.onEvent).toBe(onEvent);
+    });
+
+    it('execute (前台) 也传递 onEvent', async () => {
+      const onEvent = (_e: any) => {};
+      await executor.execute({
+        definition: mockDefinition,
+        provider: mockProvider as any,
+        tools: mockTools,
+        prompt: 'Foreground with onEvent',
+        cwd: '/tmp',
+        onEvent,
+      });
+
+      expect(lastRunnerOptions).not.toBeNull();
+      expect(lastRunnerOptions.onEvent).toBe(onEvent);
+    });
+
     it('uses resume ID for background agent', async () => {
       const resumeId = 'agent-bg-resume-001';
       const { agentId, outputFile } = await executor.executeInBackground({
@@ -433,6 +474,19 @@ describe('AgentExecutor', () => {
       expect(session.totalToolUseCount).toBeUndefined();
       expect(session.totalTokens).toBeUndefined();
       expect(session.usage).toBeUndefined();
+    });
+  });
+
+  describe('A3: AgentRunner onEvent try-catch 源码保护', () => {
+    it('agent-runner.ts 中 onEvent 调用被 try-catch 包裹', async () => {
+      const { readFileSync } = await import('fs');
+      const { resolve } = await import('path');
+      const source = readFileSync(
+        resolve(import.meta.dir, '../agent-runner.ts'),
+        'utf-8',
+      );
+      // 验证 onEvent 相关代码在 try-catch 块内
+      expect(source).toMatch(/try\s*\{[\s\S]*?onEvent[\s\S]*?\}\s*catch/);
     });
   });
 });
