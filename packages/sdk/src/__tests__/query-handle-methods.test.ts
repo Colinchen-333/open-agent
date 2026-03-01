@@ -327,6 +327,60 @@ describe('query().rewindFiles()', () => {
     expect(preview.filesChanged).toEqual([targetFile]);
     q.close();
   });
+
+  it('stops resolving when a newer user message is encountered', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-rewind-user-boundary-'));
+    const sessionId = 'rewind-user-boundary-session';
+    const targetFile = join(cwd, 'boundary.txt');
+    writeFileSync(targetFile, 'after-boundary', 'utf-8');
+
+    const sm = new SessionManager();
+    const sessionDir = sm.getSessionDir(cwd, sessionId);
+    const checkpointDir = join(sessionDir, 'checkpoints');
+    mkdirSync(checkpointDir, { recursive: true });
+    writeFileSync(
+      join(checkpointDir, 'checkpoint-boundary.json'),
+      JSON.stringify({
+        toolUseId: 'tool-use-boundary',
+        filePath: targetFile,
+        originalContent: 'before-boundary',
+        timestamp: Date.now(),
+      }),
+      'utf-8',
+    );
+
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      cwd,
+      sessionId,
+      enableFileCheckpointing: true,
+    });
+
+    sm.appendToTranscript(cwd, sessionId, {
+      type: 'user',
+      uuid: 'user-msg-old',
+      session_id: sessionId,
+      message: 'old user message',
+    });
+    sm.appendToTranscript(cwd, sessionId, {
+      type: 'user',
+      uuid: 'user-msg-new',
+      session_id: sessionId,
+      message: 'newer user message',
+    });
+    sm.appendToTranscript(cwd, sessionId, {
+      type: 'tool_result',
+      tool_use_id: 'tool-use-boundary',
+      session_id: sessionId,
+      result: 'done',
+      is_error: false,
+    });
+
+    const preview = await q.rewindFiles('user-msg-old', { dryRun: true });
+    expect(preview.canRewind).toBe(false);
+    expect(preview.error).toMatch(/checkpoint not found/i);
+    q.close();
+  });
 });
 
 // ---------------------------------------------------------------------------
