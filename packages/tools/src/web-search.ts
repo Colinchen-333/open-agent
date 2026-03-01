@@ -27,13 +27,16 @@ function applyDomainFilters(
 /**
  * Brave Search — requires BRAVE_SEARCH_API_KEY environment variable.
  */
-async function braveSearch(query: string, apiKey: string): Promise<SearchResult[]> {
+async function braveSearch(query: string, apiKey: string, signal?: AbortSignal): Promise<SearchResult[]> {
   const params = new URLSearchParams({ q: query, count: '10' });
   const resp = await fetch(`https://api.search.brave.com/res/v1/web/search?${params}`, {
     headers: {
       'X-Subscription-Token': apiKey,
       Accept: 'application/json',
     },
+    signal: signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(30_000)])
+      : AbortSignal.timeout(30_000),
   });
   if (!resp.ok) throw new Error(`Brave Search API error: ${resp.status} ${resp.statusText}`);
   const data = (await resp.json()) as any;
@@ -47,14 +50,18 @@ async function braveSearch(query: string, apiKey: string): Promise<SearchResult[
 /**
  * SerpAPI Google Search — requires SERPAPI_KEY environment variable.
  */
-async function serpApiSearch(query: string, apiKey: string): Promise<SearchResult[]> {
+async function serpApiSearch(query: string, apiKey: string, signal?: AbortSignal): Promise<SearchResult[]> {
   const params = new URLSearchParams({
     q: query,
     api_key: apiKey,
     engine: 'google',
     num: '10',
   });
-  const resp = await fetch(`https://serpapi.com/search?${params}`);
+  const resp = await fetch(`https://serpapi.com/search?${params}`, {
+    signal: signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(30_000)])
+      : AbortSignal.timeout(30_000),
+  });
   if (!resp.ok) throw new Error(`SerpAPI error: ${resp.status} ${resp.statusText}`);
   const data = (await resp.json()) as any;
   return (data.organic_results ?? []).map((r: any) => ({
@@ -68,9 +75,12 @@ async function serpApiSearch(query: string, apiKey: string): Promise<SearchResul
  * DuckDuckGo HTML search — POST to html.duckduckgo.com for actual web results.
  * Uses the full HTML version (not lite) with a realistic User-Agent for reliability.
  */
-async function duckDuckGoSearch(query: string): Promise<SearchResult[]> {
+async function duckDuckGoSearch(query: string, signal?: AbortSignal): Promise<SearchResult[]> {
   // html.duckduckgo.com/html/ is the non-JS results page, POST is more reliable
   const body = new URLSearchParams({ q: query, b: '' });
+  const combinedSignal = signal
+    ? AbortSignal.any([signal, AbortSignal.timeout(30_000)])
+    : AbortSignal.timeout(30_000);
   const resp = await fetch('https://html.duckduckgo.com/html/', {
     method: 'POST',
     headers: {
@@ -81,6 +91,7 @@ async function duckDuckGoSearch(query: string): Promise<SearchResult[]> {
       'Accept-Language': 'en-US,en;q=0.9',
     },
     body,
+    signal: combinedSignal,
   });
   if (!resp.ok) throw new Error(`DuckDuckGo search error: ${resp.status}`);
 
@@ -123,6 +134,7 @@ async function duckDuckGoSearch(query: string): Promise<SearchResult[]> {
           'User-Agent':
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
         },
+        signal: combinedSignal,
       });
       if (liteResp.ok) {
         const liteHtml = await liteResp.text();
@@ -168,7 +180,11 @@ export function createWebSearchTool(): ToolDefinition {
       },
       required: ['query'],
     },
-    async execute(input: any, _ctx: ToolContext) {
+    async execute(input: any, ctx: ToolContext) {
+      if (ctx.abortSignal?.aborted) {
+        return { results: [], durationSeconds: 0, error: 'Search aborted.' };
+      }
+
       const { query, allowed_domains, blocked_domains } = input as {
         query: string;
         allowed_domains?: string[];
@@ -183,13 +199,13 @@ export function createWebSearchTool(): ToolDefinition {
         let engine: string;
 
         if (braveKey) {
-          rawResults = await braveSearch(query, braveKey);
+          rawResults = await braveSearch(query, braveKey, ctx.abortSignal);
           engine = 'brave';
         } else if (serpKey) {
-          rawResults = await serpApiSearch(query, serpKey);
+          rawResults = await serpApiSearch(query, serpKey, ctx.abortSignal);
           engine = 'serpapi';
         } else {
-          rawResults = await duckDuckGoSearch(query);
+          rawResults = await duckDuckGoSearch(query, ctx.abortSignal);
           engine = 'duckduckgo';
         }
 

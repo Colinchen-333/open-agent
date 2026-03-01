@@ -24,7 +24,7 @@ export async function createWorktree(repoPath: string, name: string): Promise<Wo
 
   const { exitCode, stderr } = await exec(
     ['git', 'worktree', 'add', '-b', branchName, worktreePath],
-    { cwd: repoPath },
+    { cwd: repoPath, timeout: 30_000 },
   );
 
   if (exitCode !== 0) {
@@ -47,13 +47,13 @@ export async function cleanupWorktree(worktreePath: string): Promise<void> {
   try {
     await exec(
       ['git', 'worktree', 'remove', '--force', worktreePath],
-      { cwd: worktreePath },
+      { cwd: worktreePath, timeout: 30_000 },
     );
 
     // Best-effort prune regardless of exit code above.
     await exec(
       ['git', 'worktree', 'prune'],
-      { cwd: worktreePath },
+      { cwd: worktreePath, timeout: 30_000 },
     );
   } catch {
     // Cleanup is best-effort — never throw.
@@ -69,7 +69,7 @@ export async function hasWorktreeChanges(worktreePath: string): Promise<boolean>
   try {
     const { exitCode, stdout } = await exec(
       ['git', 'status', '--porcelain'],
-      { cwd: worktreePath },
+      { cwd: worktreePath, timeout: 30_000 },
     );
 
     if (exitCode !== 0) return false;
@@ -95,6 +95,10 @@ export function createEnterWorktreeTool(): ToolDefinition {
       },
     },
     async execute(input: any, ctx: ToolContext) {
+      if (ctx.abortSignal?.aborted) {
+        return { error: 'Worktree creation aborted.' };
+      }
+
       const name: string = input.name ?? `worktree-${randomUUID().slice(0, 8)}`;
       const { path: worktreePath, branch: worktreeBranch } = await createWorktree(ctx.cwd, name);
 

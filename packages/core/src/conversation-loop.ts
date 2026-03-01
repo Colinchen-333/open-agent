@@ -929,6 +929,8 @@ export class ConversationLoop {
         isImageResult?: boolean;
       };
 
+      const TOOL_EXECUTE_TIMEOUT_MS = 60_000;
+
       const parallelResults: ExecutionResult[] = await Promise.all(
         approvedTools.map(async ({ toolUse, tool }): Promise<ExecutionResult> => {
           const toolCtx: ToolContext = {
@@ -979,8 +981,13 @@ export class ConversationLoop {
           }
           // ── End PreToolUse hook ──────────────────────────────────────────
 
+          if (this.options.abortSignal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
           try {
-            const result = await tool.execute(toolUse.input, toolCtx);
+            const timeoutPromise = new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error('Tool execution timed out after 60s')), TOOL_EXECUTE_TIMEOUT_MS),
+            );
+            const result = await Promise.race([tool.execute(toolUse.input, toolCtx), timeoutPromise]);
             const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
 
             // ── PostToolUse hook (success) ───────────────────────────────
