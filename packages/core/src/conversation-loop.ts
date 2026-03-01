@@ -984,10 +984,12 @@ export class ConversationLoop {
           if (this.options.abortSignal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
           try {
-            const timeoutPromise = new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error('Tool execution timed out after 60s')), TOOL_EXECUTE_TIMEOUT_MS),
-            );
-            const result = await Promise.race([tool.execute(toolUse.input, toolCtx), timeoutPromise]);
+            let toolTimer: ReturnType<typeof setTimeout>;
+            const timeoutPromise = new Promise<never>((_, reject) => {
+              toolTimer = setTimeout(() => reject(new Error('Tool execution timed out after 60s')), TOOL_EXECUTE_TIMEOUT_MS);
+            });
+            const result = await Promise.race([tool.execute(toolUse.input, toolCtx), timeoutPromise])
+              .finally(() => clearTimeout(toolTimer!));
             const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
 
             // ── PostToolUse hook (success) ───────────────────────────────
