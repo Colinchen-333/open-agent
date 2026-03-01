@@ -65,87 +65,82 @@ async function serpApiSearch(query: string, apiKey: string): Promise<SearchResul
 }
 
 /**
- * DuckDuckGo HTML search — scrapes the lite HTML page for actual web results.
- * More reliable than the Instant Answer API which only returns curated results.
+ * DuckDuckGo HTML search — POST to html.duckduckgo.com for actual web results.
+ * Uses the full HTML version (not lite) with a realistic User-Agent for reliability.
  */
 async function duckDuckGoSearch(query: string): Promise<SearchResult[]> {
-  // Try the lite HTML version first for actual web results
-  try {
-    const params = new URLSearchParams({ q: query });
-    const resp = await fetch(`https://lite.duckduckgo.com/lite/?${params}`, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; OpenAgent/0.1.0)',
-      },
-    });
-    if (resp.ok) {
-      const html = await resp.text();
-      const results: SearchResult[] = [];
-      // Parse result links from the lite HTML page
-      const linkRegex = /<a[^>]+class="result-link"[^>]*href="([^"]+)"[^>]*>([^<]*)<\/a>/g;
-      let match;
-      while ((match = linkRegex.exec(html)) !== null && results.length < 10) {
-        results.push({
-          title: match[2].trim(),
-          url: match[1],
-          description: '',
-        });
-      }
-      // Also try the snippet pattern
-      const snippetRegex = /<td[^>]*class="result-snippet"[^>]*>([\s\S]*?)<\/td>/g;
-      let snippetIdx = 0;
-      while ((match = snippetRegex.exec(html)) !== null && snippetIdx < results.length) {
-        results[snippetIdx].description = match[1].replace(/<[^>]+>/g, '').trim();
-        snippetIdx++;
-      }
-      if (results.length > 0) return results;
-    }
-  } catch {
-    // Fall through to JSON API
-  }
-
-  // Fallback: DuckDuckGo Instant Answer JSON API
-  const params = new URLSearchParams({
-    q: query,
-    format: 'json',
-    no_html: '1',
-    skip_disambig: '1',
-  });
-  const resp = await fetch(`https://api.duckduckgo.com/?${params}`, {
+  // html.duckduckgo.com/html/ is the non-JS results page, POST is more reliable
+  const body = new URLSearchParams({ q: query, b: '' });
+  const resp = await fetch('https://html.duckduckgo.com/html/', {
+    method: 'POST',
     headers: {
-      'User-Agent': 'OpenAgent/0.1.0',
-      Accept: 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent':
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      Accept: 'text/html',
+      'Accept-Language': 'en-US,en;q=0.9',
     },
+    body,
   });
-  if (!resp.ok) throw new Error(`DuckDuckGo API error: ${resp.status} ${resp.statusText}`);
+  if (!resp.ok) throw new Error(`DuckDuckGo search error: ${resp.status}`);
 
-  const data = (await resp.json()) as any;
+  const html = await resp.text();
   const results: SearchResult[] = [];
 
-  if (data.AbstractText && data.AbstractURL) {
-    results.push({
-      title: data.Heading ?? query,
-      url: data.AbstractURL,
-      description: data.AbstractText,
-    });
-  }
-
-  const flatTopics: any[] = [];
-  for (const topic of data.RelatedTopics ?? []) {
-    if (Array.isArray(topic.Topics)) {
-      flatTopics.push(...topic.Topics);
-    } else {
-      flatTopics.push(topic);
+  // Match result links: <a rel="nofollow" class="result__a" href="...">title</a>
+  const linkRegex = /<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+  let match;
+  while ((match = linkRegex.exec(html)) !== null && results.length < 10) {
+    const url = match[1].trim();
+    const title = match[2].replace(/<[^>]+>/g, '').trim();
+    if (!url || !title) continue;
+    // Skip DuckDuckGo internal redirect URLs, extract the actual URL
+    let finalUrl = url;
+    if (url.startsWith('//duckduckgo.com/l/?')) {
+      try {
+        const uddg = new URL(`https:${url}`).searchParams.get('uddg');
+        if (uddg) finalUrl = uddg;
+      } catch { /* use original */ }
     }
+    results.push({ title, url: finalUrl, description: '' });
   }
 
-  for (const topic of flatTopics) {
-    if (!topic.FirstURL || !topic.Text) continue;
-    results.push({
-      title: topic.Text.split(' - ')[0].trim(),
-      url: topic.FirstURL,
-      description: topic.Text,
-    });
-    if (results.length >= 10) break;
+  // Match snippets: <a class="result__snippet" ...>description</a>
+  // or <td class="result-snippet">...</td> (lite version)
+  const snippetRegex = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+  let snippetIdx = 0;
+  while ((match = snippetRegex.exec(html)) !== null && snippetIdx < results.length) {
+    results[snippetIdx].description = match[1].replace(/<[^>]+>/g, '').trim();
+    snippetIdx++;
+  }
+
+  // If html.duckduckgo.com parsing failed, try lite version as fallback
+  if (results.length === 0) {
+    try {
+      const liteParams = new URLSearchParams({ q: query });
+      const liteResp = await fetch(`https://lite.duckduckgo.com/lite/?${liteParams}`, {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        },
+      });
+      if (liteResp.ok) {
+        const liteHtml = await liteResp.text();
+        // Lite uses different class names
+        const liteLinkRegex = /<a[^>]+class="result-link"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+        while ((match = liteLinkRegex.exec(liteHtml)) !== null && results.length < 10) {
+          const url = match[1].trim();
+          const title = match[2].replace(/<[^>]+>/g, '').trim();
+          if (url && title) results.push({ title, url, description: '' });
+        }
+        const liteSnippetRegex = /<td[^>]*class="result-snippet"[^>]*>([\s\S]*?)<\/td>/g;
+        snippetIdx = 0;
+        while ((match = liteSnippetRegex.exec(liteHtml)) !== null && snippetIdx < results.length) {
+          results[snippetIdx].description = match[1].replace(/<[^>]+>/g, '').trim();
+          snippetIdx++;
+        }
+      }
+    } catch { /* ignore lite fallback errors */ }
   }
 
   return results;
@@ -205,9 +200,7 @@ export function createWebSearchTool(): ToolDefinition {
             results: [],
             durationSeconds: 0,
             engine,
-            note: braveKey || serpKey
-              ? `${engine} returned no results for this query.`
-              : 'No results. For better web search, set BRAVE_SEARCH_API_KEY or SERPAPI_KEY.',
+            note: `No results found for "${query}". Try rephrasing or using different keywords.`,
           };
         }
 
@@ -217,9 +210,7 @@ export function createWebSearchTool(): ToolDefinition {
         return {
           results: [],
           durationSeconds: 0,
-          error: `Search failed: ${message}. ${
-            braveKey ? '' : 'Set BRAVE_SEARCH_API_KEY for more reliable web search.'
-          }`.trim(),
+          error: `Search failed: ${message}. Try rephrasing the query.`,
         };
       }
     },
