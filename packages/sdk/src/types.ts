@@ -127,28 +127,28 @@ export interface SessionOptions {
 export interface InitializationResult {
   /** Slash command metadata. */
   commands: SlashCommand[];
-  /** Current output style. */
-  output_style: 'text' | 'stream-json';
-  /** Supported output styles. */
-  available_output_styles: Array<'text' | 'stream-json'>;
-  /** Provider-reported model list. */
-  models: ModelInfo[];
   /** Built-in and custom agents available to this session. */
   agents: AgentInfo[];
+  /** Current output style. */
+  output_style: string;
+  /** Supported output styles. */
+  available_output_styles: string[];
+  /** Provider-reported model list. */
+  models: ModelInfo[];
   /** Account/auth context. */
   account: AccountInfo;
   /** Fast mode state from the underlying runtime when available. */
   fast_mode_state?: unknown;
-  /** Names of all tools registered for this session. */
-  tools: string[];
-  /** The resolved model name used for LLM calls. */
-  model: string;
-  /** The working directory for this session. */
-  cwd: string;
-  /** The stable session identifier. */
-  sessionId: string;
-  /** The active permission mode. */
-  permissionMode: string;
+  /** @deprecated Legacy extension; not part of official SDK contract. */
+  tools?: string[];
+  /** @deprecated Legacy extension; not part of official SDK contract. */
+  model?: string;
+  /** @deprecated Legacy extension; not part of official SDK contract. */
+  cwd?: string;
+  /** @deprecated Legacy extension; not part of official SDK contract. */
+  sessionId?: string;
+  /** @deprecated Legacy extension; not part of official SDK contract. */
+  permissionMode?: string;
 }
 
 export interface RewindFilesOptions {
@@ -167,7 +167,8 @@ export interface RewindFilesResult {
 
 export interface AgentInfo {
   name: string;
-  description?: string;
+  description: string;
+  model?: string;
 }
 
 /**
@@ -194,8 +195,8 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   /** Return account/billing information for the active API key. */
   accountInfo(): Promise<AccountInfo>;
   /**
-   * Return a snapshot of the session's initialization state (tools, model,
-   * cwd, sessionId, permissionMode).  Resolves immediately — no async I/O.
+   * Return initialization metadata that matches the official SDK control
+   * response shape.
    */
   initializationResult(): Promise<InitializationResult>;
   /**

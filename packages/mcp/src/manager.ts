@@ -9,12 +9,25 @@ import { McpHttpClient } from './http-transport';
 import { McpSseClient } from './sse-transport';
 import type { McpServerConnection, McpToolInfo, McpResourceInfo } from './types';
 
+function isAuthError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const lowered = message.toLowerCase();
+  return (
+    lowered.includes('auth') ||
+    lowered.includes('unauthorized') ||
+    lowered.includes('forbidden') ||
+    lowered.includes('login')
+  );
+}
+
 // Union type of all client types we maintain
 type AnyMcpClient = McpStdioClient | McpHttpClient | McpSseClient;
 
 export class McpManager {
   private connections: Map<string, McpServerConnection> = new Map();
   private clients: Map<string, AnyMcpClient> = new Map();
+  /** SDK-type servers store tool handlers here (keyed by serverName → toolName → handler) */
+  private _sdkToolHandlers: Map<string, Map<string, (args: Record<string, unknown>, extra: unknown) => Promise<unknown>>> = new Map();
   private _setupChain: Promise<void> = Promise.resolve();
 
   // ── Server lifecycle ──────────────────────────────────────────────────────
@@ -45,12 +58,27 @@ export class McpManager {
         connection.tools = await client.listTools();
         connection.status = 'connected';
       } else {
-        // sdk type or unknown — mark connected with no tools (in-process server)
+        // SDK-type in-process server — extract tools from the instance property
         connection.status = 'connected';
-        connection.tools = [];
+        const instance = (config as any).instance;
+        if (instance?.tools && Array.isArray(instance.tools)) {
+          const handlerMap = new Map<string, (args: Record<string, unknown>, extra: unknown) => Promise<unknown>>();
+          connection.tools = instance.tools.map((t: any) => {
+            handlerMap.set(t.name, t.handler);
+            return {
+              name: t.name,
+              description: t.description ?? '',
+              inputSchema: t.inputSchema ?? { type: 'object', properties: {} },
+              serverName: name,
+            } as McpToolInfo;
+          });
+          this._sdkToolHandlers.set(name, handlerMap);
+        } else {
+          connection.tools = [];
+        }
       }
     } catch (error: unknown) {
-      connection.status = 'error';
+      connection.status = isAuthError(error) ? 'needs-auth' : 'failed';
       connection.error = error instanceof Error ? error.message : String(error);
     }
 
@@ -126,6 +154,7 @@ export class McpManager {
       }
       this.clients.delete(name);
     }
+    this._sdkToolHandlers.delete(name);
     this.connections.delete(name);
   }
 
@@ -163,7 +192,7 @@ export class McpManager {
       const refreshed = await this.addServer(name, savedConfig);
       // If connection failed during re-enable, mark as error (not enabled)
       // to avoid contradictory enabled=true + status=error state.
-      if (refreshed.status === 'error') {
+      if (refreshed.status === 'failed' || refreshed.status === 'needs-auth' || refreshed.status === 'error') {
         refreshed.enabled = false;
       } else {
         refreshed.enabled = true;
@@ -237,6 +266,13 @@ export class McpManager {
     toolName: string,
     args: Record<string, unknown>
   ): Promise<any> {
+    // SDK-type servers: call the handler directly (no transport client)
+    const sdkHandlers = this._sdkToolHandlers.get(serverName);
+    if (sdkHandlers) {
+      const handler = sdkHandlers.get(toolName);
+      if (!handler) throw new Error(`Tool '${toolName}' not found on SDK server '${serverName}'`);
+      return handler(args, {});
+    }
     const client = this.clients.get(serverName);
     if (!client) throw new Error(`MCP server '${serverName}' not connected`);
     return client.callTool(toolName, args);

@@ -14,45 +14,27 @@ describe('query().initializationResult()', () => {
   it('returns the expected shape', async () => {
     const q = query('test', { model: 'claude-sonnet-4-6' });
     const result = await q.initializationResult();
-    expect(result).toHaveProperty('tools');
-    expect(result).toHaveProperty('model');
-    expect(result).toHaveProperty('cwd');
-    expect(result).toHaveProperty('sessionId');
-    expect(result).toHaveProperty('permissionMode');
     expect(result).toHaveProperty('commands');
+    expect(result).toHaveProperty('agents');
     expect(result).toHaveProperty('output_style');
     expect(result).toHaveProperty('available_output_styles');
     expect(result).toHaveProperty('models');
     expect(result).toHaveProperty('account');
-    expect(result).toHaveProperty('agents');
     expect(result).toHaveProperty('fast_mode_state');
-    expect(Array.isArray(result.tools)).toBe(true);
-    expect(typeof result.model).toBe('string');
-    expect(typeof result.cwd).toBe('string');
-    expect(typeof result.sessionId).toBe('string');
-    expect(typeof result.permissionMode).toBe('string');
+    expect(Array.isArray(result.commands)).toBe(true);
     expect(Array.isArray(result.agents)).toBe(true);
+    expect(Array.isArray(result.available_output_styles)).toBe(true);
+    expect(typeof result.output_style).toBe('string');
     q.close();
   });
 
-  it('reflects the model passed in options', async () => {
+  it('returns official-style initialization keys only', async () => {
     const q = query('test', { model: 'claude-haiku-4-5' });
     const result = await q.initializationResult();
-    expect(result.model).toBe('claude-haiku-4-5');
-    q.close();
-  });
-
-  it('reflects the cwd passed in options', async () => {
-    const q = query('test', { model: 'claude-sonnet-4-6', cwd: '/tmp' });
-    const result = await q.initializationResult();
-    expect(result.cwd).toBe('/tmp');
-    q.close();
-  });
-
-  it('reflects the sessionId passed in options', async () => {
-    const q = query('test', { model: 'claude-sonnet-4-6', sessionId: 'test-session-123' });
-    const result = await q.initializationResult();
-    expect(result.sessionId).toBe('test-session-123');
+    expect((result as any).model).toBeUndefined();
+    expect((result as any).cwd).toBeUndefined();
+    expect((result as any).sessionId).toBeUndefined();
+    expect((result as any).permissionMode).toBeUndefined();
     q.close();
   });
 
@@ -161,14 +143,14 @@ describe('query() MCP status shape', () => {
     });
 
     const init = await q.initializationResult();
-    expect(init.tools).toContain('echo_status');
+    expect(Array.isArray(init.commands)).toBe(true);
 
     const status = await q.mcpServerStatus();
     expect(status.length).toBe(1);
     expect(status[0].name).toBe('sdk_test');
     expect(status[0].status).toBe('connected');
     expect(status[0]).toHaveProperty('config');
-    expect(status[0]).toHaveProperty('scope');
+    expect((status[0] as any).config?.type).toBe('sdk');
     expect(Array.isArray(status[0].tools)).toBe(true);
     expect(status[0].tools?.[0]?.name).toBe('echo_status');
 
@@ -238,11 +220,102 @@ describe('query().rewindFiles()', () => {
     const preview = await q.rewindFiles('tool-use-1', { dryRun: true });
     expect(preview.canRewind).toBe(true);
     expect(preview.filesChanged).toEqual([targetFile]);
+    expect(preview.insertions).toBe(1);
+    expect(preview.deletions).toBe(1);
 
     const applied = await q.rewindFiles('tool-use-1');
     expect(applied.canRewind).toBe(true);
     expect(applied.filesChanged).toEqual([targetFile]);
+    expect(applied.insertions).toBe(1);
+    expect(applied.deletions).toBe(1);
     expect(readFileSync(targetFile, 'utf-8')).toBe('before');
+    q.close();
+  });
+
+  it('computes deletion stats when rewinding to a non-existent original file', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-rewind-delete-'));
+    const sessionId = 'rewind-delete-session';
+    const targetFile = join(cwd, 'remove-me.txt');
+    writeFileSync(targetFile, 'line1\nline2', 'utf-8');
+
+    const sm = new SessionManager();
+    const sessionDir = sm.getSessionDir(cwd, sessionId);
+    const checkpointDir = join(sessionDir, 'checkpoints');
+    mkdirSync(checkpointDir, { recursive: true });
+    writeFileSync(
+      join(checkpointDir, 'checkpoint-delete.json'),
+      JSON.stringify({
+        toolUseId: 'tool-use-delete',
+        filePath: targetFile,
+        originalContent: null,
+        timestamp: Date.now(),
+      }),
+      'utf-8',
+    );
+
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      cwd,
+      sessionId,
+      enableFileCheckpointing: true,
+    });
+
+    const preview = await q.rewindFiles('tool-use-delete', { dryRun: true });
+    expect(preview.insertions).toBe(0);
+    expect(preview.deletions).toBe(2);
+
+    const applied = await q.rewindFiles('tool-use-delete');
+    expect(applied.insertions).toBe(0);
+    expect(applied.deletions).toBe(2);
+    expect(() => readFileSync(targetFile, 'utf-8')).toThrow();
+    q.close();
+  });
+
+  it('accepts userMessageId by resolving to underlying toolUseId from transcript', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-rewind-user-msg-'));
+    const sessionId = 'rewind-user-msg-session';
+    const targetFile = join(cwd, 'map-id.txt');
+    writeFileSync(targetFile, 'after-map', 'utf-8');
+
+    const sm = new SessionManager();
+    const sessionDir = sm.getSessionDir(cwd, sessionId);
+    const checkpointDir = join(sessionDir, 'checkpoints');
+    mkdirSync(checkpointDir, { recursive: true });
+    writeFileSync(
+      join(checkpointDir, 'checkpoint-map.json'),
+      JSON.stringify({
+        toolUseId: 'tool-use-map',
+        filePath: targetFile,
+        originalContent: 'before-map',
+        timestamp: Date.now(),
+      }),
+      'utf-8',
+    );
+
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      cwd,
+      sessionId,
+      enableFileCheckpointing: true,
+    });
+
+    sm.appendToTranscript(cwd, sessionId, {
+      type: 'user',
+      uuid: 'user-msg-1',
+      session_id: sessionId,
+      message: 'rewrite this file',
+    });
+    sm.appendToTranscript(cwd, sessionId, {
+      type: 'tool_result',
+      tool_use_id: 'tool-use-map',
+      session_id: sessionId,
+      result: 'done',
+      is_error: false,
+    });
+
+    const preview = await q.rewindFiles('user-msg-1', { dryRun: true });
+    expect(preview.canRewind).toBe(true);
+    expect(preview.filesChanged).toEqual([targetFile]);
     q.close();
   });
 });

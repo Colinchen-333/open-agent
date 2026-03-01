@@ -228,7 +228,7 @@ describe('QueryOptions.permissionPromptToolName', () => {
     });
     const result = await q.initializationResult();
     expect(result).toBeDefined();
-    expect(typeof result.sessionId).toBe('string');
+    expect(Array.isArray(result.commands)).toBe(true);
     q.close();
   });
 });
@@ -334,7 +334,7 @@ describe('QueryOptions.settingSources', () => {
     });
     const result = await q.initializationResult();
     expect(result).toBeDefined();
-    expect(Array.isArray(result.tools)).toBe(true);
+    expect(Array.isArray(result.available_output_styles)).toBe(true);
     q.close();
   });
 
@@ -390,8 +390,8 @@ describe('QueryOptions — all new options combined', () => {
     });
     const result = await q.initializationResult();
     expect(result).toBeDefined();
-    expect(typeof result.model).toBe('string');
-    expect(typeof result.sessionId).toBe('string');
+    expect(Array.isArray(result.models)).toBe(true);
+    expect(Array.isArray(result.agents)).toBe(true);
     q.close();
   });
 });

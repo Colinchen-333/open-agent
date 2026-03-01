@@ -1,8 +1,14 @@
 import { randomUUID } from 'crypto';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
-import type { SDKMessage, SDKUserMessage, SlashCommand, AccountInfo } from '@open-agent/core';
+import type {
+  SDKMessage,
+  SDKUserMessage,
+  SlashCommand,
+  AccountInfo,
+  McpServerStatusConfig,
+} from '@open-agent/core';
 import { ConversationLoop, SessionManager, buildSystemPrompt, ConfigLoader, AutoMemory, FileCheckpoint } from '@open-agent/core';
 import { createDefaultToolRegistry } from '@open-agent/tools';
 import { autoDetectProvider, createProvider, calculateCost } from '@open-agent/providers';
@@ -773,11 +779,12 @@ export function query(
     const custom = options.agents
       ? Object.entries(options.agents).map(([name, def]) => ({
           name,
-          description: def?.description,
+          description: def?.description ?? '',
+          ...(def?.model ? { model: String(def.model) } : {}),
         }))
       : [];
     const merged = [...builtIns, ...custom];
-    const deduped = new Map<string, { name: string; description?: string }>();
+    const deduped = new Map<string, { name: string; description: string; model?: string }>();
     for (const agent of merged) {
       if (!deduped.has(agent.name)) deduped.set(agent.name, agent);
     }
@@ -790,11 +797,10 @@ export function query(
     if (!mcpManager) return [];
     return mcpManager.getStatus().map((conn) => ({
       name: conn.name,
-      status: mapMcpStatus(conn.status, conn.error),
+      status: mapMcpStatus(conn.status),
       ...(conn.serverInfo ? { serverInfo: conn.serverInfo } : {}),
       ...(conn.error ? { error: conn.error } : {}),
-      config: conn.config as unknown as Record<string, unknown>,
-      scope: 'local',
+      config: sanitizeMcpStatusConfig(conn.config),
       tools: conn.tools.map((t) => ({
         name: t.name,
         ...(t.description ? { description: t.description } : {}),
@@ -809,24 +815,10 @@ export function query(
     organization: provider.name,
   });
 
-  // Capture a mutable initialization snapshot.  The tools list is updated
-  // lazily after MCP tools are loaded inside the generator.  Non-MCP callers
-  // get an accurate snapshot immediately; MCP callers get the full tool list
-  // once iteration has begun and MCP servers have connected.
-  const initSnapshot = {
-    tools: toolRegistry.list().map(t => t.name),
-    model,
-    cwd,
-    sessionId,
-    permissionMode: permMode,
-  };
-
   queryObj.initializationResult = async () => {
     // If MCP tools are still loading, wait for them so the snapshot is complete.
     if (mcpReadyPromise) {
       await mcpReadyPromise;
-      // Refresh the tools list now that MCP tools have been registered.
-      initSnapshot.tools = toolRegistry.list().map(t => t.name);
     }
     const [commands, models, account, agents] = await Promise.all([
       queryObj.supportedCommands(),
@@ -835,13 +827,12 @@ export function query(
       queryObj.supportedAgents(),
     ]);
     return {
-      ...initSnapshot,
       commands,
-      output_style: 'text' as const,
-      available_output_styles: ['text', 'stream-json'] as const,
+      agents,
+      output_style: 'text',
+      available_output_styles: ['text', 'stream-json'],
       models,
       account,
-      agents,
       fast_mode_state: undefined,
     };
   };
@@ -937,27 +928,47 @@ export function query(
         error: 'File checkpointing is not enabled.',
       };
     }
-    const checkpoints = fileCheckpoint.list();
-    const idx = checkpoints.findIndex(c => c.toolUseId === userMessageId);
-    if (idx === -1) {
+    const requestedId = resolveRewindCheckpointId(
+      fileCheckpoint.list(),
+      sessionMgr,
+      cwd,
+      sessionId,
+      userMessageId,
+    );
+    const targets = fileCheckpoint.getRewindTargets(requestedId);
+    if (!targets) {
       return {
         canRewind: false,
         error: `Checkpoint not found: ${userMessageId}`,
       };
     }
-    const target = checkpoints.slice(idx).map(c => c.filePath);
-    const uniqueTarget = [...new Set(target)];
+    const uniqueTarget = targets.map((t) => t.filePath);
+    const beforeSnapshots = new Map<string, string | null>();
+    for (const target of targets) {
+      beforeSnapshots.set(target.filePath, readFileMaybe(target.filePath));
+    }
     if (options?.dryRun) {
+      const previewStats = accumulateRewindStats(
+        targets,
+        beforeSnapshots,
+        new Set(uniqueTarget),
+      );
       return {
         canRewind: true,
         filesChanged: uniqueTarget,
+        insertions: previewStats.insertions,
+        deletions: previewStats.deletions,
         rewindCount: uniqueTarget.length,
       };
     }
-    const { restored, errors } = fileCheckpoint.rewindTo(userMessageId);
+    const { restored, errors } = fileCheckpoint.rewindTo(requestedId);
+    const restoredSet = new Set(restored);
+    const appliedStats = accumulateRewindStats(targets, beforeSnapshots, restoredSet);
     return {
       canRewind: errors.length === 0,
       filesChanged: [...new Set(restored)],
+      insertions: appliedStats.insertions,
+      deletions: appliedStats.deletions,
       rewindCount: restored.length,
       ...(errors.length > 0 ? { error: errors.join('\n') } : {}),
     };
@@ -1037,22 +1048,150 @@ function isModelError(err: unknown): boolean {
 }
 
 function mapMcpStatus(
-  status: 'connected' | 'connecting' | 'failed' | 'error' | 'pending' | 'disabled' | 'disconnected',
-  error?: string,
+  status: 'connected' | 'connecting' | 'failed' | 'needs-auth' | 'error' | 'pending' | 'disabled' | 'disconnected',
 ): 'connected' | 'failed' | 'needs-auth' | 'pending' | 'disabled' {
   if (status === 'connected') return 'connected';
+  if (status === 'needs-auth') return 'needs-auth';
   if (status === 'disabled') return 'disabled';
   if (status === 'connecting' || status === 'pending') return 'pending';
-  const message = (error ?? '').toLowerCase();
-  if (
-    message.includes('auth') ||
-    message.includes('unauthorized') ||
-    message.includes('forbidden') ||
-    message.includes('login')
-  ) {
-    return 'needs-auth';
-  }
   return 'failed';
+}
+
+function sanitizeMcpStatusConfig(config: unknown): McpServerStatusConfig | undefined {
+  if (!config || typeof config !== 'object') return undefined;
+  const c = config as Record<string, unknown>;
+  if (c.type === 'stdio') {
+    return {
+      type: 'stdio',
+      command: c.command,
+      ...(Array.isArray(c.args) ? { args: c.args } : {}),
+      ...(c.env && typeof c.env === 'object' ? { env: c.env } : {}),
+    } as McpServerStatusConfig;
+  }
+  if (c.type === 'sse' || c.type === 'http') {
+    return {
+      type: c.type,
+      url: c.url,
+      ...(c.headers && typeof c.headers === 'object' ? { headers: c.headers } : {}),
+    } as McpServerStatusConfig;
+  }
+  if (c.type === 'sdk') {
+    return {
+      type: 'sdk',
+      name: c.name,
+    } as McpServerStatusConfig;
+  }
+  if (c.type === 'claudeai-proxy') {
+    return {
+      type: 'claudeai-proxy',
+      url: c.url,
+      id: c.id,
+    } as McpServerStatusConfig;
+  }
+  return undefined;
+}
+
+function resolveRewindCheckpointId(
+  checkpoints: Array<{ toolUseId: string }>,
+  sessionManager: SessionManager | null,
+  cwd: string,
+  sessionId: string,
+  userMessageId: string,
+): string {
+  if (checkpoints.some((c) => c.toolUseId === userMessageId)) {
+    return userMessageId;
+  }
+  if (!sessionManager) return userMessageId;
+
+  let transcript: unknown[] = [];
+  try {
+    transcript = sessionManager.readTranscript(cwd, sessionId);
+  } catch {
+    return userMessageId;
+  }
+
+  const start = transcript.findIndex((entry) => {
+    const e = entry as Record<string, unknown>;
+    return e.type === 'user' && e.uuid === userMessageId;
+  });
+  if (start === -1) return userMessageId;
+
+  for (let i = start + 1; i < transcript.length; i++) {
+    const e = transcript[i] as Record<string, unknown>;
+    if (e.type === 'user') break;
+    if (e.type === 'tool_result' && typeof e.tool_use_id === 'string') {
+      return e.tool_use_id;
+    }
+  }
+  return userMessageId;
+}
+
+function readFileMaybe(filePath: string): string | null {
+  try {
+    return existsSync(filePath) ? readFileSync(filePath, 'utf-8') : null;
+  } catch {
+    return null;
+  }
+}
+
+function toLines(content: string | null): string[] {
+  if (content === null || content.length === 0) return [];
+  return content.split(/\r?\n/);
+}
+
+function diffLineStats(
+  fromContent: string | null,
+  toContent: string | null,
+): { insertions: number; deletions: number } {
+  if (fromContent === toContent) {
+    return { insertions: 0, deletions: 0 };
+  }
+  if (fromContent === null) {
+    return { insertions: toLines(toContent).length, deletions: 0 };
+  }
+  if (toContent === null) {
+    return { insertions: 0, deletions: toLines(fromContent).length };
+  }
+  const a = toLines(fromContent);
+  const b = toLines(toContent);
+  if (a.length === 0 && b.length === 0) return { insertions: 0, deletions: 0 };
+  if (a.length === 0) return { insertions: b.length, deletions: 0 };
+  if (b.length === 0) return { insertions: 0, deletions: a.length };
+
+  const prev = new Uint32Array(b.length + 1);
+  const curr = new Uint32Array(b.length + 1);
+  for (let i = 1; i <= a.length; i++) {
+    curr[0] = 0;
+    for (let j = 1; j <= b.length; j++) {
+      curr[j] = a[i - 1] === b[j - 1]
+        ? prev[j - 1] + 1
+        : Math.max(prev[j], curr[j - 1]);
+    }
+    prev.set(curr);
+  }
+
+  const lcs = prev[b.length];
+  return {
+    insertions: b.length - lcs,
+    deletions: a.length - lcs,
+  };
+}
+
+function accumulateRewindStats(
+  targets: Array<{ filePath: string; originalContent: string | null }>,
+  beforeSnapshots: Map<string, string | null>,
+  includeFiles: Set<string>,
+): { insertions: number; deletions: number } {
+  let insertions = 0;
+  let deletions = 0;
+  for (const target of targets) {
+    if (!includeFiles.has(target.filePath)) continue;
+    const before = beforeSnapshots.get(target.filePath) ?? null;
+    const stats = diffLineStats(before, target.originalContent);
+    insertions += stats.insertions;
+    deletions += stats.deletions;
+  }
+  return { insertions, deletions };
 }
 
 /**

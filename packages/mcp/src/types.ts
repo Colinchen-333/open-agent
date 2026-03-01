@@ -24,7 +24,7 @@ export interface McpServerConnection {
   name: string;
   config: McpServerConfig;
   /** Lifecycle state of the server connection */
-  status: 'connected' | 'connecting' | 'failed' | 'error' | 'pending' | 'disabled' | 'disconnected';
+  status: 'connected' | 'connecting' | 'failed' | 'needs-auth' | 'error' | 'pending' | 'disabled' | 'disconnected';
   tools: McpToolInfo[];
   resources?: McpResourceInfo[];
   error?: string;

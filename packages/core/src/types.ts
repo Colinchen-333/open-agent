@@ -113,6 +113,12 @@ export interface McpSdkServerConfig {
   name: string;
 }
 
+export interface McpClaudeAIProxyServerConfig {
+  type: 'claudeai-proxy';
+  url: string;
+  id: string;
+}
+
 export type McpServerConfig =
   | McpStdioServerConfig
   | McpSSEServerConfig
@@ -242,7 +248,7 @@ export interface McpServerStatusTool {
   };
 }
 
-export type McpServerStatusConfig = McpServerConfig | Record<string, unknown>;
+export type McpServerStatusConfig = McpServerConfig | McpClaudeAIProxyServerConfig;
 
 export interface McpServerStatus {
   name: string;

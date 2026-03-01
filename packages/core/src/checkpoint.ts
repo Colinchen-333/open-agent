@@ -8,6 +8,11 @@ interface CheckpointEntry {
   timestamp: number;
 }
 
+export interface RewindTarget {
+  filePath: string;
+  originalContent: string | null;
+}
+
 /**
  * FileCheckpoint tracks file states before Write/Edit operations,
  * enabling rewind to any previous tool_use checkpoint.
@@ -101,6 +106,26 @@ export class FileCheckpoint {
       toolUseId: e.toolUseId,
       filePath: e.filePath,
       timestamp: e.timestamp,
+    }));
+  }
+
+  /**
+   * Return the per-file target state when rewinding from a given toolUseId.
+   * If the checkpoint is missing, returns null.
+   */
+  getRewindTargets(toolUseId: string): RewindTarget[] | null {
+    const idx = this.entries.findIndex(e => e.toolUseId === toolUseId);
+    if (idx === -1) return null;
+    const targets = new Map<string, string | null>();
+    for (const entry of this.entries.slice(idx)) {
+      // The earliest checkpoint in the rewind slice determines the final file state.
+      if (!targets.has(entry.filePath)) {
+        targets.set(entry.filePath, entry.originalContent);
+      }
+    }
+    return [...targets.entries()].map(([filePath, originalContent]) => ({
+      filePath,
+      originalContent,
     }));
   }
 }
