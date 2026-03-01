@@ -234,8 +234,8 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   initializationResult(): Promise<InitializationResult>;
   /**
    * Abort the current task.  For a single `query()` call this is equivalent to
-   * `interrupt()`.  The optional `taskId` parameter is accepted for API
-   * symmetry with multi-task environments and is currently ignored.
+   * `interrupt()`.  The `taskId` parameter is accepted for API symmetry with
+   * multi-task environments and is currently ignored.
    */
   stopTask(taskId: string): Promise<void>;
   /** Abort and clean up – equivalent to calling `interrupt()` without awaiting. */

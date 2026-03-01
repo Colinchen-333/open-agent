@@ -60,6 +60,52 @@ describe('query().supportedAgents()', () => {
     expect(typeof agents[0].name).toBe('string');
     q.close();
   });
+
+  it('includes canonical built-in agent names', async () => {
+    const q = query('test', { model: 'claude-sonnet-4-6' });
+    const agents = await q.supportedAgents();
+    const names = new Set(agents.map((a) => a.name));
+    expect(names.has('Explore')).toBe(true);
+    expect(names.has('Plan')).toBe(true);
+    expect(names.has('Bash')).toBe(true);
+    q.close();
+  });
+
+  it('merges custom agents from options.agents', async () => {
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      agents: {
+        custom_main: {
+          description: 'Custom main-thread agent',
+          prompt: 'Be precise.',
+          model: 'sonnet',
+        },
+      },
+    });
+    const agents = await q.supportedAgents();
+    expect(agents.some((a) => a.name === 'custom_main')).toBe(true);
+    q.close();
+  });
+});
+
+describe('query() agent selection', () => {
+  it('throws when options.agent does not exist', () => {
+    expect(() =>
+      query('test', {
+        model: 'claude-sonnet-4-6',
+        agent: 'non-existent-agent',
+      }),
+    ).toThrow(/not found/i);
+  });
+
+  it('accepts built-in agent names case-insensitively', () => {
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      agent: 'explore',
+    });
+    expect(q).toBeDefined();
+    q.close();
+  });
 });
 
 // ---------------------------------------------------------------------------

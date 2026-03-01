@@ -448,4 +448,13 @@ describe('QueryOptions unsupported official placeholders', () => {
       } as QueryOptions),
     ).toThrow(/not supported yet/i);
   });
+
+  it('throws for unsupported promptSuggestions option to avoid silent no-op', () => {
+    expect(() =>
+      query('test', {
+        model: 'claude-sonnet-4-6',
+        promptSuggestions: true,
+      } as QueryOptions),
+    ).toThrow(/not supported yet/i);
+  });
 });

@@ -168,6 +168,88 @@ describe('query() MCP status shape', () => {
     expect(disabled[0].status).toBe('disabled');
     q.close();
   });
+
+  it('normalizes stdio config without explicit type in mcpServerStatus', async () => {
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      mcpServers: {
+        bad_stdio: {
+          command: '__definitely_missing_mcp_binary__',
+          args: ['--version'],
+        } as any,
+      },
+    });
+
+    await q.initializationResult();
+    const status = await q.mcpServerStatus();
+    expect(status).toHaveLength(1);
+    expect((status[0] as any).config?.type).toBe('stdio');
+    expect((status[0] as any).config?.command).toBe('__definitely_missing_mcp_binary__');
+    q.close();
+  });
+
+  it('returns defensive copies from mcpServerStatus()', async () => {
+    const server = createSdkMcpServer({
+      name: 'copy-test',
+      tools: [
+        tool(
+          'echo_copy',
+          'Echo copy test',
+          { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+          async ({ text }: { text: string }) => text,
+        ) as any,
+      ],
+    });
+
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      mcpServers: {
+        copy_test: server as any,
+      },
+    });
+
+    await q.initializationResult();
+    const first = await q.mcpServerStatus();
+    (first[0] as any).config.name = 'mutated';
+    if (first[0].tools?.[0]) {
+      (first[0].tools?.[0] as any).name = 'mutated_tool';
+    }
+    const second = await q.mcpServerStatus();
+    expect((second[0] as any).config?.name).toBe('copy-test');
+    expect(second[0].tools?.[0]?.name).toBe('echo_copy');
+    q.close();
+  });
+
+  it('reconnectMcpServer throws when reconnect result is not connected', async () => {
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      mcpServers: {
+        bad_stdio: {
+          command: '__definitely_missing_mcp_binary__',
+        } as any,
+      },
+    });
+
+    await q.initializationResult();
+    await expect(q.reconnectMcpServer('bad_stdio')).rejects.toThrow(/failed to reconnect/i);
+    q.close();
+  });
+
+  it('toggleMcpServer throws when enabling back fails', async () => {
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      mcpServers: {
+        bad_stdio: {
+          command: '__definitely_missing_mcp_binary__',
+        } as any,
+      },
+    });
+
+    await q.initializationResult();
+    await q.toggleMcpServer('bad_stdio', false);
+    await expect(q.toggleMcpServer('bad_stdio', true)).rejects.toThrow(/failed to enable/i);
+    q.close();
+  });
 });
 
 // ---------------------------------------------------------------------------

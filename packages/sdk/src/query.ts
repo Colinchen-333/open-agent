@@ -8,15 +8,17 @@ import type {
   SlashCommand,
   AccountInfo,
   McpServerStatusConfig,
+  AgentDefinition,
 } from '@open-agent/core';
 import { ConversationLoop, SessionManager, buildSystemPrompt, ConfigLoader, AutoMemory, FileCheckpoint } from '@open-agent/core';
+import { AgentLoader } from '@open-agent/agents';
 import { createDefaultToolRegistry } from '@open-agent/tools';
 import { autoDetectProvider, createProvider, calculateCost } from '@open-agent/providers';
 import type { Message } from '@open-agent/providers';
 import { PermissionEngine } from '@open-agent/permissions';
 import { HookExecutor } from '@open-agent/hooks';
 import { McpManager } from '@open-agent/mcp';
-import type { QueryOptions, Query, RewindFilesResult } from './types.js';
+import type { QueryOptions, Query, RewindFilesResult, AgentInfo } from './types.js';
 
 // --------------------------------------------------------------------------
 // query() – V1 streaming API
@@ -79,6 +81,11 @@ export function query(
     ? randomUUID()
     : (options.sessionId ?? effectiveResumeSessionId ?? randomUUID());
   const shouldPersist = options.persistSession !== false;
+  const availableAgents = loadAvailableAgents(cwd, options.agents);
+  const selectedAgent = resolveSelectedAgent(options.agent, availableAgents);
+  const supportedAgentInfos = buildAgentInfoList(availableAgents);
+  const selectedAgentModel = resolveAgentModel(selectedAgent?.model);
+  const requestedModelHint = options.model ?? selectedAgentModel;
 
   // Queue for best-effort streamInput support in async-iterable prompt mode.
   const queuedInputs: SDKUserMessage[] = [];
@@ -178,7 +185,7 @@ export function query(
     provider = options.provider
       ? createProvider({ provider: options.provider, apiKey: options.apiKey, baseURL: options.baseUrl })
       : (() => {
-          const providerName = guessProviderFromModel(options.model);
+          const providerName = guessProviderFromModel(requestedModelHint);
           return providerName
             ? createProvider({ provider: providerName, apiKey: options.apiKey, baseURL: options.baseUrl })
             : autoDetectProvider();
@@ -200,6 +207,22 @@ export function query(
   // Tool registry — use public unregister() API, never touch internals.
   // ------------------------------------------------------------------
   const toolRegistry = createDefaultToolRegistry(cwd);
+
+  // Apply selected agent tool policy first, then caller-level tool policies.
+  if (selectedAgent?.tools && selectedAgent.tools.length > 0) {
+    const allowed = new Set(selectedAgent.tools);
+    for (const tool of toolRegistry.list()) {
+      if (!allowed.has(tool.name)) {
+        toolRegistry.unregister(tool.name);
+      }
+    }
+  }
+
+  if (selectedAgent?.disallowedTools) {
+    for (const name of selectedAgent.disallowedTools) {
+      toolRegistry.unregister(name);
+    }
+  }
 
   // Apply `tools` baseline first (official semantics): explicit list limits the
   // available set before allowedTools/disallowedTools are layered on top.
@@ -243,6 +266,11 @@ export function query(
       toolRegistry.unregister(name);
     }
   }
+
+  // Base non-MCP tool set after all static filtering. Used to restore any
+  // built-in tool shadowed by an MCP tool when that MCP tool disappears.
+  const baseTools = new Map(toolRegistry.list().map((t) => [t.name, t]));
+  const registeredMcpToolNames = new Set<string>();
 
   // ------------------------------------------------------------------
   // Hooks — wire from QueryOptions
@@ -289,22 +317,43 @@ export function query(
   // MCP servers — connect and discover tools
   // ------------------------------------------------------------------
   let mcpManager: McpManager | undefined;
+  const syncMcpToolsIntoRegistry = () => {
+    if (!mcpManager) return;
+    const nextMcpTools = mcpManager.getAllTools();
+    const nextMcpNames = new Set(nextMcpTools.map((tool) => tool.name));
+
+    for (const staleName of registeredMcpToolNames) {
+      if (nextMcpNames.has(staleName)) continue;
+      const baseTool = baseTools.get(staleName);
+      if (baseTool) {
+        toolRegistry.register(baseTool);
+      } else {
+        toolRegistry.unregister(staleName);
+      }
+    }
+
+    for (const mcpTool of nextMcpTools) {
+      toolRegistry.register({
+        name: mcpTool.name,
+        description: mcpTool.description ?? '',
+        inputSchema: mcpTool.inputSchema,
+        execute: (input: Record<string, unknown>) =>
+          mcpManager!.callTool(mcpTool.serverName, mcpTool.name, input),
+      });
+    }
+
+    registeredMcpToolNames.clear();
+    for (const name of nextMcpNames) {
+      registeredMcpToolNames.add(name);
+    }
+  };
   // Stored as a promise so the async work completes inside the generator
   // without blocking the synchronous query() call.
   let mcpReadyPromise: Promise<void> | undefined;
   if (options.mcpServers && Object.keys(options.mcpServers).length > 0) {
     mcpManager = new McpManager();
     mcpReadyPromise = mcpManager.setServers(options.mcpServers).then(() => {
-      // Register each MCP tool as a ToolDefinition in the registry.
-      for (const mcpTool of mcpManager!.getAllTools()) {
-        toolRegistry.register({
-          name: mcpTool.name,
-          description: mcpTool.description ?? '',
-          inputSchema: mcpTool.inputSchema,
-          execute: (input: Record<string, unknown>) =>
-            mcpManager!.callTool(mcpTool.serverName, mcpTool.name, input),
-        });
-      }
+      syncMcpToolsIntoRegistry();
     });
   }
 
@@ -314,7 +363,7 @@ export function query(
   // Model resolution
   // ------------------------------------------------------------------
   const model =
-    options.model ??
+    requestedModelHint ??
     (provider.name === 'anthropic' ? 'claude-sonnet-4-6' : 'gpt-4o');
   const sessionMgr = shouldPersist ? new SessionManager() : null;
   if (sessionMgr) {
@@ -328,7 +377,7 @@ export function query(
   // ------------------------------------------------------------------
   // Permission engine — wire from QueryOptions
   // ------------------------------------------------------------------
-  const requestedPermissionMode = options.permissionMode ?? 'default';
+  const requestedPermissionMode = options.permissionMode ?? selectedAgent?.mode ?? 'default';
   if (
     requestedPermissionMode === 'bypassPermissions' &&
     options.allowDangerouslySkipPermissions !== true
@@ -375,6 +424,7 @@ export function query(
             suggestions: undefined,
             decisionReason: baselineDecision.reason,
             toolUseID: request.toolUseId ?? randomUUID(),
+            agentID: options.agent,
           },
         );
         if (result && typeof result === 'object' && 'behavior' in result) {
@@ -421,6 +471,9 @@ export function query(
   let systemPrompt: string;
   if (typeof options.systemPrompt === 'string') {
     systemPrompt = options.systemPrompt;
+    if (selectedAgent?.prompt) {
+      systemPrompt += '\n\n' + selectedAgent.prompt;
+    }
   } else {
     // Build the full system prompt (matching CLI behavior): includes tool
     // descriptions, safety guidelines, AGENT.md, auto-memory, etc.
@@ -464,6 +517,10 @@ export function query(
       memoryDir: memory.getDir(),
       memoryContent: memoryContent ?? undefined,
     });
+
+    if (selectedAgent?.prompt) {
+      systemPrompt += '\n\n' + selectedAgent.prompt;
+    }
 
     if (options.systemPrompt?.type === 'preset' && options.systemPrompt.append) {
       systemPrompt += '\n\n' + options.systemPrompt.append;
@@ -535,7 +592,7 @@ export function query(
     tools: new Map(toolRegistry.list().map((t) => [t.name, t])),
     model,
     systemPrompt,
-    maxTurns: options.maxTurns,
+    maxTurns: options.maxTurns ?? selectedAgent?.maxTurns,
     thinking: options.thinking ?? (options.maxThinkingTokens ? { type: 'enabled', budgetTokens: options.maxThinkingTokens } : { type: 'adaptive' }),
     effort: options.effort,
     cwd,
@@ -550,6 +607,10 @@ export function query(
     responseFormat: options.outputFormat ? { type: options.outputFormat.type, schema: options.outputFormat.schema } : undefined,
   });
 
+  const syncLoopToolsFromRegistry = () => {
+    loop.setTools(new Map(toolRegistry.list().map((t) => [t.name, t])));
+  };
+
   // ------------------------------------------------------------------
   // Core generator – iterates over all SDKMessages
   // ------------------------------------------------------------------
@@ -558,10 +619,7 @@ export function query(
     // before the first LLM call. This runs once when iteration starts.
     if (mcpReadyPromise) {
       await mcpReadyPromise;
-      // Push MCP tools into the live loop tool map.
-      for (const t of toolRegistry.list()) {
-        loop.addTool(t);
-      }
+      syncLoopToolsFromRegistry();
     }
 
     try {
@@ -807,31 +865,7 @@ export function query(
 
   queryObj.supportedCommands = async () => getDefaultSlashCommands();
 
-  queryObj.supportedAgents = async () => {
-    const builtIns = [
-      { name: 'explore', description: 'Read-only repo exploration agent' },
-      { name: 'plan', description: 'Planning-focused read-only agent' },
-      { name: 'bash', description: 'Shell-focused execution agent' },
-      { name: 'open-agent-guide', description: 'Project guidance and docs agent' },
-      { name: 'statusline-setup', description: 'Statusline configuration helper' },
-      { name: 'code-writer', description: 'Code authoring agent' },
-      { name: 'general-purpose', description: 'General-purpose coding agent' },
-      { name: 'architecture-logic-reviewer', description: 'Architecture and logic review agent' },
-    ];
-    const custom = options.agents
-      ? Object.entries(options.agents).map(([name, def]) => ({
-          name,
-          description: def?.description ?? '',
-          ...(def?.model ? { model: String(def.model) } : {}),
-        }))
-      : [];
-    const merged = [...builtIns, ...custom];
-    const deduped = new Map<string, { name: string; description: string; model?: string }>();
-    for (const agent of merged) {
-      if (!deduped.has(agent.name)) deduped.set(agent.name, agent);
-    }
-    return [...deduped.values()];
-  };
+  queryObj.supportedAgents = async () => supportedAgentInfos.map((agent) => ({ ...agent }));
 
   queryObj.supportedModels = async () => provider.listModels();
 
@@ -840,13 +874,13 @@ export function query(
     return mcpManager.getStatus().map((conn) => ({
       name: conn.name,
       status: mapMcpStatus(conn.status),
-      ...(conn.serverInfo ? { serverInfo: conn.serverInfo } : {}),
+      ...(conn.serverInfo ? { serverInfo: { ...conn.serverInfo } } : {}),
       ...(conn.error ? { error: conn.error } : {}),
       config: sanitizeMcpStatusConfig(conn.config),
       tools: conn.tools.map((t) => ({
         name: t.name,
         ...(t.description ? { description: t.description } : {}),
-        ...(t.annotations ? { annotations: t.annotations } : {}),
+        ...(t.annotations ? { annotations: { ...t.annotations } } : {}),
       })),
     }));
   };
@@ -905,28 +939,16 @@ export function query(
     if (!mcpManager) {
       throw new Error('No MCP manager configured for this query. Pass mcpServers in QueryOptions.');
     }
-    // Remember old tools from this server before reconnecting so we can clean them up.
-    const oldTools = mcpManager.getAllTools()
-      .filter(t => t.serverName === serverName)
-      .map(t => t.name);
     await mcpManager.reconnect(serverName);
-    // Remove stale tools from this server before re-registering new ones.
-    for (const name of oldTools) {
-      toolRegistry.unregister(name);
+    syncMcpToolsIntoRegistry();
+    syncLoopToolsFromRegistry();
+    const status = mcpManager.getStatus().find((conn) => conn.name === serverName);
+    if (!status) {
+      throw new Error(`MCP server '${serverName}' not found after reconnect.`);
     }
-    // Re-register updated tools from the reconnected server into the live loop.
-    for (const mcpTool of mcpManager.getAllTools()) {
-      if (mcpTool.serverName === serverName) {
-        const toolDef = {
-          name: mcpTool.name,
-          description: mcpTool.description ?? '',
-          inputSchema: mcpTool.inputSchema,
-          execute: (input: Record<string, unknown>) =>
-            mcpManager!.callTool(mcpTool.serverName, mcpTool.name, input),
-        };
-        toolRegistry.register(toolDef);
-        loop.addTool(toolRegistry.get(mcpTool.name)!);
-      }
+    if (status.status !== 'connected') {
+      const reason = status.error ?? status.status;
+      throw new Error(`Failed to reconnect MCP server '${serverName}': ${reason}`);
     }
   };
 
@@ -935,6 +957,18 @@ export function query(
       throw new Error('No MCP manager configured for this query. Pass mcpServers in QueryOptions.');
     }
     await mcpManager.toggle(serverName, enabled);
+    syncMcpToolsIntoRegistry();
+    syncLoopToolsFromRegistry();
+    if (enabled) {
+      const status = mcpManager.getStatus().find((conn) => conn.name === serverName);
+      if (!status) {
+        throw new Error(`MCP server '${serverName}' not found after toggle.`);
+      }
+      if (status.status !== 'connected') {
+        const reason = status.error ?? status.status;
+        throw new Error(`Failed to enable MCP server '${serverName}': ${reason}`);
+      }
+    }
   };
 
   queryObj.setMcpServers = async (servers) => {
@@ -943,18 +977,8 @@ export function query(
       mcpManager = new McpManager();
     }
     const result = await mcpManager.setServers(servers);
-    // Re-register all MCP tools into the tool registry and live loop.
-    for (const mcpTool of mcpManager.getAllTools()) {
-      const toolDef = {
-        name: mcpTool.name,
-        description: mcpTool.description ?? '',
-        inputSchema: mcpTool.inputSchema,
-        execute: (input: Record<string, unknown>) =>
-          mcpManager!.callTool(mcpTool.serverName, mcpTool.name, input),
-      };
-      toolRegistry.register(toolDef);
-      loop.addTool(toolRegistry.get(mcpTool.name)!);
-    }
+    syncMcpToolsIntoRegistry();
+    syncLoopToolsFromRegistry();
     return result;
   };
 
@@ -1044,6 +1068,66 @@ export function query(
 // Helpers
 // --------------------------------------------------------------------------
 
+function loadAvailableAgents(
+  cwd: string,
+  overrides?: Record<string, AgentDefinition>,
+): Map<string, AgentDefinition> {
+  const loader = new AgentLoader();
+  loader.loadDefaults(cwd);
+  if (overrides) {
+    for (const [name, definition] of Object.entries(overrides)) {
+      loader.register(name, definition);
+    }
+  }
+  return new Map(loader.list());
+}
+
+function resolveSelectedAgent(
+  requested: string | undefined,
+  availableAgents: Map<string, AgentDefinition>,
+): AgentDefinition | undefined {
+  if (!requested) return undefined;
+  const exact = availableAgents.get(requested);
+  if (exact) return exact;
+
+  const lowered = requested.toLowerCase();
+  for (const [name, definition] of availableAgents.entries()) {
+    if (name.toLowerCase() === lowered) {
+      return definition;
+    }
+  }
+  throw new Error(`Agent "${requested}" not found.`);
+}
+
+function buildAgentInfoList(availableAgents: Map<string, AgentDefinition>): AgentInfo[] {
+  return [...availableAgents.entries()].map(([name, definition]) => {
+    const model = resolveAgentModel(definition.model);
+    return {
+      name,
+      description: definition?.description ?? '',
+      ...(model ? { model } : {}),
+    };
+  });
+}
+
+function resolveAgentModel(
+  model: AgentDefinition['model'] | undefined,
+): string | undefined {
+  switch (model) {
+    case undefined:
+    case 'inherit':
+      return undefined;
+    case 'sonnet':
+      return 'claude-sonnet-4-6';
+    case 'opus':
+      return 'claude-opus-4-6';
+    case 'haiku':
+      return 'claude-haiku-4-5-20251001';
+    default:
+      return String(model);
+  }
+}
+
 /**
  * Extract the plain-text content from an SDKUserMessage.
  * Handles both string and Anthropic-style content blocks.
@@ -1102,19 +1186,31 @@ function mapMcpStatus(
 function sanitizeMcpStatusConfig(config: unknown): McpServerStatusConfig | undefined {
   if (!config || typeof config !== 'object') return undefined;
   const c = config as Record<string, unknown>;
-  if (c.type === 'stdio') {
+  if ((c.type === undefined || c.type === 'stdio') && typeof c.command === 'string') {
+    const env = c.env && typeof c.env === 'object'
+      ? Object.fromEntries(
+          Object.entries(c.env as Record<string, unknown>)
+            .filter(([k, v]) => typeof k === 'string' && typeof v === 'string'),
+        )
+      : undefined;
     return {
       type: 'stdio',
       command: c.command,
       ...(Array.isArray(c.args) ? { args: c.args } : {}),
-      ...(c.env && typeof c.env === 'object' ? { env: c.env } : {}),
+      ...(env ? { env } : {}),
     } as McpServerStatusConfig;
   }
   if (c.type === 'sse' || c.type === 'http') {
+    const headers = c.headers && typeof c.headers === 'object'
+      ? Object.fromEntries(
+          Object.entries(c.headers as Record<string, unknown>)
+            .filter(([k, v]) => typeof k === 'string' && typeof v === 'string'),
+        )
+      : undefined;
     return {
       type: c.type,
       url: c.url,
-      ...(c.headers && typeof c.headers === 'object' ? { headers: c.headers } : {}),
+      ...(headers ? { headers } : {}),
     } as McpServerStatusConfig;
   }
   if (c.type === 'sdk') {
@@ -1177,6 +1273,7 @@ function assertUnsupportedOptions(options: QueryOptions): void {
     'sandbox',
     'debugFile',
     'spawnClaudeCodeProcess',
+    'promptSuggestions',
   ];
   for (const key of unsupportedKeys) {
     if ((options as Record<string, unknown>)[key] !== undefined) {

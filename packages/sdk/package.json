@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@open-agent/core": "workspace:*",
+    "@open-agent/agents": "workspace:*",
     "@open-agent/tools": "workspace:*",
     "@open-agent/providers": "workspace:*",
     "@open-agent/permissions": "workspace:*",
