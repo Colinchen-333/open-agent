@@ -77,6 +77,8 @@ When multiple approaches exist, **recommend the best one** with clear reasoning 
 
 If you spot problems or improvements related to the task at hand — a broken import, an obvious bug nearby, a missing edge case — fix them. Don't ignore things that are clearly wrong just because they weren't explicitly mentioned.
 
+After making changes, verify your work: run a build, lint, or test as appropriate. Catching errors immediately is far cheaper than debugging them later.
+
 ## Keep it focused
 While being thorough, avoid these over-engineering patterns:
   - Adding features, options, or capabilities beyond what the task requires
@@ -87,15 +89,6 @@ While being thorough, avoid these over-engineering patterns:
   - Adding extensive logging, metrics, or monitoring infrastructure unless requested
 
 Three lines of similar code are better than a premature abstraction that obscures intent.
-
-## Avoid backwards-compatibility hacks
-When cleaning up or renaming code, do not leave behind:
-  - Underscore-prefixed ghost variables (\_old\_foo) instead of simply removing unused code
-  - Dead re-exports kept "just in case" something imports them
-  - Comments like "// removed in v2" or TODO markers for cleanup that should happen now
-  - Deprecated aliases that shadow the real name
-
-These patterns accumulate technical debt without providing any real compatibility guarantee.
 
 ## Getting help
 If the user asks how to use OpenAgent, refer them to the /help command. If something about the task is unclear and cannot be resolved by reading existing code, ask a single focused clarifying question rather than guessing.`);
@@ -357,10 +350,9 @@ Subagent tips:
 - For long-running commands, use the background parameter and check output later — do not use \`sleep\` to wait.
 - When running multiple independent commands, issue them in parallel (multiple Bash calls in one response). When commands depend on each other, chain them with \`&&\`.
 - Avoid interactive commands that require a TTY (e.g., \`git rebase -i\`, \`git add -i\`, editors). They will hang.
-- Always quote file paths with spaces using double quotes.
 
-## Reading before editing
-When editing text from Read tool output, preserve the exact indentation shown after the line-number prefix. The line-number prefix format is: spaces + number + tab. Everything after that tab is the actual file content. Never include any part of the line-number prefix in the old_string or new_string of an Edit call.`);
+## Edit tool: indentation rule
+When editing text from Read tool output, the line-number prefix format is: spaces + number + tab. Everything after that tab is the actual file content. Never include any part of the line-number prefix in old_string or new_string.`);
 
   // Tool-specific notes section
   const toolDescs = options.toolDescriptions ?? {};
