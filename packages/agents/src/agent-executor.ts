@@ -6,6 +6,7 @@ import type { AgentDefinition } from '@open-agent/core';
 import { execSync } from '@open-agent/core';
 import type { LLMProvider } from '@open-agent/providers';
 import type { ToolDefinition } from '@open-agent/tools';
+import type { SubagentStreamEvent } from './agent-runner.js';
 
 export type AgentState = 'spawning' | 'running' | 'idle' | 'completed' | 'failed' | 'shutdown';
 
@@ -49,6 +50,8 @@ export interface ExecuteOptions {
   worktreePath?: string;
   /** Callback to clean up the worktree after background agent completes */
   onWorktreeCleanup?: (worktreePath: string, hasChanges: boolean) => Promise<void>;
+  /** Callback to stream tool events to the parent for real-time visibility. */
+  onEvent?: (event: SubagentStreamEvent) => void;
 }
 
 /**
@@ -142,6 +145,7 @@ export class AgentExecutor {
         onMessage: (msg) => {
           try { appendFileSync(transcriptPath, JSON.stringify(msg) + '\n'); } catch { /* non-fatal */ }
         },
+        onEvent: options.onEvent,
       });
 
       const agentResult = await runner.run(options.prompt);

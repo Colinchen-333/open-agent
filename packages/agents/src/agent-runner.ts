@@ -4,6 +4,17 @@ import type { LLMProvider } from '@open-agent/providers';
 import type { ToolDefinition } from '@open-agent/tools';
 import { randomUUID } from 'crypto';
 
+/** Lightweight event emitted by subagent for parent visibility. */
+export interface SubagentStreamEvent {
+  type: 'tool_start' | 'tool_result';
+  toolName?: string;
+  toolUseId?: string;
+  input?: Record<string, unknown>;
+  ok?: boolean;
+  output?: string;
+  error?: string;
+}
+
 export interface AgentRunnerOptions {
   definition: AgentDefinition;
   provider: LLMProvider;
@@ -19,6 +30,8 @@ export interface AgentRunnerOptions {
   worktreePath?: string;
   /** Callback to persist each message to a transcript file */
   onMessage?: (message: unknown) => void;
+  /** Callback to stream tool events to the parent agent for real-time visibility. */
+  onEvent?: (event: SubagentStreamEvent) => void;
 }
 
 export interface AgentUsage {
@@ -113,6 +126,36 @@ export class AgentRunner {
       if (this.options.onMessage) {
         this.options.onMessage(msg);
       }
+
+      // Emit tool events for parent visibility
+      if (this.options.onEvent) {
+        if (msg.type === 'assistant') {
+          const content = (msg as any).message?.content;
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (block.type === 'tool_use') {
+                this.options.onEvent({
+                  type: 'tool_start',
+                  toolName: block.name,
+                  toolUseId: block.id,
+                  input: typeof block.input === 'object' && block.input ? block.input : undefined,
+                });
+              }
+            }
+          }
+        }
+        if (msg.type === 'tool_result') {
+          this.options.onEvent({
+            type: 'tool_result',
+            toolName: (msg as any).tool_name,
+            toolUseId: (msg as any).tool_use_id,
+            ok: !(msg as any).is_error,
+            output: typeof (msg as any).result === 'string' ? (msg as any).result : undefined,
+            error: (msg as any).is_error ? (msg as any).result : undefined,
+          });
+        }
+      }
+
       if (msg.type === 'tool_result') {
         toolUseCount++;
       }

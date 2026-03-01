@@ -191,6 +191,12 @@ export interface QueryOptions {
   stderr?: unknown;
   stdin?: unknown;
   stdout?: unknown;
+  /**
+   * Callback invoked when a subagent emits tool events.
+   * `parentToolCallId` is the tool_use_id of the Task tool that spawned the subagent.
+   * Used by desktop adapter to surface subagent progress in real-time.
+   */
+  onSubagentEvent?: (parentToolCallId: string, event: import('@open-agent/agents').SubagentStreamEvent) => void;
 }
 
 // --------------------------------------------------------------------------

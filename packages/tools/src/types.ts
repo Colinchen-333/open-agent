@@ -89,6 +89,8 @@ export interface ToolContext {
   cwd: string;
   abortSignal?: AbortSignal;
   sessionId: string;
+  /** The tool_use_id of the current tool call (set by ConversationLoop). */
+  toolUseId?: string;
   /**
    * Tracks which files have been read in this conversation.
    * Edit/Write tools use this to enforce "read before edit" safety.

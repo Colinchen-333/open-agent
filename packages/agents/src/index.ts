@@ -3,7 +3,7 @@
 
 export * from './types';
 export { AgentLoader } from './agent-loader';
-export { AgentRunner, type AgentRunnerOptions, type AgentResult, type AgentUsage } from './agent-runner';
+export { AgentRunner, type AgentRunnerOptions, type AgentResult, type AgentUsage, type SubagentStreamEvent } from './agent-runner';
 export { TeamManager } from './team-manager';
 export { TaskManager } from './task-manager';
 export { AgentExecutor } from './agent-executor';

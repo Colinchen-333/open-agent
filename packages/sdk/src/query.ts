@@ -285,6 +285,7 @@ export function query(
       runSubagent: async ({
         prompt: agentPrompt, subagentType, name, model: agentModel,
         cwd: agentCwd, maxTurns, mode, isolation, runInBackground, resume, teamName,
+        parentToolUseId,
       }) => {
         if (!sdkAgentExecutor) {
           throw new Error('Subagent executor not initialized.');
@@ -324,6 +325,12 @@ export function query(
           ...(worktreePath ? {
             onWorktreeCleanup: async (wtPath: string, hasChanges: boolean) => {
               if (!hasChanges) await cleanupWorktree(wtPath);
+            },
+          } : {}),
+          // Forward subagent tool events to the parent for real-time visibility
+          ...(parentToolUseId && options.onSubagentEvent ? {
+            onEvent: (event: import('@open-agent/agents').SubagentStreamEvent) => {
+              options.onSubagentEvent!(parentToolUseId, event);
             },
           } : {}),
         };

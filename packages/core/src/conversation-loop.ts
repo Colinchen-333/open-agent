@@ -897,6 +897,7 @@ export class ConversationLoop {
             cwd: this.options.cwd,
             abortSignal: this.options.abortSignal,
             sessionId: this.options.sessionId,
+            toolUseId: toolUse.id,
             fileReadTracker: this.fileReadTracker,
           };
 

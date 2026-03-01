@@ -14,6 +14,8 @@ export interface TaskToolDeps {
     runInBackground?: boolean;
     resume?: string;
     teamName?: string;
+    /** The tool_use_id of the Task tool call — used as parentToolUseId for subagent events. */
+    parentToolUseId?: string;
   }) => Promise<string>;
 
   // Background agent management
@@ -112,6 +114,7 @@ export function createTaskTool(deps: TaskToolDeps): ToolDefinition {
           runInBackground: run_in_background,
           resume,
           teamName: team_name,
+          parentToolUseId: ctx.toolUseId,
         });
       } catch (error: unknown) {
         const msg = error instanceof Error ? error.message : String(error);
