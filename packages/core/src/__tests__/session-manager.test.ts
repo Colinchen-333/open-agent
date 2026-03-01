@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
-import { mkdtempSync, rmSync, appendFileSync } from 'fs';
+import { mkdtempSync, rmSync, appendFileSync, mkdirSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { SessionManager } from '../session-manager.js';
@@ -79,6 +79,57 @@ describe('SessionManager', () => {
     expect(fresh).toBeNull();
   });
 
+  it('isolates sessions for CWDs that collide under legacy safe-path encoding', () => {
+    const cwdA = '/tmp/a-b/c';
+    const cwdB = '/tmp/a/b-c';
+    const a = sm.createSession(cwdA, 'model-a');
+    const b = sm.createSession(cwdB, 'model-b');
+
+    const idsA = sm.listSessions(cwdA).map((s) => s.id);
+    const idsB = sm.listSessions(cwdB).map((s) => s.id);
+
+    expect(idsA).toContain(a.id);
+    expect(idsA).not.toContain(b.id);
+    expect(idsB).toContain(b.id);
+    expect(idsB).not.toContain(a.id);
+  });
+
+  it('reads and appends legacy safe-path session files for backward compatibility', () => {
+    const legacyCwd = '/tmp/legacy-path-project';
+    const legacySessionId = 'legacy-session-id-1';
+    const safePath = legacyCwd.replace(/\//g, '-').replace(/^-/, '');
+    const legacyDir = join(tmpBase, safePath);
+    mkdirSync(legacyDir, { recursive: true });
+
+    writeFileSync(
+      join(legacyDir, `${legacySessionId}.meta.json`),
+      JSON.stringify({
+        id: legacySessionId,
+        cwd: legacyCwd,
+        model: 'legacy-model',
+        createdAt: new Date().toISOString(),
+        lastActiveAt: new Date().toISOString(),
+      }),
+      'utf-8',
+    );
+    writeFileSync(
+      join(legacyDir, `${legacySessionId}.jsonl`),
+      JSON.stringify({ type: 'user', message: { role: 'user', content: 'legacy hello' } }) + '\n',
+      'utf-8',
+    );
+
+    const session = sm.getSession(legacyCwd, legacySessionId);
+    expect(session).not.toBeNull();
+    expect(session!.id).toBe(legacySessionId);
+
+    sm.appendToTranscript(legacyCwd, legacySessionId, {
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'legacy hi' }] },
+    });
+    const transcript = sm.readTranscript(legacyCwd, legacySessionId);
+    expect(transcript).toHaveLength(2);
+  });
+
   it('appendToTranscript and readTranscript persist and restore messages', () => {
     const session = sm.createSession(cwd, 'test-model');
 
@@ -107,8 +158,7 @@ describe('SessionManager', () => {
   it('readTranscript skips malformed lines and keeps valid entries', () => {
     const session = sm.createSession(cwd, 'corrupt-transcript-model');
     sm.appendToTranscript(cwd, session.id, { type: 'user', message: { role: 'user', content: 'hello' } });
-    const safePath = cwd.replace(/\//g, '-').replace(/^-/, '');
-    const transcriptPath = join(tmpBase, safePath, `${session.id}.jsonl`);
+    const transcriptPath = join((sm as any).resolveSessionProjectDir(cwd, session.id), `${session.id}.jsonl`);
     appendFileSync(transcriptPath, '{"type":bad json}\n');
     sm.appendToTranscript(cwd, session.id, { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'hi' }] } });
 

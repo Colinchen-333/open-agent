@@ -1,10 +1,11 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import {
   existsSync,
   mkdirSync,
   appendFileSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   writeFileSync,
 } from 'fs';
 import { join } from 'path';
@@ -24,12 +25,13 @@ export interface SessionInfo {
  * Manages agent session metadata and transcripts on disk.
  *
  * Layout under `~/.open-agent/projects/`:
- *   <safe-cwd>/
+ *   <project-key>/
  *     <session-id>.meta.json   — session metadata
  *     <session-id>.jsonl       — newline-delimited JSON transcript
  *
- * The "safe CWD" is the absolute path with every `/` replaced by `-` and any
- * leading `-` stripped, e.g. `/Users/foo/bar` → `Users-foo-bar`.
+ * `<project-key>` uses a hashed cwd key to avoid collisions between paths such
+ * as `/a-b/c` and `/a/b-c`.  Legacy safe-path directories are still read as a
+ * fallback for backwards compatibility.
  */
 export class SessionManager {
   private baseDir: string;
@@ -42,19 +44,78 @@ export class SessionManager {
   // Private helpers
   // ---------------------------------------------------------------------------
 
-  /**
-   * Derive a filesystem-safe directory name from an absolute CWD path and
-   * ensure the directory exists, creating it recursively if needed.
-   */
-  private getProjectDir(cwd: string): string {
-    // Replace every forward-slash with a hyphen, then strip any leading hyphen
-    // that results from a path starting with `/`.
-    const safePath = cwd.replace(/\//g, '-').replace(/^-/, '');
-    const dir = join(this.baseDir, safePath);
-    if (!existsSync(dir)) {
+  private normalizeCwd(cwd: string): string {
+    try {
+      return realpathSync(cwd);
+    } catch {
+      return cwd;
+    }
+  }
+
+  private getLegacyProjectKey(cwd: string): string {
+    return cwd.replace(/\//g, '-').replace(/^-/, '');
+  }
+
+  private getHashedProjectKey(cwd: string): string {
+    const normalized = this.normalizeCwd(cwd);
+    const digest = createHash('sha256').update(normalized).digest('hex');
+    return `v2-${digest.slice(0, 32)}`;
+  }
+
+  private getProjectDirForKey(projectKey: string, ensureExists = false): string {
+    const dir = join(this.baseDir, projectKey);
+    if (ensureExists && !existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
     }
     return dir;
+  }
+
+  private getProjectDir(cwd: string): string {
+    return this.getProjectDirForKey(this.getHashedProjectKey(cwd), true);
+  }
+
+  private getProjectDirsForLookup(cwd: string): string[] {
+    const hashedDir = this.getProjectDirForKey(this.getHashedProjectKey(cwd), false);
+    const legacyDir = this.getProjectDirForKey(this.getLegacyProjectKey(cwd), false);
+    return hashedDir === legacyDir ? [hashedDir] : [hashedDir, legacyDir];
+  }
+
+  private resolveSessionProjectDir(cwd: string, sessionId: string): string {
+    for (const dir of this.getProjectDirsForLookup(cwd)) {
+      if (
+        existsSync(this.metaPath(dir, sessionId)) ||
+        existsSync(this.transcriptPath(dir, sessionId))
+      ) {
+        return dir;
+      }
+    }
+    return this.getProjectDir(cwd);
+  }
+
+  private findMetaPathInCwd(cwd: string, sessionId: string): string | null {
+    for (const dir of this.getProjectDirsForLookup(cwd)) {
+      const path = this.metaPath(dir, sessionId);
+      if (existsSync(path)) return path;
+    }
+    return null;
+  }
+
+  private findTranscriptPathInCwd(cwd: string, sessionId: string): string | null {
+    for (const dir of this.getProjectDirsForLookup(cwd)) {
+      const path = this.transcriptPath(dir, sessionId);
+      if (existsSync(path)) return path;
+    }
+    return null;
+  }
+
+  private readSessionInfoFromCwd(cwd: string, sessionId: string): SessionInfo | null {
+    const path = this.findMetaPathInCwd(cwd, sessionId);
+    if (!path) return null;
+    try {
+      return JSON.parse(readFileSync(path, 'utf-8')) as SessionInfo;
+    } catch {
+      return null;
+    }
   }
 
   private metaPath(projectDir: string, sessionId: string): string {
@@ -119,9 +180,10 @@ export class SessionManager {
    * Silently does nothing if the session metadata file is not found.
    */
   touchSession(cwd: string, sessionId: string): void {
-    const projectDir = this.getProjectDir(cwd);
-    const path = this.metaPath(projectDir, sessionId);
-    if (!existsSync(path)) return;
+    const session = this.getSession(cwd, sessionId);
+    if (!session) return;
+    const path = this.findMetaPathInCwd(session.cwd ?? cwd, sessionId);
+    if (!path) return;
 
     try {
       const info: SessionInfo = JSON.parse(readFileSync(path, 'utf-8'));
@@ -137,7 +199,7 @@ export class SessionManager {
    * transcript as a newline-terminated JSON line.
    */
   appendToTranscript(cwd: string, sessionId: string, message: unknown): void {
-    const projectDir = this.getProjectDir(cwd);
+    const projectDir = this.resolveSessionProjectDir(cwd, sessionId);
     appendFileSync(
       this.transcriptPath(projectDir, sessionId),
       JSON.stringify(message) + '\n',
@@ -149,9 +211,8 @@ export class SessionManager {
    * Returns an empty array if the transcript file does not exist.
    */
   readTranscript(cwd: string, sessionId: string): unknown[] {
-    const projectDir = this.getProjectDir(cwd);
-    const path = this.transcriptPath(projectDir, sessionId);
-    if (!existsSync(path)) return [];
+    const path = this.findTranscriptPathInCwd(cwd, sessionId);
+    if (!path) return [];
 
     const lines = readFileSync(path, 'utf-8')
       .split('\n')
@@ -302,18 +363,28 @@ export class SessionManager {
    * List all sessions for the given CWD, sorted by most-recently-active first.
    */
   listSessions(cwd: string): SessionInfo[] {
-    const projectDir = this.getProjectDir(cwd);
-    if (!existsSync(projectDir)) return [];
+    const merged = new Map<string, SessionInfo>();
 
-    return readdirSync(projectDir)
-      .filter((f) => f.endsWith('.meta.json'))
-      .flatMap((f) => {
+    for (const projectDir of this.getProjectDirsForLookup(cwd)) {
+      if (!existsSync(projectDir)) continue;
+      for (const fileName of readdirSync(projectDir).filter((f) => f.endsWith('.meta.json'))) {
         try {
-          return [JSON.parse(readFileSync(join(projectDir, f), 'utf-8')) as SessionInfo];
+          const info = JSON.parse(readFileSync(join(projectDir, fileName), 'utf-8')) as SessionInfo;
+          const current = merged.get(info.id);
+          if (!current) {
+            merged.set(info.id, info);
+            continue;
+          }
+          if (new Date(info.lastActiveAt).getTime() > new Date(current.lastActiveAt).getTime()) {
+            merged.set(info.id, info);
+          }
         } catch {
-          return [];
+          // Skip malformed metadata files.
         }
-      })
+      }
+    }
+
+    return [...merged.values()]
       .sort(
         (a, b) =>
           new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime(),
@@ -334,7 +405,7 @@ export class SessionManager {
    * checkpoints) alongside the session metadata and transcript files.
    */
   getSessionDir(cwd: string, sessionId: string): string {
-    const dir = join(this.getProjectDir(cwd), sessionId);
+    const dir = join(this.resolveSessionProjectDir(cwd, sessionId), sessionId);
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
     }
@@ -347,28 +418,13 @@ export class SessionManager {
    * the session is not found in the specified CWD's project directory.
    */
   getSession(cwd: string, sessionId: string): SessionInfo | null {
-    const projectDir = this.getProjectDir(cwd);
-    const path = this.metaPath(projectDir, sessionId);
-    if (existsSync(path)) {
-      try {
-        return JSON.parse(readFileSync(path, 'utf-8')) as SessionInfo;
-      } catch {
-        return null;
-      }
-    }
+    const local = this.readSessionInfoFromCwd(cwd, sessionId);
+    if (local) return local;
 
     // Fall back to global index — the session may have been created from a different CWD.
     const originalCwd = this.lookupGlobalIndex(sessionId);
     if (originalCwd && originalCwd !== cwd) {
-      const altProjectDir = this.getProjectDir(originalCwd);
-      const altPath = this.metaPath(altProjectDir, sessionId);
-      if (existsSync(altPath)) {
-        try {
-          return JSON.parse(readFileSync(altPath, 'utf-8')) as SessionInfo;
-        } catch {
-          return null;
-        }
-      }
+      return this.readSessionInfoFromCwd(originalCwd, sessionId);
     }
 
     return null;
