@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'bun:test';
 import { query } from '../query.js';
-import type { QueryOptions } from '../types.js';
+import type { QueryOptions, PermissionUpdate } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Tests for new QueryOptions fields:
@@ -50,6 +50,40 @@ describe('QueryOptions.canUseTool', () => {
   it('accepting an async callback returning structured permission is type-valid', () => {
     const opts: QueryOptions = {
       canUseTool: async (_tool, _input) => ({ behavior: 'allow' }),
+    };
+    expect(typeof opts.canUseTool).toBe('function');
+  });
+
+  it('accepts official PermissionUpdate variants in updatedPermissions', () => {
+    const updates: PermissionUpdate[] = [
+      {
+        type: 'addRules',
+        behavior: 'allow',
+        destination: 'session',
+        rules: [{ toolName: 'Read' }],
+      },
+      {
+        type: 'setMode',
+        mode: 'acceptEdits',
+        destination: 'session',
+      },
+      {
+        type: 'addDirectories',
+        directories: ['/tmp/a', '/tmp/b'],
+        destination: 'session',
+      },
+      {
+        type: 'removeDirectories',
+        directories: ['/tmp/a'],
+        destination: 'session',
+      },
+    ];
+
+    const opts: QueryOptions = {
+      canUseTool: async () => ({
+        behavior: 'allow',
+        updatedPermissions: updates,
+      }),
     };
     expect(typeof opts.canUseTool).toBe('function');
   });

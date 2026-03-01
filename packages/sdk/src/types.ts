@@ -15,12 +15,52 @@ import type {
   PermissionPrompter,
 } from '@open-agent/core';
 
-export type PermissionUpdate = {
-  type: 'addRules' | 'replaceRules' | 'removeRules';
-  rules: Array<{ toolName: string; ruleContent?: string }>;
-  behavior: 'allow' | 'deny' | 'ask';
-  destination?: string;
+export type PermissionRuleValue = {
+  toolName: string;
+  ruleContent?: string;
 };
+
+export type PermissionUpdateDestination =
+  | 'userSettings'
+  | 'projectSettings'
+  | 'localSettings'
+  | 'session'
+  | 'cliArg';
+
+export type PermissionUpdate =
+  | {
+      type: 'addRules';
+      rules: PermissionRuleValue[];
+      behavior: 'allow' | 'deny' | 'ask';
+      destination: PermissionUpdateDestination;
+    }
+  | {
+      type: 'replaceRules';
+      rules: PermissionRuleValue[];
+      behavior: 'allow' | 'deny' | 'ask';
+      destination: PermissionUpdateDestination;
+    }
+  | {
+      type: 'removeRules';
+      rules: PermissionRuleValue[];
+      behavior: 'allow' | 'deny' | 'ask';
+      destination: PermissionUpdateDestination;
+    }
+  | {
+      type: 'setMode';
+      mode: PermissionMode;
+      destination: PermissionUpdateDestination;
+    }
+  | {
+      type: 'addDirectories';
+      directories: string[];
+      destination: PermissionUpdateDestination;
+    }
+  | {
+      type: 'removeDirectories';
+      directories: string[];
+      destination: PermissionUpdateDestination;
+    };
 
 export type PermissionResult =
   | {
