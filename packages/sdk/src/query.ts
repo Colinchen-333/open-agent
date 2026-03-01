@@ -21,6 +21,7 @@ import { HookExecutor } from '@open-agent/hooks';
 import { McpManager } from '@open-agent/mcp';
 import type { QueryOptions, Query, RewindFilesResult, AgentInfo } from './types.js';
 import { applyPermissionUpdates } from './permission-updates.js';
+import { createPermissionPrompterBridge } from './permission-prompter.js';
 
 // --------------------------------------------------------------------------
 // query() – V1 streaming API
@@ -521,9 +522,11 @@ export function query(
     };
   }
 
-  const permissionPrompter = options.permissionPrompter
-    ? { prompt: options.permissionPrompter }
-    : undefined;
+  const permissionPrompter = createPermissionPrompterBridge({
+    permissionPromptToolName: options.permissionPromptToolName,
+    permissionPrompter: options.permissionPrompter,
+    getMcpClient: () => mcpManager,
+  });
 
   // ------------------------------------------------------------------
   // System prompt
