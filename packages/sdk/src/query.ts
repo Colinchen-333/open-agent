@@ -286,6 +286,14 @@ export function query(
       toolRegistry.unregister(name);
     }
   }
+  const isToolAllowedByPolicy = (toolName: string) =>
+    __internal_isToolAllowedByPolicies(toolName, {
+      agentAllowedTools: selectedAgent?.tools,
+      agentDisallowedTools: selectedAgent?.disallowedTools,
+      toolsBaseline: Array.isArray(options.tools) ? options.tools : undefined,
+      allowedTools: options.allowedTools,
+      disallowedTools: options.disallowedTools,
+    });
 
   // Base non-MCP tool set after all static filtering. Used to restore any
   // built-in tool shadowed by an MCP tool when that MCP tool disappears.
@@ -340,10 +348,11 @@ export function query(
   const syncMcpToolsIntoRegistry = () => {
     if (!mcpManager) return;
     const nextMcpTools = mcpManager.getAllTools();
-    const nextMcpNames = new Set(nextMcpTools.map((tool) => tool.name));
+    const discoveredMcpNames = new Set(nextMcpTools.map((tool) => tool.name));
+    const nextRegisteredMcpNames = new Set<string>();
 
     for (const staleName of registeredMcpToolNames) {
-      if (nextMcpNames.has(staleName)) continue;
+      if (discoveredMcpNames.has(staleName) && isToolAllowedByPolicy(staleName)) continue;
       const baseTool = baseTools.get(staleName);
       if (baseTool) {
         toolRegistry.register(baseTool);
@@ -353,6 +362,15 @@ export function query(
     }
 
     for (const mcpTool of nextMcpTools) {
+      if (!isToolAllowedByPolicy(mcpTool.name)) {
+        const baseTool = baseTools.get(mcpTool.name);
+        if (baseTool) {
+          toolRegistry.register(baseTool);
+        } else {
+          toolRegistry.unregister(mcpTool.name);
+        }
+        continue;
+      }
       toolRegistry.register({
         name: mcpTool.name,
         description: mcpTool.description ?? '',
@@ -360,10 +378,11 @@ export function query(
         execute: (input: Record<string, unknown>) =>
           mcpManager!.callTool(mcpTool.serverName, mcpTool.name, input),
       });
+      nextRegisteredMcpNames.add(mcpTool.name);
     }
 
     registeredMcpToolNames.clear();
-    for (const name of nextMcpNames) {
+    for (const name of nextRegisteredMcpNames) {
       registeredMcpToolNames.add(name);
     }
   };
@@ -707,14 +726,13 @@ export function query(
   // Core generator – iterates over all SDKMessages
   // ------------------------------------------------------------------
   async function* generateMessages(): AsyncGenerator<SDKMessage, void> {
-    // Wait for MCP servers to connect and register their tools into the loop
-    // before the first LLM call. This runs once when iteration starts.
-    if (mcpReadyPromise) {
-      await mcpReadyPromise;
-      syncLoopToolsFromRegistry();
-    }
-
     try {
+      // Wait for MCP servers to connect and register their tools into the loop
+      // before the first LLM call. This runs once when iteration starts.
+      if (mcpReadyPromise) {
+        await mcpReadyPromise;
+        syncLoopToolsFromRegistry();
+      }
       if (typeof prompt === 'string') {
         let usedFallback = false;
         // Retry loop — runs once normally; a second time with fallbackModel on model errors.
@@ -808,6 +826,7 @@ export function query(
           if (userMsg === STREAM_DONE) break;
           const text = extractUserMessageText(userMsg);
           if (!text) continue;
+          const preTurnMessages = loop.getMessages();
 
           let modelError: Error | undefined;
           let resultMessage: SDKMessage | undefined;
@@ -867,8 +886,9 @@ export function query(
             if (options.fallbackModel && !multiturnUsedFallback && isModelError(modelError)) {
               multiturnUsedFallback = true;
               loop.setModel(options.fallbackModel);
-              // Retry the same user message with the fallback model.
-              loop.resetMessages();
+              // Retry the same user message with the fallback model while
+              // preserving conversation context accumulated before this turn.
+              loop.resetMessages(preTurnMessages.length > 0 ? preTurnMessages : undefined);
               resultMessage = undefined;
               try {
                 for await (const msg of loop.run(text)) {
@@ -1396,6 +1416,35 @@ function parseSandboxConfig(config: unknown): SandboxConfig | undefined {
 
 function isValidUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+export function __internal_isToolAllowedByPolicies(
+  toolName: string,
+  policy: {
+    agentAllowedTools?: string[];
+    agentDisallowedTools?: string[];
+    toolsBaseline?: string[];
+    allowedTools?: string[];
+    disallowedTools?: string[];
+  },
+): boolean {
+  const denyLists = [policy.agentDisallowedTools, policy.disallowedTools]
+    .filter((list): list is string[] => Array.isArray(list))
+    .flat();
+  if (denyLists.includes(toolName)) return false;
+
+  const allowLists = [
+    policy.agentAllowedTools,
+    policy.toolsBaseline,
+    policy.allowedTools,
+  ].filter((list): list is string[] => Array.isArray(list) && list.length > 0);
+
+  for (const allowList of allowLists) {
+    if (!allowList.includes(toolName)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function readFileMaybe(filePath: string): string | null {

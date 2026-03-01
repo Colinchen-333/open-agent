@@ -3,7 +3,7 @@ import { mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { SessionManager } from '@open-agent/core';
-import { query } from '../query.js';
+import { __internal_isToolAllowedByPolicies, query } from '../query.js';
 import type { QueryOptions, PermissionUpdate } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -639,5 +639,52 @@ describe('QueryOptions unsupported official placeholders', () => {
         }),
       ).toThrow(new RegExp(`Option \"${key}\".*not supported yet`, 'i'));
     }
+  });
+});
+
+describe('__internal_isToolAllowedByPolicies()', () => {
+  it('allows by default when no allow/deny lists are configured', () => {
+    expect(__internal_isToolAllowedByPolicies('Read', {})).toBe(true);
+  });
+
+  it('denies when tool is in any deny list', () => {
+    expect(
+      __internal_isToolAllowedByPolicies('Bash', {
+        disallowedTools: ['Bash'],
+      }),
+    ).toBe(false);
+    expect(
+      __internal_isToolAllowedByPolicies('Write', {
+        agentDisallowedTools: ['Write'],
+      }),
+    ).toBe(false);
+  });
+
+  it('requires tool to satisfy all configured allow lists', () => {
+    expect(
+      __internal_isToolAllowedByPolicies('Read', {
+        agentAllowedTools: ['Read', 'Edit'],
+        toolsBaseline: ['Read', 'Bash'],
+        allowedTools: ['Read'],
+      }),
+    ).toBe(true);
+
+    expect(
+      __internal_isToolAllowedByPolicies('Bash', {
+        agentAllowedTools: ['Read', 'Edit'],
+        toolsBaseline: ['Read', 'Bash'],
+        allowedTools: ['Read'],
+      }),
+    ).toBe(false);
+  });
+
+  it('deny lists override allow lists', () => {
+    expect(
+      __internal_isToolAllowedByPolicies('Read', {
+        agentAllowedTools: ['Read'],
+        allowedTools: ['Read'],
+        disallowedTools: ['Read'],
+      }),
+    ).toBe(false);
   });
 });
