@@ -129,31 +129,33 @@ export class AgentRunner {
 
       // Emit tool events for parent visibility
       if (this.options.onEvent) {
-        if (msg.type === 'assistant') {
-          const content = (msg as any).message?.content;
-          if (Array.isArray(content)) {
-            for (const block of content) {
-              if (block.type === 'tool_use') {
-                this.options.onEvent({
-                  type: 'tool_start',
-                  toolName: block.name,
-                  toolUseId: block.id,
-                  input: typeof block.input === 'object' && block.input ? block.input : undefined,
-                });
+        try {
+          if (msg.type === 'assistant') {
+            const content = (msg as any).message?.content;
+            if (Array.isArray(content)) {
+              for (const block of content) {
+                if (block.type === 'tool_use') {
+                  this.options.onEvent({
+                    type: 'tool_start',
+                    toolName: block.name,
+                    toolUseId: block.id,
+                    input: typeof block.input === 'object' && block.input ? block.input : undefined,
+                  });
+                }
               }
             }
           }
-        }
-        if (msg.type === 'tool_result') {
-          this.options.onEvent({
-            type: 'tool_result',
-            toolName: (msg as any).tool_name,
-            toolUseId: (msg as any).tool_use_id,
-            ok: !(msg as any).is_error,
-            output: typeof (msg as any).result === 'string' ? (msg as any).result : undefined,
-            error: (msg as any).is_error ? (msg as any).result : undefined,
-          });
-        }
+          if (msg.type === 'tool_result') {
+            this.options.onEvent({
+              type: 'tool_result',
+              toolName: (msg as any).tool_name,
+              toolUseId: (msg as any).tool_use_id,
+              ok: !(msg as any).is_error,
+              output: typeof (msg as any).result === 'string' ? (msg as any).result : undefined,
+              error: (msg as any).is_error ? (msg as any).result : undefined,
+            });
+          }
+        } catch { /* onEvent callback error must not interrupt subagent execution */ }
       }
 
       if (msg.type === 'tool_result') {

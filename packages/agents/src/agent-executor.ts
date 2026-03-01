@@ -258,6 +258,7 @@ export class AgentExecutor {
           onMessage: (msg) => {
             try { appendFileSync(bgTranscriptPath, JSON.stringify(msg) + '\n'); } catch { /* non-fatal */ }
           },
+          onEvent: options.onEvent,
         });
 
         const agentResult = await runner.run(options.prompt);
