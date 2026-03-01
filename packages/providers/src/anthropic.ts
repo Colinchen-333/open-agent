@@ -394,12 +394,17 @@ export class AnthropicProvider implements LLMProvider {
           } else if (delta.type === 'input_json_delta') {
             // Resolve the tool_use id from the block index map so consumers
             // get a populated id on every tool_use_delta event.
-            const toolUseId = blockIndexToToolUseId.get(event.index) ?? '';
-            yield {
-              type: 'tool_use_delta',
-              id: toolUseId,
-              partial_json: delta.partial_json,
-            };
+            // Only emit for registered tool_use blocks — server_tool_use blocks
+            // also receive input_json_delta but are NOT in blockIndexToToolUseId.
+            // Emitting with an empty id would create a phantom tool_use entry.
+            const toolUseId = blockIndexToToolUseId.get(event.index);
+            if (toolUseId) {
+              yield {
+                type: 'tool_use_delta',
+                id: toolUseId,
+                partial_json: delta.partial_json,
+              };
+            }
           }
           break;
         }

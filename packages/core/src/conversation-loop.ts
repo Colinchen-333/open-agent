@@ -646,7 +646,15 @@ export class ConversationLoop {
       // Determine whether the model requested any tool calls.
       // Only collect `tool_use` blocks for local execution — `server_tool_use` blocks
       // are already executed server-side and their results appear in the same message.
-      const toolUses = cleanContent.filter((b) => b.type === 'tool_use');
+      // Also exclude tool_use blocks whose name matches a declared server tool —
+      // some relays (e.g. DMXAPI) may return server-executed tools as regular
+      // `tool_use` instead of `server_tool_use`.
+      const serverToolNames = new Set(
+        (this.options.serverTools ?? []).map((t) => t.name),
+      );
+      const toolUses = cleanContent.filter(
+        (b) => b.type === 'tool_use' && !serverToolNames.has(b.name),
+      );
 
       if (toolUses.length === 0) {
         // If the model hit the output token limit, automatically continue
