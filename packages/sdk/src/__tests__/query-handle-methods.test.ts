@@ -288,6 +288,55 @@ describe('query() MCP status shape', () => {
     q.close();
   });
 
+  it('setMcpServers() hot-reloads a server when same name config changes', async () => {
+    const serverV1 = createSdkMcpServer({
+      name: 'hot-reload-test',
+      tools: [
+        tool(
+          'echo_v1',
+          'Echo v1',
+          { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+          async ({ text }: { text: string }) => text,
+        ) as any,
+      ],
+    });
+
+    const serverV2 = createSdkMcpServer({
+      name: 'hot-reload-test',
+      tools: [
+        tool(
+          'echo_v2',
+          'Echo v2',
+          { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+          async ({ text }: { text: string }) => text,
+        ) as any,
+      ],
+    });
+
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      mcpServers: {
+        sdk_test: serverV1 as any,
+      },
+    });
+
+    await q.initializationResult();
+    const before = await q.mcpServerStatus();
+    expect(before[0].tools?.map(t => t.name)).toContain('echo_v1');
+    expect(before[0].tools?.map(t => t.name)).not.toContain('echo_v2');
+
+    const updateResult = await q.setMcpServers({
+      sdk_test: serverV2 as any,
+    });
+    expect(updateResult.removed).toContain('sdk_test');
+    expect(updateResult.added).toContain('sdk_test');
+
+    const after = await q.mcpServerStatus();
+    expect(after[0].tools?.map(t => t.name)).toContain('echo_v2');
+    expect(after[0].tools?.map(t => t.name)).not.toContain('echo_v1');
+    q.close();
+  });
+
   it('reconnectMcpServer throws when reconnect result is not connected', async () => {
     const q = query('test', {
       model: 'claude-sonnet-4-6',

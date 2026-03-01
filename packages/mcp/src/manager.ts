@@ -4,6 +4,7 @@ import type {
   McpSSEServerConfig,
   McpHttpServerConfig,
 } from '@open-agent/core';
+import { isDeepStrictEqual } from 'util';
 import { McpStdioClient } from './stdio-transport';
 import { McpHttpClient } from './http-transport';
 import { McpSseClient } from './sse-transport';
@@ -17,6 +18,54 @@ function isAuthError(error: unknown): boolean {
     lowered.includes('unauthorized') ||
     lowered.includes('forbidden') ||
     lowered.includes('login')
+  );
+}
+
+function normalizedServerType(config: McpServerConfig): 'stdio' | 'http' | 'sse' | 'sdk' {
+  const type = (config as { type?: string }).type;
+  if (!type || type === 'stdio') return 'stdio';
+  if (type === 'http') return 'http';
+  if (type === 'sse') return 'sse';
+  return 'sdk';
+}
+
+function hasServerConfigChanged(
+  prev: McpServerConfig,
+  next: McpServerConfig,
+): boolean {
+  const prevType = normalizedServerType(prev);
+  const nextType = normalizedServerType(next);
+  if (prevType !== nextType) return true;
+
+  if (prevType === 'stdio') {
+    const a = prev as McpStdioServerConfig;
+    const b = next as McpStdioServerConfig;
+    return a.command !== b.command
+      || !isDeepStrictEqual(a.args ?? [], b.args ?? [])
+      || !isDeepStrictEqual(a.env ?? {}, b.env ?? {});
+  }
+
+  if (prevType === 'http') {
+    const a = prev as McpHttpServerConfig;
+    const b = next as McpHttpServerConfig;
+    return a.url !== b.url || !isDeepStrictEqual(a.headers ?? {}, b.headers ?? {});
+  }
+
+  if (prevType === 'sse') {
+    const a = prev as McpSSEServerConfig;
+    const b = next as McpSSEServerConfig;
+    return a.url !== b.url || !isDeepStrictEqual(a.headers ?? {}, b.headers ?? {});
+  }
+
+  return !isDeepStrictEqual(
+    {
+      name: (prev as { name?: string }).name,
+      instance: (prev as { instance?: unknown }).instance,
+    },
+    {
+      name: (next as { name?: string }).name,
+      instance: (next as { instance?: unknown }).instance,
+    },
   );
 }
 
@@ -129,9 +178,19 @@ export class McpManager {
       }
     }
 
-    // Add new servers (skip already-connected ones)
+    // Add new servers and hot-reload changed configs.
     for (const [name, config] of Object.entries(servers)) {
-      if (!this.connections.has(name)) {
+      const existing = this.connections.get(name);
+      if (!existing) {
+        const conn = await this.addServer(name, config);
+        result.added.push(name);
+        if (conn.error) result.errors[name] = conn.error;
+        continue;
+      }
+
+      if (hasServerConfigChanged(existing.config, config)) {
+        await this.removeServer(name);
+        result.removed.push(name);
         const conn = await this.addServer(name, config);
         result.added.push(name);
         if (conn.error) result.errors[name] = conn.error;
