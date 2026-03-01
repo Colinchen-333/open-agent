@@ -167,22 +167,7 @@ export class SessionManager {
     return parsed;
   }
 
-  /**
-   * Read the transcript for a session and reconstruct conversation history as
-   * provider-compatible `Message` objects suitable for passing as `initialMessages`
-   * to `ConversationLoop`.
-   *
-   * Only 'user' and 'assistant' SDKMessages are included — stream_event,
-   * tool_result, result, and system messages are skipped because they are
-   * informational records, not conversation turns.
-   *
-   * For assistant messages the content blocks (text, thinking, tool_use) are
-   * pulled from `message.message.content`.  For user messages the raw string
-   * prompt is used when `message.message.content` is a string, or the content
-   * block array otherwise.
-   */
-  loadTranscript(cwd: string, sessionId: string): Message[] {
-    const raw = this.readTranscript(cwd, sessionId) as SDKMessage[];
+  private toConversationMessages(raw: SDKMessage[]): Message[] {
     const messages: Message[] = [];
 
     for (const entry of raw) {
@@ -263,6 +248,54 @@ export class SessionManager {
     }
 
     return messages;
+  }
+
+  private truncateRawTranscriptAtAssistant(
+    raw: SDKMessage[],
+    assistantMessageUuid: string,
+  ): { entries: SDKMessage[]; found: boolean } {
+    const entries: SDKMessage[] = [];
+    for (const entry of raw) {
+      entries.push(entry);
+      if (entry.type === 'assistant' && entry.uuid === assistantMessageUuid) {
+        return { entries, found: true };
+      }
+    }
+    return { entries: [], found: false };
+  }
+
+  /**
+   * Read the transcript for a session and reconstruct conversation history as
+   * provider-compatible `Message` objects suitable for passing as `initialMessages`
+   * to `ConversationLoop`.
+   *
+   * Only 'user' and 'assistant' SDKMessages are included — stream_event,
+   * tool_result, result, and system messages are skipped because they are
+   * informational records, not conversation turns.
+   *
+   * For assistant messages the content blocks (text, thinking, tool_use) are
+   * pulled from `message.message.content`.  For user messages the raw string
+   * prompt is used when `message.message.content` is a string, or the content
+   * block array otherwise.
+   */
+  loadTranscript(cwd: string, sessionId: string): Message[] {
+    const raw = this.readTranscript(cwd, sessionId) as SDKMessage[];
+    return this.toConversationMessages(raw);
+  }
+
+  /**
+   * Load transcript up to and including a specific assistant message UUID.
+   * Returns `found=false` when the assistant message does not exist.
+   */
+  loadTranscriptUpToAssistant(
+    cwd: string,
+    sessionId: string,
+    assistantMessageUuid: string,
+  ): { messages: Message[]; found: boolean } {
+    const raw = this.readTranscript(cwd, sessionId) as SDKMessage[];
+    const { entries, found } = this.truncateRawTranscriptAtAssistant(raw, assistantMessageUuid);
+    if (!found) return { messages: [], found: false };
+    return { messages: this.toConversationMessages(entries), found: true };
   }
 
   /**
@@ -358,6 +391,25 @@ export class SessionManager {
     }
 
     return [];
+  }
+
+  /**
+   * Cross-CWD variant of `loadTranscriptUpToAssistant`.
+   */
+  loadTranscriptAnyCwdUpToAssistant(
+    sessionId: string,
+    preferredCwd: string,
+    assistantMessageUuid: string,
+  ): { messages: Message[]; found: boolean } {
+    const preferred = this.loadTranscriptUpToAssistant(preferredCwd, sessionId, assistantMessageUuid);
+    if (preferred.found) return preferred;
+
+    const originalCwd = this.lookupGlobalIndex(sessionId);
+    if (originalCwd && originalCwd !== preferredCwd) {
+      return this.loadTranscriptUpToAssistant(originalCwd, sessionId, assistantMessageUuid);
+    }
+
+    return { messages: [], found: false };
   }
 
   // ---------------------------------------------------------------------------

@@ -164,6 +164,44 @@ describe('SessionManager', () => {
     expect(messages[2].role).toBe('user'); // tool_result becomes a user message
   });
 
+  it('loadTranscriptUpToAssistant truncates history at target assistant uuid', () => {
+    const session = sm.createSession(cwd, 'resume-cutoff-model');
+    sm.appendToTranscript(cwd, session.id, {
+      type: 'user',
+      uuid: 'u1',
+      session_id: session.id,
+      message: { role: 'user', content: 'first' },
+    });
+    sm.appendToTranscript(cwd, session.id, {
+      type: 'assistant',
+      uuid: 'a1',
+      session_id: session.id,
+      message: { role: 'assistant', content: [{ type: 'text', text: 'first answer' }] },
+    });
+    sm.appendToTranscript(cwd, session.id, {
+      type: 'user',
+      uuid: 'u2',
+      session_id: session.id,
+      message: { role: 'user', content: 'second' },
+    });
+    sm.appendToTranscript(cwd, session.id, {
+      type: 'assistant',
+      uuid: 'a2',
+      session_id: session.id,
+      message: { role: 'assistant', content: [{ type: 'text', text: 'second answer' }] },
+    });
+
+    const truncated = sm.loadTranscriptUpToAssistant(cwd, session.id, 'a1');
+    expect(truncated.found).toBe(true);
+    expect(truncated.messages).toHaveLength(2);
+    expect(truncated.messages[0].role).toBe('user');
+    expect(truncated.messages[1].role).toBe('assistant');
+
+    const missing = sm.loadTranscriptUpToAssistant(cwd, session.id, 'missing-assistant');
+    expect(missing.found).toBe(false);
+    expect(missing.messages).toEqual([]);
+  });
+
   it('listSessions returns all sessions for a CWD sorted by lastActiveAt desc', () => {
     // Use a fresh CWD to avoid pollution from earlier tests.
     const listCwd = '/tmp/list-sessions-test';

@@ -1,4 +1,8 @@
 import { describe, it, expect } from 'bun:test';
+import { mkdtempSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { SessionManager } from '@open-agent/core';
 import { query } from '../query.js';
 import type { QueryOptions, PermissionUpdate } from '../types.js';
 
@@ -502,6 +506,72 @@ describe('QueryOptions continue/resume semantics', () => {
     expect(q).toBeDefined();
     q.close();
   });
+
+  it('throws when resumeSessionAt is set without resume', () => {
+    expect(() =>
+      query('test', {
+        model: 'claude-sonnet-4-6',
+        resumeSessionAt: 'assistant-uuid-1',
+      }),
+    ).toThrow(/resumeSessionAt requires options.resume/i);
+  });
+
+  it('accepts resumeSessionAt when target assistant message exists', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-resume-at-'));
+    const sessionId = '11111111-1111-4111-8111-111111111112';
+    const assistantUuid = 'assistant-uuid-target';
+    const sm = new SessionManager();
+    sm.ensureSession(cwd, sessionId, 'claude-sonnet-4-6');
+    sm.appendToTranscript(cwd, sessionId, {
+      type: 'user',
+      uuid: 'user-uuid-1',
+      session_id: sessionId,
+      message: { role: 'user', content: 'hello' },
+    });
+    sm.appendToTranscript(cwd, sessionId, {
+      type: 'assistant',
+      uuid: assistantUuid,
+      session_id: sessionId,
+      message: { role: 'assistant', content: [{ type: 'text', text: 'hi' }] },
+    });
+    sm.appendToTranscript(cwd, sessionId, {
+      type: 'assistant',
+      uuid: 'assistant-uuid-later',
+      session_id: sessionId,
+      message: { role: 'assistant', content: [{ type: 'text', text: 'later' }] },
+    });
+
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      cwd,
+      resume: sessionId,
+      resumeSessionAt: assistantUuid,
+    });
+    expect(q).toBeDefined();
+    q.close();
+  });
+
+  it('throws when resumeSessionAt target assistant message does not exist', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-resume-at-missing-'));
+    const sessionId = '11111111-1111-4111-8111-111111111113';
+    const sm = new SessionManager();
+    sm.ensureSession(cwd, sessionId, 'claude-sonnet-4-6');
+    sm.appendToTranscript(cwd, sessionId, {
+      type: 'assistant',
+      uuid: 'assistant-uuid-present',
+      session_id: sessionId,
+      message: { role: 'assistant', content: [{ type: 'text', text: 'hi' }] },
+    });
+
+    expect(() =>
+      query('test', {
+        model: 'claude-sonnet-4-6',
+        cwd,
+        resume: sessionId,
+        resumeSessionAt: 'assistant-uuid-missing',
+      }),
+    ).toThrow(/assistant message not found/i);
+  });
 });
 
 describe('QueryOptions unsupported official placeholders', () => {
@@ -511,7 +581,6 @@ describe('QueryOptions unsupported official placeholders', () => {
       { key: 'promptSuggestions', option: { promptSuggestions: true } },
       { key: 'onElicitation', option: { onElicitation: {} } },
       { key: 'plugins', option: { plugins: [] } },
-      { key: 'resumeSessionAt', option: { resumeSessionAt: {} } },
       { key: 'sandbox', option: { sandbox: { mode: 'workspace-write' } as any } },
       { key: 'debugFile', option: { debugFile: '/tmp/debug.log' } },
       { key: 'spawnClaudeCodeProcess', option: { spawnClaudeCodeProcess: {} } },

@@ -13,7 +13,9 @@ import type {
   ModelUsage,
   SlashCommand,
   PermissionPrompter,
+  SettingSource,
 } from '@open-agent/core';
+import type { SandboxConfig } from '@open-agent/permissions';
 
 export type PermissionRuleValue = {
   toolName: string;
@@ -156,7 +158,7 @@ export interface QueryOptions {
    * Control which settings sources are loaded when building the system prompt.
    * Defaults to none (no filesystem settings are loaded).
    */
-  settingSources?: Array<'user' | 'project' | 'local'>;
+  settingSources?: SettingSource[];
   // Official SDK compatibility placeholders (currently best-effort support).
   pathToClaudeCodeExecutable?: string;
   executable?: string;
@@ -165,8 +167,8 @@ export interface QueryOptions {
   betas?: string[];
   onElicitation?: unknown;
   plugins?: unknown[];
-  resumeSessionAt?: unknown;
-  sandbox?: unknown;
+  resumeSessionAt?: string;
+  sandbox?: SandboxConfig;
   debugFile?: string;
   spawnClaudeCodeProcess?: unknown;
   promptSuggestions?: boolean;

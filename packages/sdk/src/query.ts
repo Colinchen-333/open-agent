@@ -74,6 +74,9 @@ export function query(
   if (options.resume && options.continue) {
     throw new Error('options.resume and options.continue are mutually exclusive.');
   }
+  if (options.resumeSessionAt !== undefined && options.resume === undefined) {
+    throw new Error('options.resumeSessionAt requires options.resume.');
+  }
   if (
     options.sessionId &&
     !options.forkSession &&
@@ -576,8 +579,23 @@ export function query(
   if (effectiveResumeSessionId && initialMessages.length === 0) {
     try {
       const sessionMgr = new SessionManager();
-      initialMessages = sessionMgr.loadTranscriptAnyCwd(effectiveResumeSessionId, cwd);
-    } catch {
+      if (options.resumeSessionAt) {
+        const scoped = sessionMgr.loadTranscriptAnyCwdUpToAssistant(
+          effectiveResumeSessionId,
+          cwd,
+          options.resumeSessionAt,
+        );
+        if (!scoped.found) {
+          throw new Error(`Assistant message not found for resumeSessionAt: ${options.resumeSessionAt}`);
+        }
+        initialMessages = scoped.messages;
+      } else {
+        initialMessages = sessionMgr.loadTranscriptAnyCwd(effectiveResumeSessionId, cwd);
+      }
+    } catch (error) {
+      if (options.resumeSessionAt) {
+        throw error;
+      }
       // If transcript is corrupted or missing, start fresh.
       initialMessages = [];
     }
@@ -1332,7 +1350,6 @@ function assertUnsupportedOptions(options: QueryOptions): void {
     'betas',
     'onElicitation',
     'plugins',
-    'resumeSessionAt',
     'sandbox',
     'debugFile',
     'spawnClaudeCodeProcess',
