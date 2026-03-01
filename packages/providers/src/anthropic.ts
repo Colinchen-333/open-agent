@@ -291,7 +291,7 @@ export class AnthropicProvider implements LLMProvider {
         max_tokens: effectiveMaxTokens,
         messages: anthropicMessages,
         ...(systemParam ? { system: systemParam } : {}),
-        ...(cachedTools ? { tools: cachedTools } : {}),
+        ...(cachedTools ? { tools: cachedTools as unknown as Anthropic.Messages.ToolUnion[] } : {}),
         ...(options.temperature !== undefined && !thinkingParam
           ? { temperature: options.temperature }
           : {}),

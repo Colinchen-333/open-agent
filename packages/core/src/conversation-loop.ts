@@ -98,10 +98,13 @@ function normalizeTokenUsage(usage: unknown): Record<string, number> {
   return normalized;
 }
 
-function normalizePermissionDenialInput(input: unknown): unknown {
-  // Keep backward-compatible shape: preserve raw tool input when present,
-  // but avoid undefined holes in serialized result payloads.
-  return input === undefined ? {} : input;
+function normalizePermissionDenialInput(input: unknown): Record<string, unknown> {
+  // Keep backward-compatible shape for object inputs while guaranteeing
+  // the SDK PermissionDenial contract (tool_input is always an object).
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return {};
+  }
+  return input as Record<string, unknown>;
 }
 
 export class ConversationLoop {

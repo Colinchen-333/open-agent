@@ -81,7 +81,11 @@ export interface AgentDefinition {
   tools?: string[];
   disallowedTools?: string[];
   prompt: string;
-  model?: 'sonnet' | 'opus' | 'haiku' | 'inherit';
+  /**
+   * Built-in aliases ('sonnet' | 'opus' | 'haiku' | 'inherit') are supported,
+   * and callers may also pass concrete provider model IDs.
+   */
+  model?: string;
   maxTurns?: number;
   skills?: string[];
   mcpServers?: AgentMcpServerSpec[];
