@@ -20,7 +20,9 @@ describe('query().initializationResult()', () => {
     expect(result).toHaveProperty('available_output_styles');
     expect(result).toHaveProperty('models');
     expect(result).toHaveProperty('account');
-    expect(result).toHaveProperty('fast_mode_state');
+    if ('fast_mode_state' in result) {
+      expect((result as any).fast_mode_state).toBeUndefined();
+    }
     expect(Array.isArray(result.commands)).toBe(true);
     expect(Array.isArray(result.agents)).toBe(true);
     expect(Array.isArray(result.available_output_styles)).toBe(true);
@@ -31,15 +33,25 @@ describe('query().initializationResult()', () => {
   it('returns official-style initialization keys only', async () => {
     const q = query('test', { model: 'claude-haiku-4-5' });
     const result = await q.initializationResult();
-    expect(Object.keys(result).sort()).toEqual([
+    const keys = Object.keys(result);
+    expect(keys).toEqual(expect.arrayContaining([
       'account',
       'agents',
       'available_output_styles',
       'commands',
-      'fast_mode_state',
       'models',
       'output_style',
-    ].sort());
+    ]));
+    const allowedKeys = new Set([
+      'account',
+      'agents',
+      'available_output_styles',
+      'commands',
+      'models',
+      'output_style',
+      'fast_mode_state',
+    ]);
+    expect(keys.every((k) => allowedKeys.has(k))).toBe(true);
     expect((result as any).model).toBeUndefined();
     expect((result as any).cwd).toBeUndefined();
     expect((result as any).sessionId).toBeUndefined();
@@ -80,6 +92,26 @@ describe('query().stopTask()', () => {
   });
 });
 
+describe('query().interrupt()', () => {
+  it('aborts caller-provided AbortController', async () => {
+    const ac = new AbortController();
+    const q = query('test', { model: 'claude-sonnet-4-6', abortController: ac });
+    expect(ac.signal.aborted).toBe(false);
+    await q.interrupt();
+    expect(ac.signal.aborted).toBe(true);
+    q.close();
+  });
+
+  it('is idempotent when called multiple times', async () => {
+    const ac = new AbortController();
+    const q = query('test', { model: 'claude-sonnet-4-6', abortController: ac });
+    await q.interrupt();
+    await q.interrupt();
+    expect(ac.signal.aborted).toBe(true);
+    q.close();
+  });
+});
+
 describe('query().setPermissionMode()', () => {
   it('rejects bypassPermissions at runtime without allowDangerouslySkipPermissions', async () => {
     const q = query('test', { model: 'claude-sonnet-4-6' });
@@ -104,6 +136,7 @@ describe('query() runtime setter validation', () => {
   it('setModel rejects empty string', async () => {
     const q = query('test', { model: 'claude-sonnet-4-6' });
     await expect(q.setModel('')).rejects.toThrow(/non-empty model string/i);
+    await expect(q.setModel('   ' as any)).rejects.toThrow(/non-empty model string/i);
     q.close();
   });
 

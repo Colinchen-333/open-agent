@@ -96,6 +96,12 @@ function normalizeTokenUsage(usage: unknown): Record<string, number> {
   return normalized;
 }
 
+function normalizePermissionDenialInput(input: unknown): unknown {
+  // Keep backward-compatible shape: preserve raw tool input when present,
+  // but avoid undefined holes in serialized result payloads.
+  return input === undefined ? {} : input;
+}
+
 export class ConversationLoop {
   private messages: Message[] = [];
   private options: ConversationLoopOptions;
@@ -699,7 +705,7 @@ export class ConversationLoop {
             permissionDenials.push({
               tool_name: toolUse.name,
               tool_use_id: toolUse.id,
-              tool_input: toolUse.input,
+              tool_input: normalizePermissionDenialInput(toolUse.input),
             });
             toolResults.push({
               type: 'tool_result',
@@ -728,7 +734,7 @@ export class ConversationLoop {
                 total_cost_usd: totalCostUsd,
                 usage: { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
                 modelUsage: {},
-                permission_denials: allPermissionDenials,
+                permission_denials: [...allPermissionDenials, ...permissionDenials],
                 errors: [],
                 uuid: randomUUID(),
                 session_id: sessionId,
@@ -745,7 +751,7 @@ export class ConversationLoop {
               permissionDenials.push({
                 tool_name: toolUse.name,
                 tool_use_id: toolUse.id,
-                tool_input: toolUse.input,
+                tool_input: normalizePermissionDenialInput(toolUse.input),
               });
               toolResults.push({
                 type: 'tool_result',
@@ -776,7 +782,7 @@ export class ConversationLoop {
               permissionDenials.push({
                 tool_name: toolUse.name,
                 tool_use_id: toolUse.id,
-                tool_input: toolUse.input,
+                tool_input: normalizePermissionDenialInput(toolUse.input),
               });
               toolResults.push({
                 type: 'tool_result',
@@ -821,7 +827,7 @@ export class ConversationLoop {
           total_cost_usd: totalCostUsd,
           usage: { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
           modelUsage: {},
-          permission_denials: allPermissionDenials,
+          permission_denials: [...allPermissionDenials, ...permissionDenials],
           errors: [],
           uuid: randomUUID(),
           session_id: sessionId,

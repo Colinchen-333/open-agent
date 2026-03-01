@@ -444,6 +444,12 @@ describe('ConversationLoop', () => {
       const result = messages.find((m) => m.type === 'result') as any;
       expect(result).toBeDefined();
       expect(result.stop_reason).toBe('interrupted');
+      expect(result.permission_denials).toHaveLength(1);
+      expect(result.permission_denials[0]).toMatchObject({
+        tool_name: 'ToolA',
+        tool_use_id: 't1',
+        tool_input: {},
+      });
       expect(executed).toHaveLength(0);
       expect(evaluateCount).toBe(1);
     });

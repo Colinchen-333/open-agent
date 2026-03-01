@@ -474,21 +474,25 @@ describe('QueryOptions continue/resume semantics', () => {
 });
 
 describe('QueryOptions unsupported official placeholders', () => {
-  it('throws for unsupported betas option to avoid silent no-op', () => {
-    expect(() =>
-      query('test', {
-        model: 'claude-sonnet-4-6',
-        betas: ['x-test-beta'],
-      } as QueryOptions),
-    ).toThrow(/not supported yet/i);
-  });
+  it('throws for each unsupported placeholder option with key-specific message', () => {
+    const unsupported: Array<{ key: string; option: Partial<QueryOptions> }> = [
+      { key: 'betas', option: { betas: ['x-test-beta'] } },
+      { key: 'promptSuggestions', option: { promptSuggestions: true } },
+      { key: 'onElicitation', option: { onElicitation: {} } },
+      { key: 'plugins', option: { plugins: [] } },
+      { key: 'resumeSessionAt', option: { resumeSessionAt: {} } },
+      { key: 'sandbox', option: { sandbox: { mode: 'workspace-write' } as any } },
+      { key: 'debugFile', option: { debugFile: '/tmp/debug.log' } },
+      { key: 'spawnClaudeCodeProcess', option: { spawnClaudeCodeProcess: {} } },
+    ];
 
-  it('throws for unsupported promptSuggestions option to avoid silent no-op', () => {
-    expect(() =>
-      query('test', {
-        model: 'claude-sonnet-4-6',
-        promptSuggestions: true,
-      } as QueryOptions),
-    ).toThrow(/not supported yet/i);
+    for (const { key, option } of unsupported) {
+      expect(() =>
+        query('test', {
+          model: 'claude-sonnet-4-6',
+          ...(option as QueryOptions),
+        }),
+      ).toThrow(new RegExp(`Option \"${key}\".*not supported yet`, 'i'));
+    }
   });
 });
