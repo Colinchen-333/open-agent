@@ -19,6 +19,7 @@ import { PermissionEngine } from '@open-agent/permissions';
 import { HookExecutor } from '@open-agent/hooks';
 import { McpManager } from '@open-agent/mcp';
 import type { QueryOptions, Query, RewindFilesResult, AgentInfo } from './types.js';
+import { applyPermissionUpdates } from './permission-updates.js';
 
 // --------------------------------------------------------------------------
 // query() – V1 streaming API
@@ -1168,98 +1169,6 @@ function resolveAgentModel(
       return 'claude-haiku-4-5-20251001';
     default:
       return String(model);
-  }
-}
-
-function applyPermissionUpdates(
-  permissionEngine: PermissionEngine,
-  updates: unknown,
-): void {
-  if (!Array.isArray(updates)) return;
-
-  const knownDestinations = new Set([
-    'userSettings',
-    'projectSettings',
-    'localSettings',
-    'session',
-    'cliArg',
-  ]);
-  const knownBehaviors = new Set(['allow', 'deny', 'ask']);
-  for (const update of updates) {
-    if (!update || typeof update !== 'object') continue;
-    const u = update as Record<string, unknown>;
-    const type = u.type;
-    if (typeof u.destination !== 'string' || !knownDestinations.has(u.destination)) {
-      continue;
-    }
-
-    if (type === 'setMode') {
-      if (
-        u.mode === 'default' ||
-        u.mode === 'acceptEdits' ||
-        u.mode === 'bypassPermissions' ||
-        u.mode === 'plan' ||
-        u.mode === 'dontAsk'
-      ) {
-        permissionEngine.setMode(u.mode);
-      }
-      continue;
-    }
-
-    if (type === 'addDirectories' || type === 'removeDirectories') {
-      const dirs = Array.isArray(u.directories)
-        ? u.directories.filter((d): d is string => typeof d === 'string' && d.length > 0)
-        : [];
-      if (dirs.length === 0) continue;
-      const summary = permissionEngine.getSummary();
-      const next = new Set(summary.allowedPaths);
-      if (type === 'addDirectories') {
-        for (const dir of dirs) next.add(dir);
-      } else {
-        for (const dir of dirs) next.delete(dir);
-      }
-      permissionEngine.setAllowedPaths([...next]);
-      continue;
-    }
-
-    const behavior = u.behavior;
-    const rules = Array.isArray(u.rules) ? u.rules : [];
-    if (
-      (type !== 'addRules' && type !== 'replaceRules' && type !== 'removeRules') ||
-      typeof behavior !== 'string' ||
-      !knownBehaviors.has(behavior)
-    ) {
-      continue;
-    }
-
-    for (const rawRule of rules) {
-      if (!rawRule || typeof rawRule !== 'object') continue;
-      const ruleObj = rawRule as Record<string, unknown>;
-      if (typeof ruleObj.toolName !== 'string') continue;
-      const rule = {
-        toolName: ruleObj.toolName,
-        ...(typeof ruleObj.ruleContent === 'string'
-          ? { ruleContent: ruleObj.ruleContent }
-          : {}),
-      };
-
-      if (type === 'addRules') {
-        permissionEngine.addRule(behavior as 'allow' | 'deny' | 'ask', rule);
-        continue;
-      }
-
-      if (type === 'replaceRules') {
-        for (const b of ['allow', 'deny', 'ask'] as const) {
-          permissionEngine.removeRule(b, rule);
-        }
-        permissionEngine.addRule(behavior as 'allow' | 'deny' | 'ask', rule);
-        continue;
-      }
-
-      if (type === 'removeRules') {
-        permissionEngine.removeRule(behavior as 'allow' | 'deny' | 'ask', rule);
-      }
-    }
   }
 }
 
