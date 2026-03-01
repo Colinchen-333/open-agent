@@ -410,34 +410,31 @@ describe('combined limits and recovery', () => {
 // ===========================================================================
 
 describe('edge cases', () => {
-  it('maxTurns of 0 is treated as invalid or unlimited', async () => {
-    const q = query('Task', {
-      model: 'claude-sonnet-4-6',
-      maxTurns: 0,
-    });
-
-    expect(q).toBeDefined();
-    q.close();
+  it('maxTurns of 0 throws validation error', async () => {
+    expect(() =>
+      query('Task', {
+        model: 'claude-sonnet-4-6',
+        maxTurns: 0,
+      }),
+    ).toThrow(/maxTurns.*positive integer/i);
   });
 
-  it('maxBudgetUsd as Infinity allows unlimited spending', async () => {
-    const q = query('Task', {
-      model: 'claude-sonnet-4-6',
-      maxBudgetUsd: Infinity,
-    });
-
-    expect(q).toBeDefined();
-    q.close();
+  it('maxBudgetUsd as Infinity throws validation error', async () => {
+    expect(() =>
+      query('Task', {
+        model: 'claude-sonnet-4-6',
+        maxBudgetUsd: Infinity,
+      }),
+    ).toThrow(/maxBudgetUsd.*finite/i);
   });
 
-  it('negative maxBudgetUsd is treated as invalid', async () => {
-    const q = query('Task', {
-      model: 'claude-sonnet-4-6',
-      maxBudgetUsd: -1,
-    });
-
-    expect(q).toBeDefined();
-    q.close();
+  it('negative maxBudgetUsd throws validation error', async () => {
+    expect(() =>
+      query('Task', {
+        model: 'claude-sonnet-4-6',
+        maxBudgetUsd: -1,
+      }),
+    ).toThrow(/maxBudgetUsd.*>= 0/i);
   });
 
   it('fallbackModel same as primary model is allowed', async () => {

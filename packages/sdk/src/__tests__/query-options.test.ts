@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { mkdtempSync } from 'fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { SessionManager } from '@open-agent/core';
@@ -423,6 +423,29 @@ describe('QueryOptions.sandbox', () => {
       }),
     ).toThrow(/sandbox config.*enabled/i);
   });
+
+  it('throws when loaded settings sandbox is invalid', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-invalid-sandbox-settings-'));
+    const settingsDir = join(cwd, '.open-agent');
+    mkdirSync(settingsDir, { recursive: true });
+    writeFileSync(
+      join(settingsDir, 'settings.json'),
+      JSON.stringify({
+        sandbox: {
+          autoAllowBashIfSandboxed: true,
+        },
+      }),
+      'utf-8',
+    );
+
+    expect(() =>
+      query('test', {
+        model: 'claude-sonnet-4-6',
+        cwd,
+        settingSources: ['project'],
+      }),
+    ).toThrow(/loaded settings sandbox config is invalid/i);
+  });
 });
 
 // ============================================================================
@@ -512,6 +535,15 @@ describe('QueryOptions continue/resume semantics', () => {
     ).toThrow(/sessionId must be a valid UUID/i);
   });
 
+  it('throws when resume is not a valid UUID', () => {
+    expect(() =>
+      query('test', {
+        model: 'claude-sonnet-4-6',
+        resume: 'not-a-uuid',
+      }),
+    ).toThrow(/resume must be a valid UUID/i);
+  });
+
   it('throws when continue and resume are both set', () => {
     expect(() =>
       query('test', {
@@ -551,6 +583,16 @@ describe('QueryOptions continue/resume semantics', () => {
     });
     expect(q).toBeDefined();
     q.close();
+  });
+
+  it('throws when explicit resume session does not exist', () => {
+    expect(() =>
+      query('test', {
+        model: 'claude-sonnet-4-6',
+        cwd: mkdtempSync(join(tmpdir(), 'open-agent-missing-resume-')),
+        resume: '33333333-3333-4333-8333-333333333333',
+      }),
+    ).toThrow(/session not found for resume/i);
   });
 
   it('throws when resumeSessionAt is set without resume', () => {
@@ -617,6 +659,35 @@ describe('QueryOptions continue/resume semantics', () => {
         resumeSessionAt: 'assistant-uuid-missing',
       }),
     ).toThrow(/assistant message not found/i);
+  });
+});
+
+describe('QueryOptions numeric bounds', () => {
+  it('throws when maxTurns is not a positive integer', () => {
+    expect(() =>
+      query('test', {
+        model: 'claude-sonnet-4-6',
+        maxTurns: 0,
+      }),
+    ).toThrow(/maxTurns.*positive integer/i);
+  });
+
+  it('throws when maxBudgetUsd is negative', () => {
+    expect(() =>
+      query('test', {
+        model: 'claude-sonnet-4-6',
+        maxBudgetUsd: -1,
+      }),
+    ).toThrow(/maxBudgetUsd.*>= 0/i);
+  });
+
+  it('throws when maxBudgetUsd is not finite', () => {
+    expect(() =>
+      query('test', {
+        model: 'claude-sonnet-4-6',
+        maxBudgetUsd: Infinity,
+      }),
+    ).toThrow(/maxBudgetUsd.*finite/i);
   });
 });
 

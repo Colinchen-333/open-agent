@@ -79,6 +79,18 @@ export function query(
   if (options.sessionId !== undefined && !isValidUuid(options.sessionId)) {
     throw new Error('options.sessionId must be a valid UUID.');
   }
+  if (options.resume !== undefined && !isValidUuid(options.resume)) {
+    throw new Error('options.resume must be a valid UUID.');
+  }
+  if (options.maxTurns !== undefined && (!Number.isInteger(options.maxTurns) || options.maxTurns <= 0)) {
+    throw new Error('options.maxTurns must be a positive integer.');
+  }
+  if (
+    options.maxBudgetUsd !== undefined &&
+    (!Number.isFinite(options.maxBudgetUsd) || options.maxBudgetUsd < 0)
+  ) {
+    throw new Error('options.maxBudgetUsd must be a finite number >= 0.');
+  }
   if (options.resumeSessionAt !== undefined && options.resume === undefined) {
     throw new Error('options.resumeSessionAt requires options.resume.');
   }
@@ -93,6 +105,9 @@ export function query(
   const effectiveResumeSessionId =
     options.resume ??
     (options.continue ? resumeManager.getLatestSession(cwd)?.id : undefined);
+  if (options.resume && !resumeManager.getSession(cwd, options.resume)) {
+    throw new Error(`Session not found for resume: ${options.resume}`);
+  }
   const sessionId = options.forkSession
     ? randomUUID()
     : (options.sessionId ?? effectiveResumeSessionId ?? randomUUID());
@@ -435,6 +450,9 @@ export function query(
   }
   const permMode = requestedPermissionMode;
   const settingsSandbox = parseSandboxConfig(loadedSettings?.sandbox);
+  if (loadedSettings && loadedSettings.sandbox !== undefined && !settingsSandbox) {
+    throw new Error('Loaded settings sandbox config is invalid; expected explicit boolean enabled field.');
+  }
   let optionSandbox: SandboxConfig | undefined;
   if (options.sandbox !== undefined) {
     optionSandbox = parseSandboxConfig(options.sandbox);
