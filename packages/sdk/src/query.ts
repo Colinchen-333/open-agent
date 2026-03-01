@@ -11,8 +11,16 @@ import type {
   AgentDefinition,
 } from '@open-agent/core';
 import { ConversationLoop, SessionManager, buildSystemPrompt, ConfigLoader, AutoMemory, FileCheckpoint } from '@open-agent/core';
-import { AgentLoader } from '@open-agent/agents';
-import { createDefaultToolRegistry } from '@open-agent/tools';
+import { AgentLoader, AgentExecutor } from '@open-agent/agents';
+import {
+  createDefaultToolRegistry,
+  createTaskTool,
+  createTaskOutputTool,
+  createTaskStopTool,
+  createWorktree,
+  cleanupWorktree,
+  hasWorktreeChanges,
+} from '@open-agent/tools';
 import { autoDetectProvider, createProvider, calculateCost } from '@open-agent/providers';
 import type { Message } from '@open-agent/providers';
 import { PermissionEngine, SettingsLoader } from '@open-agent/permissions';
@@ -243,6 +251,133 @@ export function query(
   // ------------------------------------------------------------------
   const toolRegistry = createDefaultToolRegistry(cwd);
 
+  // Allow caller to inject additional tools (e.g. Task, Team, Skill)
+  // before any filtering is applied.
+  let setupToolsReady: Promise<void> | undefined;
+  if (options.setupTools) {
+    const result = options.setupTools(toolRegistry);
+    if (result && typeof (result as Promise<void>).then === 'function') {
+      setupToolsReady = result as Promise<void>;
+      void setupToolsReady.catch(() => {});
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Subagent auto-wiring — register Task, TaskOutput, TaskStop tools
+  // when not already provided via setupTools.  The AgentExecutor
+  // instance is created later (after hooks) and captured via closure.
+  // ------------------------------------------------------------------
+  let sdkAgentExecutor: AgentExecutor | undefined;
+  const taskToolAutoWired = !toolRegistry.get('Task');
+  if (taskToolAutoWired) {
+    const getAgentInfo = (agentId: string) => {
+      if (!sdkAgentExecutor) return null;
+      const s = sdkAgentExecutor.getAgent(agentId);
+      if (!s) return null;
+      return {
+        status: (s.state === 'running' ? 'running' : s.state === 'completed' ? 'completed' : 'failed') as 'running' | 'completed' | 'failed',
+        output_file: s.outputFile ?? '',
+        result: s.result,
+      };
+    };
+
+    toolRegistry.register(createTaskTool({
+      runSubagent: async ({
+        prompt: agentPrompt, subagentType, name, model: agentModel,
+        cwd: agentCwd, maxTurns, mode, isolation, runInBackground, resume, teamName,
+      }) => {
+        if (!sdkAgentExecutor) {
+          throw new Error('Subagent executor not initialized.');
+        }
+        const agentDef = availableAgents.get(subagentType);
+        if (!agentDef) {
+          throw new Error(
+            `Unknown agent type: ${subagentType}. Available: ${[...availableAgents.keys()].join(', ')}`,
+          );
+        }
+
+        const effectiveAgentCwd = agentCwd ?? cwd;
+        let worktreePath: string | undefined;
+        let worktreeBranch: string | undefined;
+
+        if (isolation === 'worktree') {
+          const wt = await createWorktree(effectiveAgentCwd, name ?? `agent-${resume ?? Date.now()}`);
+          worktreePath = wt.path;
+          worktreeBranch = wt.branch;
+        }
+
+        const executeOptions = {
+          definition: agentDef,
+          provider,
+          tools: new Map(toolRegistry.list().map((t) => [t.name, t])),
+          prompt: agentPrompt,
+          cwd: effectiveAgentCwd,
+          name,
+          model: agentModel ?? model,
+          maxTurns,
+          mode: mode ?? agentDef.mode,
+          teamName,
+          isolation,
+          runInBackground,
+          resume,
+          worktreePath,
+          ...(worktreePath ? {
+            onWorktreeCleanup: async (wtPath: string, hasChanges: boolean) => {
+              if (!hasChanges) await cleanupWorktree(wtPath);
+            },
+          } : {}),
+        };
+
+        if (runInBackground) {
+          const bg = await sdkAgentExecutor.executeInBackground(executeOptions);
+          return JSON.stringify({
+            status: 'async_launched',
+            agentId: bg.agentId,
+            description: name ?? subagentType,
+            prompt: agentPrompt,
+            outputFile: bg.outputFile,
+            canReadOutputFile: true,
+            ...(worktreePath ? { worktree_path: worktreePath, worktree_branch: worktreeBranch } : {}),
+          });
+        }
+
+        const { agentId, result: agentResult, session: agentSession } = await sdkAgentExecutor.execute(executeOptions);
+
+        let worktreeCleanedUp = false;
+        if (worktreePath) {
+          const changed = await hasWorktreeChanges(worktreePath);
+          if (!changed) {
+            await cleanupWorktree(worktreePath);
+            worktreeCleanedUp = true;
+          }
+        }
+
+        const defaultUsage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: null, cache_read_input_tokens: null, server_tool_use: null, service_tier: null, cache_creation: null };
+        return JSON.stringify({
+          status: 'completed',
+          agentId,
+          content: [{ type: 'text', text: agentResult }],
+          totalToolUseCount: agentSession.totalToolUseCount ?? 0,
+          totalDurationMs: agentSession.durationMs,
+          totalTokens: agentSession.totalTokens ?? 0,
+          usage: agentSession.usage ?? defaultUsage,
+          prompt: agentPrompt,
+          ...(worktreePath ? { worktree_path: worktreePath, worktree_branch: worktreeBranch, worktree_cleaned_up: worktreeCleanedUp } : {}),
+        });
+      },
+      getBackgroundAgent: getAgentInfo,
+    }));
+
+    toolRegistry.register(createTaskOutputTool({
+      getBackgroundAgent: getAgentInfo,
+      stopBackgroundAgent: (id) => sdkAgentExecutor?.stopAgent(id) ?? false,
+    }));
+    toolRegistry.register(createTaskStopTool({
+      getBackgroundAgent: getAgentInfo,
+      stopBackgroundAgent: (id) => sdkAgentExecutor?.stopAgent(id) ?? false,
+    }));
+  }
+
   // Apply selected agent tool policy first, then caller-level tool policies.
   if (selectedAgent?.tools && selectedAgent.tools.length > 0) {
     const allowed = new Set(selectedAgent.tools);
@@ -355,6 +490,11 @@ export function query(
         },
       }
     : loopHookExecutor;
+
+  // Initialize the SDK agent executor now that hooks are available.
+  if (taskToolAutoWired) {
+    sdkAgentExecutor = new AgentExecutor(effectiveHookExecutor as any);
+  }
 
   // ------------------------------------------------------------------
   // MCP servers — connect and discover tools
@@ -715,6 +855,13 @@ export function query(
     if (mcpManager) {
       mcpManager.disconnectAll().catch(() => {});
     }
+    if (sdkAgentExecutor) {
+      for (const agent of sdkAgentExecutor.listAgents()) {
+        if (agent.state === 'running') {
+          sdkAgentExecutor.stopAgent(agent.agentId);
+        }
+      }
+    }
     streamClosed = true;
     notifyQueue();
     removeCallerAbortListener();
@@ -754,6 +901,11 @@ export function query(
   // ------------------------------------------------------------------
   async function* generateMessages(): AsyncGenerator<SDKMessage, void> {
     try {
+      // Wait for async setupTools to complete before the first LLM call.
+      if (setupToolsReady) {
+        await setupToolsReady;
+        syncLoopToolsFromRegistry();
+      }
       // Wait for MCP servers to connect and register their tools into the loop
       // before the first LLM call. This runs once when iteration starts.
       if (mcpReadyPromise) {

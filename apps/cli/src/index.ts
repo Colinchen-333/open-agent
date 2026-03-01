@@ -140,57 +140,44 @@ async function main(): Promise<void> {
       if (runInBackground) {
         const { agentId, outputFile } = await agentExecutor.executeInBackground(executeOptions);
         return JSON.stringify({
+          status: 'async_launched',
           agentId,
-          output_file: outputFile,
-          status: 'running',
-          message: 'Agent is running in the background. Use Read tool or Bash tail to check output.',
+          description: name ?? subagentType,
+          prompt,
+          outputFile,
+          canReadOutputFile: true,
           ...(worktreePath ? { worktree_path: worktreePath, worktree_branch: worktreeBranch } : {}),
         });
       }
 
       const { agentId, result, session } = await agentExecutor.execute(executeOptions);
 
-      // --- Idle notification: inform team lead that this subagent is done ---
       if (teamName && name) {
         try {
           teamManager.notifyIdle(teamName, name);
-        } catch {
-          // Non-fatal — never let idle notification break the result.
-        }
+        } catch { /* Non-fatal */ }
       }
 
-      // --- Worktree post-processing (foreground) ---
+      let worktreeCleanedUp = false;
       if (worktreePath) {
         const changed = await hasWorktreeChanges(worktreePath);
         if (!changed) {
-          // Auto-cleanup: no changes made
           await cleanupWorktree(worktreePath);
-          return JSON.stringify({
-            agentId,
-            result,
-            numTurns: session.numTurns,
-            durationMs: session.durationMs,
-            worktree_cleaned_up: true,
-            message: 'Agent completed with no file changes. Worktree was cleaned up automatically.',
-          });
+          worktreeCleanedUp = true;
         }
-        // Keep worktree for user to review/merge
-        return JSON.stringify({
-          agentId,
-          result,
-          numTurns: session.numTurns,
-          durationMs: session.durationMs,
-          worktree_path: worktreePath,
-          worktree_branch: worktreeBranch,
-          message: `Agent completed with file changes. Worktree kept at ${worktreePath} on branch ${worktreeBranch}. Review changes and merge when ready.`,
-        });
       }
 
+      const defaultUsage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: null, cache_read_input_tokens: null, server_tool_use: null, service_tier: null, cache_creation: null };
       return JSON.stringify({
+        status: 'completed',
         agentId,
-        result,
-        numTurns: session.numTurns,
-        durationMs: session.durationMs,
+        content: [{ type: 'text', text: result }],
+        totalToolUseCount: session.totalToolUseCount ?? 0,
+        totalDurationMs: session.durationMs,
+        totalTokens: session.totalTokens ?? 0,
+        usage: session.usage ?? defaultUsage,
+        prompt,
+        ...(worktreePath ? { worktree_path: worktreePath, worktree_branch: worktreeBranch, worktree_cleaned_up: worktreeCleanedUp } : {}),
       });
     },
     getBackgroundAgent: (agentId: string) => {

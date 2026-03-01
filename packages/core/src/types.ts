@@ -72,6 +72,9 @@ export interface AccountInfo {
   apiKeySource?: string;
 }
 
+// Agent MCP server spec — server name reference or inline config
+export type AgentMcpServerSpec = string | Record<string, McpStdioServerConfig | McpSSEServerConfig | McpHttpServerConfig | McpSdkServerConfig>;
+
 // Agent definition
 export interface AgentDefinition {
   description: string;
@@ -81,6 +84,8 @@ export interface AgentDefinition {
   model?: 'sonnet' | 'opus' | 'haiku' | 'inherit';
   maxTurns?: number;
   skills?: string[];
+  mcpServers?: AgentMcpServerSpec[];
+  criticalSystemReminder_EXPERIMENTAL?: string;
   name?: string;
   mode?: PermissionMode;
   isolation?: 'worktree' | 'none';
@@ -125,12 +130,21 @@ export type McpServerConfig =
   | McpHttpServerConfig
   | McpSdkServerConfig;
 
+// SDK assistant message error types
+export type SDKAssistantMessageError =
+  | 'authentication_failed'
+  | 'billing_error'
+  | 'rate_limit'
+  | 'invalid_request'
+  | 'server_error'
+  | 'unknown';
+
 // SDK message types
 export interface SDKAssistantMessage {
   type: 'assistant';
   message: any; // BetaMessage
   parent_tool_use_id: string | null;
-  error?: string;
+  error?: SDKAssistantMessageError;
   uuid: string;
   session_id: string;
 }
@@ -143,6 +157,17 @@ export interface SDKUserMessage {
   tool_use_result?: unknown;
   uuid?: string;
   session_id: string;
+}
+
+export interface SDKUserMessageReplay {
+  type: 'user';
+  message: any; // MessageParam
+  parent_tool_use_id: string | null;
+  isSynthetic?: boolean;
+  tool_use_result?: unknown;
+  uuid: string;
+  session_id: string;
+  isReplay: true;
 }
 
 export interface SDKResultSuccess {
@@ -165,7 +190,7 @@ export interface SDKResultSuccess {
 
 export interface SDKResultError {
   type: 'result';
-  subtype: 'error_during_execution' | 'error_max_turns' | 'error_max_budget_usd';
+  subtype: 'error_during_execution' | 'error_max_turns' | 'error_max_budget_usd' | 'error_max_structured_output_retries';
   duration_ms: number;
   duration_api_ms: number;
   is_error: boolean;
@@ -185,8 +210,10 @@ export type SDKResultMessage = SDKResultSuccess | SDKResultError;
 export interface PermissionDenial {
   tool_name: string;
   tool_use_id: string;
-  tool_input: unknown;
+  tool_input: Record<string, unknown>;
 }
+
+export type ApiKeySource = 'user' | 'project' | 'org' | 'temporary' | 'oauth';
 
 export interface SDKSystemMessage {
   type: 'system';
@@ -195,6 +222,15 @@ export interface SDKSystemMessage {
   model: string;
   permissionMode: PermissionMode;
   cwd: string;
+  agents?: string[];
+  apiKeySource?: ApiKeySource;
+  betas?: string[];
+  claude_code_version?: string;
+  mcp_servers?: { name: string; status: string }[];
+  slash_commands?: string[];
+  output_style?: string;
+  skills?: string[];
+  plugins?: { name: string; path: string }[];
   uuid: string;
   session_id: string;
 }
@@ -203,6 +239,18 @@ export interface SDKStatusMessage {
   type: 'system';
   subtype: 'status';
   status: 'compacting' | null;
+  permissionMode?: PermissionMode;
+  uuid: string;
+  session_id: string;
+}
+
+export interface SDKCompactBoundaryMessage {
+  type: 'system';
+  subtype: 'compact_boundary';
+  compact_metadata: {
+    trigger: 'manual' | 'auto';
+    pre_tokens: number;
+  };
   uuid: string;
   session_id: string;
 }
@@ -227,14 +275,166 @@ export interface SDKToolResultMessage {
   session_id: string;
 }
 
+export interface SDKTaskStartedMessage {
+  type: 'system';
+  subtype: 'task_started';
+  task_id: string;
+  tool_use_id?: string;
+  description: string;
+  task_type?: string;
+  uuid: string;
+  session_id: string;
+}
+
+export interface SDKTaskProgressMessage {
+  type: 'system';
+  subtype: 'task_progress';
+  task_id: string;
+  tool_use_id?: string;
+  description: string;
+  usage: {
+    total_tokens: number;
+    tool_uses: number;
+    duration_ms: number;
+  };
+  last_tool_name?: string;
+  uuid: string;
+  session_id: string;
+}
+
+export interface SDKTaskNotificationMessage {
+  type: 'system';
+  subtype: 'task_notification';
+  task_id: string;
+  tool_use_id?: string;
+  status: 'completed' | 'failed' | 'stopped';
+  output_file: string;
+  summary: string;
+  usage?: {
+    total_tokens: number;
+    tool_uses: number;
+    duration_ms: number;
+  };
+  uuid: string;
+  session_id: string;
+}
+
+export interface SDKToolProgressMessage {
+  type: 'tool_progress';
+  tool_use_id: string;
+  tool_name: string;
+  parent_tool_use_id: string | null;
+  elapsed_time_seconds: number;
+  task_id?: string;
+  uuid: string;
+  session_id: string;
+}
+
+export interface SDKHookStartedMessage {
+  type: 'system';
+  subtype: 'hook_started';
+  hook_id: string;
+  hook_name: string;
+  hook_event: string;
+  uuid: string;
+  session_id: string;
+}
+
+export interface SDKHookProgressMessage {
+  type: 'system';
+  subtype: 'hook_progress';
+  hook_id: string;
+  hook_name: string;
+  hook_event: string;
+  stdout: string;
+  stderr: string;
+  output: string;
+  uuid: string;
+  session_id: string;
+}
+
+export interface SDKHookResponseMessage {
+  type: 'system';
+  subtype: 'hook_response';
+  hook_id: string;
+  hook_name: string;
+  hook_event: string;
+  output: string;
+  stdout: string;
+  stderr: string;
+  exit_code?: number;
+  outcome: 'success' | 'error' | 'cancelled';
+  uuid: string;
+  session_id: string;
+}
+
+export interface SDKAuthStatusMessage {
+  type: 'auth_status';
+  isAuthenticating: boolean;
+  output: string[];
+  error?: string;
+  uuid: string;
+  session_id: string;
+}
+
+export interface SDKFilesPersistedEvent {
+  type: 'system';
+  subtype: 'files_persisted';
+  files: { filename: string; file_id: string }[];
+  failed: { filename: string; error: string }[];
+  processed_at: string;
+  uuid: string;
+  session_id: string;
+}
+
+export interface SDKToolUseSummaryMessage {
+  type: 'tool_use_summary';
+  summary: string;
+  preceding_tool_use_ids: string[];
+  uuid: string;
+  session_id: string;
+}
+
+export interface SDKRateLimitEvent {
+  type: 'rate_limit_event';
+  rate_limit_info: {
+    status: 'allowed' | 'allowed_warning' | 'rejected';
+    resetsAt?: number;
+    utilization?: number;
+  };
+  uuid: string;
+  session_id: string;
+}
+
+export interface SDKPromptSuggestionMessage {
+  type: 'prompt_suggestion';
+  suggestion: string;
+  uuid: string;
+  session_id: string;
+}
+
 export type SDKMessage =
   | SDKAssistantMessage
   | SDKUserMessage
+  | SDKUserMessageReplay
   | SDKResultMessage
   | SDKSystemMessage
   | SDKStatusMessage
+  | SDKCompactBoundaryMessage
   | SDKPartialAssistantMessage
-  | SDKToolResultMessage;
+  | SDKToolResultMessage
+  | SDKTaskStartedMessage
+  | SDKTaskProgressMessage
+  | SDKTaskNotificationMessage
+  | SDKToolProgressMessage
+  | SDKHookStartedMessage
+  | SDKHookProgressMessage
+  | SDKHookResponseMessage
+  | SDKAuthStatusMessage
+  | SDKFilesPersistedEvent
+  | SDKToolUseSummaryMessage
+  | SDKRateLimitEvent
+  | SDKPromptSuggestionMessage;
 
 // Slash command definition
 export interface SlashCommand {

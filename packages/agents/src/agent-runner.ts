@@ -21,12 +21,25 @@ export interface AgentRunnerOptions {
   onMessage?: (message: unknown) => void;
 }
 
+export interface AgentUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_input_tokens: number | null;
+  cache_read_input_tokens: number | null;
+  server_tool_use: { web_search_requests: number; web_fetch_requests: number } | null;
+  service_tier: ('standard' | 'priority' | 'batch') | null;
+  cache_creation: { ephemeral_1h_input_tokens: number; ephemeral_5m_input_tokens: number } | null;
+}
+
 export interface AgentResult {
   agentId: string;
   result: string;
   isError: boolean;
   numTurns: number;
   durationMs: number;
+  totalToolUseCount: number;
+  totalTokens: number;
+  usage: AgentUsage;
   /** Set when the agent ran inside a worktree and changes were detected */
   worktreePath?: string;
   worktreeBranch?: string;
@@ -93,11 +106,15 @@ export class AgentRunner {
     let resultText = '';
     let isError = false;
     let numTurns = 0;
+    let toolUseCount = 0;
+    let resultUsage: any = {};
 
     for await (const msg of loop.run(prompt)) {
-      // Persist each message to transcript if callback provided
       if (this.options.onMessage) {
         this.options.onMessage(msg);
+      }
+      if (msg.type === 'tool_result') {
+        toolUseCount++;
       }
       if (msg.type === 'result') {
         if ('result' in msg) {
@@ -105,8 +122,12 @@ export class AgentRunner {
         }
         isError = msg.is_error;
         numTurns = msg.num_turns;
+        resultUsage = (msg as any).usage ?? {};
       }
     }
+
+    const inputTokens = resultUsage.input_tokens ?? 0;
+    const outputTokens = resultUsage.output_tokens ?? 0;
 
     const agentResult: AgentResult = {
       agentId: this.agentId,
@@ -114,6 +135,17 @@ export class AgentRunner {
       isError,
       numTurns,
       durationMs: Date.now() - startTime,
+      totalToolUseCount: toolUseCount,
+      totalTokens: inputTokens + outputTokens,
+      usage: {
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
+        cache_creation_input_tokens: resultUsage.cache_creation_input_tokens ?? null,
+        cache_read_input_tokens: resultUsage.cache_read_input_tokens ?? null,
+        server_tool_use: resultUsage.server_tool_use ?? null,
+        service_tier: resultUsage.service_tier ?? null,
+        cache_creation: resultUsage.cache_creation ?? null,
+      },
     };
 
     return agentResult;

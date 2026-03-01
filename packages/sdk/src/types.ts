@@ -93,6 +93,19 @@ export interface QueryOptions {
   disallowedTools?: string[];
   /** Tool selection: an explicit list of names or the built-in 'claude_code' preset. */
   tools?: string[] | { type: 'preset'; preset: 'claude_code' };
+  /**
+   * Callback invoked after the default tool registry is created but before
+   * tool filtering is applied. Use this to register additional tools (e.g.
+   * Task, Team, Skill) that require runtime dependencies.
+   *
+   * @example
+   * ```ts
+   * setupTools: (registry) => {
+   *   registry.register(createTaskTool({ runSubagent: ... }));
+   * }
+   * ```
+   */
+  setupTools?: (registry: import('@open-agent/tools').ToolRegistry) => void | Promise<void>;
   env?: Record<string, string | undefined>;
   fallbackModel?: string;
   enableFileCheckpointing?: boolean;

@@ -24,6 +24,9 @@ export interface AgentSession {
   worktreeBranch?: string;
   numTurns: number;
   durationMs: number;
+  totalToolUseCount?: number;
+  totalTokens?: number;
+  usage?: import('./agent-runner.js').AgentUsage;
   result?: string;
   error?: string;
 }
@@ -67,6 +70,7 @@ export interface AgentHookExecutor {
 }
 
 export class AgentExecutor {
+  static readonly MAX_CONCURRENT_BACKGROUND = 10;
   private agents = new Map<string, AgentSession>();
   /** Abort controllers per agent — used to signal background agents to stop */
   private agentAbortControllers = new Map<string, AbortController>();
@@ -146,6 +150,9 @@ export class AgentExecutor {
       session.completedAt = new Date().toISOString();
       session.durationMs = Date.now() - startTime;
       session.numTurns = agentResult.numTurns;
+      session.totalToolUseCount = agentResult.totalToolUseCount;
+      session.totalTokens = agentResult.totalTokens;
+      session.usage = agentResult.usage;
       session.result = agentResult.result;
       if (options.worktreePath) {
         session.worktreePath = options.worktreePath;
@@ -197,6 +204,16 @@ export class AgentExecutor {
       durationMs: 0,
     };
 
+    const runningCount = [...this.agents.values()].filter(
+      (a) => a.state === 'running' || a.state === 'spawning',
+    ).length;
+    if (runningCount >= AgentExecutor.MAX_CONCURRENT_BACKGROUND) {
+      throw new Error(
+        `Maximum concurrent background agents (${AgentExecutor.MAX_CONCURRENT_BACKGROUND}) reached. ` +
+        'Wait for existing agents to complete or stop them with TaskStop.',
+      );
+    }
+
     this.agents.set(agentId, session);
     writeFileSync(outputFile, ''); // Create empty output file
     this.saveSession(session);
@@ -245,6 +262,9 @@ export class AgentExecutor {
         session.completedAt = new Date().toISOString();
         session.durationMs = Date.now() - startTime;
         session.numTurns = agentResult.numTurns;
+        session.totalToolUseCount = agentResult.totalToolUseCount;
+        session.totalTokens = agentResult.totalTokens;
+        session.usage = agentResult.usage;
         session.result = agentResult.result;
         if (options.worktreePath) {
           session.worktreePath = options.worktreePath;

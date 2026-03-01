@@ -355,4 +355,84 @@ describe('AgentExecutor', () => {
       expect(loadedSession!.result).toBe('mock result text');
     });
   });
+
+  describe('MAX_CONCURRENT_BACKGROUND', () => {
+    it('is set to 10', () => {
+      expect(AgentExecutor.MAX_CONCURRENT_BACKGROUND).toBe(10);
+    });
+
+    it('throws when exceeding the concurrent background limit', async () => {
+      const agentsMap = (executor as any).agents as Map<string, any>;
+
+      for (let i = 0; i < AgentExecutor.MAX_CONCURRENT_BACKGROUND; i++) {
+        agentsMap.set(`saturate-${i}`, {
+          agentId: `saturate-${i}`,
+          agentType: 'test',
+          state: 'running',
+          startedAt: new Date().toISOString(),
+          model: 'default',
+          numTurns: 0,
+          durationMs: 0,
+        });
+      }
+
+      await expect(
+        executor.executeInBackground({
+          definition: mockDefinition,
+          provider: mockProvider as any,
+          tools: mockTools,
+          prompt: 'This should be rejected',
+          cwd: '/tmp',
+        }),
+      ).rejects.toThrow(/Maximum concurrent background agents/);
+    });
+
+    it('allows new background agent after one completes', async () => {
+      const agentsMap = (executor as any).agents as Map<string, any>;
+
+      for (let i = 0; i < AgentExecutor.MAX_CONCURRENT_BACKGROUND; i++) {
+        agentsMap.set(`fill-${i}`, {
+          agentId: `fill-${i}`,
+          agentType: 'test',
+          state: 'running',
+          startedAt: new Date().toISOString(),
+          model: 'default',
+          numTurns: 0,
+          durationMs: 0,
+        });
+      }
+
+      // Mark one as completed to free a slot
+      agentsMap.get('fill-0')!.state = 'completed';
+
+      const { agentId } = await executor.executeInBackground({
+        definition: mockDefinition,
+        provider: mockProvider as any,
+        tools: mockTools,
+        prompt: 'Fits in freed slot',
+        cwd: '/tmp',
+      });
+
+      expect(typeof agentId).toBe('string');
+    });
+  });
+
+  describe('Usage stats passthrough', () => {
+    it('session has usage fields defaulting gracefully when runner omits them', async () => {
+      const { session } = await executor.execute({
+        definition: mockDefinition,
+        provider: mockProvider as any,
+        tools: mockTools,
+        prompt: 'Stats test',
+        cwd: '/tmp',
+      });
+
+      // mockRunResult doesn't include the new fields, so they should be undefined
+      // The session interface has them as optional — consumers use ?? fallbacks
+      expect(session.numTurns).toBe(2);
+      expect(session.totalToolUseCount).toBeUndefined();
+      expect(session.totalTokens).toBeUndefined();
+      expect(session.usage).toBeUndefined();
+    });
+  });
 });
