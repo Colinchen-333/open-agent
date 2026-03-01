@@ -8,7 +8,7 @@
 <h1 align="center">Open Agent</h1>
 
 <p align="center">
-  <strong>An open-source AI coding agent framework with CLI and SDK</strong><br/>
+  <strong>An open-source alternative to Anthropic's Claude Code — no black boxes</strong><br/>
   Multi-provider LLM support · 28 built-in tools · Multi-agent teams · MCP integration
 </p>
 
@@ -28,11 +28,22 @@
 
 ## Overview
 
-Open Agent is a fully-featured AI coding agent framework built with **Bun** and **TypeScript**. It provides both an **interactive CLI** for day-to-day coding and a **programmatic SDK** for embedding AI-powered coding capabilities into any application.
+Open Agent is an open-source AI coding agent framework built with **Bun** and **TypeScript**, designed as a **fully transparent alternative to Anthropic's Claude Code (agent SDK)**. Every line of system prompt, tool implementation, and conversation logic is open and auditable — no black boxes.
+
+The project provides both an **interactive CLI** and a **programmatic SDK**, giving you the same agent capabilities while retaining full control over behavior, cost, and data flow.
+
+### Roadmap
+
+| Phase | Focus | Status |
+|-------|-------|--------|
+| **Phase 1** | Full-featured Claude Code alternative — CLI, SDK, multi-provider, tools, MCP, permissions, sessions | **In Progress** |
+| **Phase 2** | Multi-agent collaboration — team workflows, planning, inter-agent coordination at scale | Planned |
+| **Phase 3** | Long-running tasks — persistent agents, complex project execution, autonomous workflows | Planned |
 
 ### Why Open Agent?
 
-- **Full transparency** — Open source from top to bottom; no vendor lock-in.
+- **No black boxes** — Every system prompt, tool definition, and decision path is open source and auditable.
+- **Drop-in alternative** — Matches Claude Code's core capabilities (tools, MCP, sessions, permissions) with a compatible SDK.
 - **Multi-provider** — Anthropic (extended thinking & prompt caching), OpenAI-compatible APIs, Ollama (local models).
 - **28 built-in tools** — File I/O, shell execution, code search, web fetch, notebook editing, git worktrees, and more.
 - **Multi-agent teams** — Spawn parallel sub-agents with shared task boards and inter-agent messaging.
