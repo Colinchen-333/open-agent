@@ -1,6 +1,7 @@
 import type { ToolDefinition, ToolContext } from './types.js';
 import { randomUUID } from 'crypto';
 import { mkdirSync } from 'fs';
+import { exec } from '@open-agent/core';
 
 // ---------------------------------------------------------------------------
 // Reusable worktree utility functions
@@ -21,19 +22,12 @@ export async function createWorktree(repoPath: string, name: string): Promise<Wo
 
   mkdirSync(`${repoPath}/.open-agent/worktrees`, { recursive: true });
 
-  const proc = Bun.spawn(
+  const { exitCode, stderr } = await exec(
     ['git', 'worktree', 'add', '-b', branchName, worktreePath],
-    {
-      cwd: repoPath,
-      stdout: 'pipe',
-      stderr: 'pipe',
-    },
+    { cwd: repoPath },
   );
 
-  const stderr = await new Response(proc.stderr).text();
-  await proc.exited;
-
-  if (proc.exitCode !== 0) {
+  if (exitCode !== 0) {
     throw new Error(`Failed to create worktree: ${stderr.trim()}`);
   }
 
@@ -51,26 +45,16 @@ export async function cleanupWorktree(worktreePath: string): Promise<void> {
   // to locate the common git dir.  The simplest approach: run the remove from
   // the worktree itself using --force so even dirty trees are deleted.
   try {
-    const proc = Bun.spawn(
+    await exec(
       ['git', 'worktree', 'remove', '--force', worktreePath],
-      {
-        cwd: worktreePath,
-        stdout: 'pipe',
-        stderr: 'pipe',
-      },
+      { cwd: worktreePath },
     );
-    await proc.exited;
 
     // Best-effort prune regardless of exit code above.
-    const pruneProc = Bun.spawn(
+    await exec(
       ['git', 'worktree', 'prune'],
-      {
-        cwd: worktreePath,
-        stdout: 'pipe',
-        stderr: 'pipe',
-      },
+      { cwd: worktreePath },
     );
-    await pruneProc.exited;
   } catch {
     // Cleanup is best-effort — never throw.
   }
@@ -83,19 +67,12 @@ export async function cleanupWorktree(worktreePath: string): Promise<void> {
  */
 export async function hasWorktreeChanges(worktreePath: string): Promise<boolean> {
   try {
-    const proc = Bun.spawn(
+    const { exitCode, stdout } = await exec(
       ['git', 'status', '--porcelain'],
-      {
-        cwd: worktreePath,
-        stdout: 'pipe',
-        stderr: 'pipe',
-      },
+      { cwd: worktreePath },
     );
 
-    const stdout = await new Response(proc.stdout).text();
-    await proc.exited;
-
-    if (proc.exitCode !== 0) return false;
+    if (exitCode !== 0) return false;
     return stdout.trim().length > 0;
   } catch {
     return false;

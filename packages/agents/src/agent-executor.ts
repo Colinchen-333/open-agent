@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, appendFileSync } fr
 import { join } from 'path';
 import { tmpdir, homedir } from 'os';
 import type { AgentDefinition } from '@open-agent/core';
+import { execSync } from '@open-agent/core';
 import type { LLMProvider } from '@open-agent/providers';
 import type { ToolDefinition } from '@open-agent/tools';
 
@@ -280,8 +281,8 @@ export class AgentExecutor {
           // Determine if worktree has changes (conservatively assume yes on error)
           let hasChanges = true;
           try {
-            const result = Bun.spawnSync(['git', 'status', '--porcelain'], { cwd: options.worktreePath });
-            hasChanges = (new TextDecoder().decode(result.stdout)).trim().length > 0;
+            const result = execSync(['git', 'status', '--porcelain'], { cwd: options.worktreePath });
+            hasChanges = result.stdout.trim().length > 0;
           } catch { /* assume changes */ }
           await options.onWorktreeCleanup(options.worktreePath, hasChanges);
         } catch {

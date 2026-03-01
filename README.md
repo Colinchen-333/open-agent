@@ -2,7 +2,7 @@
   <img src="https://img.shields.io/badge/runtime-Bun-f472b6?style=for-the-badge&logo=bun&logoColor=white" alt="Bun" />
   <img src="https://img.shields.io/badge/lang-TypeScript-3178c6?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript" />
   <img src="https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge" alt="MIT License" />
-  <img src="https://img.shields.io/badge/tests-286%20passing-22c55e?style=for-the-badge" alt="Tests" />
+  <img src="https://img.shields.io/badge/tests-334%20passing-22c55e?style=for-the-badge" alt="Tests" />
 </p>
 
 <h1 align="center">Open Agent</h1>
@@ -84,6 +84,11 @@ open-agent -m claude-opus-4-6 "review this PR"
 # Resume previous session
 open-agent --continue
 open-agent --resume <session-id>
+
+# Additional options
+#   --add-dir <path>        Additional working directory (repeatable)
+#   --verbose, --debug      Enable verbose/debug output
+#   --permission-prompt-tool <name>  MCP tool for permission decisions
 ```
 
 ### Slash Commands
@@ -125,6 +130,43 @@ for await (const event of stream) {
     case 'result':
       console.log(`Done in ${event.num_turns} turns, cost: $${event.total_cost_usd}`);
       break;
+  }
+}
+```
+
+### Provider Direct-Pass
+
+```typescript
+import { query } from '@open-agent/sdk';
+
+// Use any OpenAI-compatible endpoint directly
+const stream = query('Explain this code', {
+  provider: 'openai',
+  apiKey: 'your-api-key',
+  baseUrl: 'https://api.example.com/v1',
+  model: 'your-model-name',
+});
+
+for await (const event of stream) {
+  if (event.type === 'result') console.log('Done:', event.num_turns, 'turns');
+}
+```
+
+### Fallback Model & Budget Control
+
+```typescript
+import { query } from '@open-agent/sdk';
+
+const stream = query('Refactor the auth module', {
+  model: 'claude-opus-4-6',
+  fallbackModel: 'claude-sonnet-4-6',  // Auto-switch on model errors
+  maxBudgetUsd: 5.00,                   // Hard cost limit
+  maxTurns: 20,
+});
+
+for await (const event of stream) {
+  if (event.type === 'result') {
+    console.log(`Cost: $${event.total_cost_usd}, Turns: ${event.num_turns}`);
   }
 }
 ```
@@ -188,6 +230,30 @@ const stream = query('Deploy the main branch to staging', {
 });
 ```
 
+### Multi-Agent Teams
+
+```typescript
+import { query } from '@open-agent/sdk';
+
+// Spawn a sub-agent for parallel research
+const stream = query('Research the codebase architecture, then refactor the auth module', {
+  model: 'claude-sonnet-4-6',
+  permissionMode: 'acceptEdits',
+  agents: {
+    'researcher': {
+      description: 'Explores and documents code architecture',
+      prompt: 'You are a code research specialist.',
+      tools: ['Read', 'Glob', 'Grep'],
+    },
+  },
+});
+
+for await (const event of stream) {
+  // The main agent can spawn 'researcher' sub-agents via the Task tool
+  if (event.type === 'result') console.log('Done');
+}
+```
+
 ### QueryOptions Reference
 
 ```typescript
@@ -203,12 +269,15 @@ interface QueryOptions {
   maxTurns?: number;                 // Max conversation turns
   maxBudgetUsd?: number;             // Cost limit
   abortController?: AbortController; // Cancellation support
+  additionalDirectories?: string[];  // Extra working directories
+  fallbackModel?: string;            // Model to use if primary fails
 
   // Tools & Permissions
   tools?: string[];                  // Tool whitelist
   allowedTools?: string[];
   disallowedTools?: string[];
   permissionMode?: PermissionMode;   // 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk'
+  allowDangerouslySkipPermissions?: boolean;
 
   // Session
   sessionId?: string;
@@ -220,6 +289,11 @@ interface QueryOptions {
   hooks?: Partial<Record<HookEvent, any[]>>;
   mcpServers?: Record<string, McpServerConfig>;
   agents?: Record<string, AgentDefinition>;
+  debug?: boolean;                   // Enable debug logging
+  env?: Record<string, string>;      // Environment overrides
+  provider?: 'anthropic' | 'openai' | 'ollama';
+  apiKey?: string;                   // API key for provider
+  baseUrl?: string;                  // Custom base URL
 }
 ```
 
@@ -489,8 +563,8 @@ bun run build
 | Packages | 10 |
 | Built-in tools | 27 |
 | LLM providers | 3 |
-| Test files | 15 |
-| Tests | 286 passing |
+| Test files | 19 |
+| Tests | 334 passing |
 
 ## License
 

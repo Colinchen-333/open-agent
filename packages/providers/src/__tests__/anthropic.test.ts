@@ -316,6 +316,34 @@ describe('convertTools', () => {
 });
 
 // ---------------------------------------------------------------------------
+// ChatOptions responseFormat
+// ---------------------------------------------------------------------------
+
+describe('ChatOptions responseFormat', () => {
+  it('responseFormat field is accepted in ChatOptions', () => {
+    const opts: ChatOptions = {
+      model: 'claude-sonnet-4-6',
+      responseFormat: { type: 'json_schema', schema: { type: 'object' } },
+    };
+    expect(opts.responseFormat?.type).toBe('json_schema');
+  });
+
+  it('schema is accessible from responseFormat', () => {
+    const schema = { type: 'object', properties: { result: { type: 'string' } } };
+    const opts: ChatOptions = {
+      model: 'claude-sonnet-4-6',
+      responseFormat: { type: 'json_schema', schema },
+    };
+    expect(opts.responseFormat?.schema).toEqual(schema);
+  });
+
+  it('responseFormat is optional (defaults to undefined)', () => {
+    const opts: ChatOptions = { model: 'claude-sonnet-4-6' };
+    expect(opts.responseFormat).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // effortToBudget
 // ---------------------------------------------------------------------------
 

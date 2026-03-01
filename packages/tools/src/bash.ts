@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import type { ToolDefinition, ToolContext, BashInput } from './types.js';
 import { getBackgroundTasks } from './task-management.js';
+import { spawnProcess } from '@open-agent/core';
 
 const MAX_OUTPUT_LENGTH = 30000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -85,11 +86,9 @@ export function createBashTool(): ToolDefinition {
         // Auto-prune old completed tasks to prevent memory leaks
         pruneBackgroundTasks(backgroundTasks);
 
-        const proc = Bun.spawn(['bash', '-c', wrappedCommand], {
+        const proc = await spawnProcess(['bash', '-c', wrappedCommand], {
           cwd: effectiveCwd,
-          stdout: 'pipe',
-          stderr: 'pipe',
-          env: { ...process.env, TERM: 'dumb' } as Record<string, string>,
+          env: { TERM: 'dumb' },
         });
 
         backgroundTasks.set(taskId, {
@@ -104,8 +103,8 @@ export function createBashTool(): ToolDefinition {
           const task = backgroundTasks.get(taskId)!;
           try {
             const [stdout, stderr] = await Promise.all([
-              new Response(proc.stdout).text(),
-              new Response(proc.stderr).text(),
+              proc.stdoutText(),
+              proc.stderrText(),
             ]);
             // Strip CWD sentinel from output and update persistentCwd
             const { cleanOutput, finalCwd } = extractCwd(stdout, CWD_SENTINEL);
@@ -122,11 +121,9 @@ export function createBashTool(): ToolDefinition {
       }
 
       // Foreground execution
-      const proc = Bun.spawn(['bash', '-c', wrappedCommand], {
+      const proc = await spawnProcess(['bash', '-c', wrappedCommand], {
         cwd: effectiveCwd,
-        stdout: 'pipe',
-        stderr: 'pipe',
-        env: { ...process.env, TERM: 'dumb' } as Record<string, string>,
+        env: { TERM: 'dumb' },
       });
 
       let killed = false;
@@ -147,15 +144,15 @@ export function createBashTool(): ToolDefinition {
       let rawStderr: string;
       try {
         [rawStdout, rawStderr] = await Promise.all([
-          new Response(proc.stdout).text(),
-          new Response(proc.stderr).text(),
+          proc.stdoutText(),
+          proc.stderrText(),
         ]);
       } finally {
         clearTimeout(timer);
         ctx.abortSignal?.removeEventListener('abort', onAbort);
       }
 
-      await proc.exited;
+      const exitCode = await proc.exited;
 
       if (aborted) {
         throw new DOMException('Bash command aborted', 'AbortError');
@@ -178,8 +175,8 @@ export function createBashTool(): ToolDefinition {
       if (!output) output = '(no output)';
 
       // Exit info: only show numeric exit code if we have one.
-      const exitInfo = (proc.exitCode !== null && proc.exitCode !== 0)
-        ? `\n(exit code: ${proc.exitCode})` : '';
+      const exitInfo = (exitCode !== null && exitCode !== 0)
+        ? `\n(exit code: ${exitCode})` : '';
       const interruptedNote = killed ? '\n(command timed out and was killed)' : '';
       return output + exitInfo + interruptedNote;
     },

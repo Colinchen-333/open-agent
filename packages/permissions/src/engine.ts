@@ -57,6 +57,7 @@ export class PermissionEngine {
   private sandbox: SandboxConfig;
   private allowedPaths: string[];
   private deniedPaths: string[];
+  private _permissionPromptToolName?: string;
 
   constructor(config?: Partial<PermissionConfig & { sandbox: SandboxConfig }>) {
     this.mode = config?.mode ?? 'default';
@@ -196,11 +197,10 @@ export class PermissionEngine {
       }
 
       if (['Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit'].includes(request.toolName)) {
-        // Support both file_path (Read/Write/Edit) and pattern (Glob/Grep)
+        // file_path for Read/Write/Edit/NotebookEdit, path for Glob/Grep (directory being accessed)
+        const inp = request.input as Record<string, unknown>;
         const filePath = String(
-          (request.input as Record<string, unknown>)?.file_path ??
-          (request.input as Record<string, unknown>)?.pattern ??
-          ''
+          inp?.file_path ?? inp?.notebook_path ?? inp?.path ?? ''
         );
         return filePath.startsWith(rule.ruleContent) || filePath.includes(rule.ruleContent);
       }
@@ -287,6 +287,26 @@ export class PermissionEngine {
 
   setDeniedPaths(paths: string[]): void {
     this.deniedPaths = paths;
+  }
+
+  setPermissionPromptToolName(name: string): void {
+    this._permissionPromptToolName = name;
+  }
+
+  /**
+   * Return the MCP tool name that should be called when a permission decision
+   * requires human input.
+   *
+   * Architectural note: `evaluate()` intentionally does NOT call this tool
+   * directly — it only returns a `{ behavior: 'ask' }` decision.  The actual
+   * routing to the MCP permission-prompt tool is the responsibility of the
+   * caller (ConversationLoop / query.ts), which reads this value via
+   * `getPermissionPromptToolName()` and dispatches the MCP call before
+   * resuming execution.  Keeping routing out of PermissionEngine ensures the
+   * engine remains synchronous and testable in isolation.
+   */
+  getPermissionPromptToolName(): string | undefined {
+    return this._permissionPromptToolName;
   }
 
   /**

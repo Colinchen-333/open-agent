@@ -1,4 +1,5 @@
 import type { ToolDefinition, ToolContext, GrepInput, GrepOutput } from './types.js';
+import { exec } from '@open-agent/core';
 
 export function createGrepTool(): ToolDefinition {
   return {
@@ -115,19 +116,7 @@ export function createGrepTool(): ToolDefinition {
       args.push('--', input.pattern);
       args.push(input.path ?? ctx.cwd);
 
-      const proc = Bun.spawn(['rg', ...args], {
-        cwd: ctx.cwd,
-        stdout: 'pipe',
-        stderr: 'pipe',
-      });
-
-      const [rawOutput] = await Promise.all([
-        new Response(proc.stdout).text(),
-        // consume stderr so the process doesn't stall
-        new Response(proc.stderr).text(),
-      ]);
-
-      await proc.exited;
+      const { stdout: rawOutput } = await exec(['rg', ...args], { cwd: ctx.cwd });
 
       // Split into non-empty lines
       let lines = rawOutput.trimEnd().split('\n').filter(l => l.length > 0);

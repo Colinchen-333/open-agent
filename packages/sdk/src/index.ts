@@ -13,10 +13,12 @@ export * from './types.js';
 
 // Primary V1 API
 export { query } from './query.js';
-export type { QueryOptions } from './types.js';
+
+// Session utilities
+export { listSessions } from './list-sessions.js';
 
 // Stable V2 session API
-export { createSession, resumeSession } from './session.js';
+export { createSession, resumeSession, forkSession } from './session.js';
 export type { SDKSession } from './session.js';
 
 // Legacy V2 API (preserved for backwards compatibility)
@@ -54,6 +56,7 @@ export type {
   ThinkingConfig,
   ModelUsage,
   SlashCommand,
+  SessionInfo,
 } from '@open-agent/core';
 
 // Provider Message type for low-level usage

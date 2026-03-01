@@ -1,4 +1,5 @@
 import type { HookEvent } from '@open-agent/core';
+import { spawnProcess } from '@open-agent/core';
 import type {
   HookCallbackMatcher,
   HookDefinition,
@@ -195,22 +196,14 @@ export class HookExecutor {
       }
     }
 
-    const proc = Bun.spawn(['bash', '-c', hook.command], {
-      stdin: 'pipe',
-      stdout: 'pipe',
-      stderr: 'pipe',
-      env: {
-        ...process.env,
-        ...extraEnv,
-      },
+    const proc = await spawnProcess(['bash', '-c', hook.command], {
+      env: extraEnv,
     });
 
     // Write input JSON to the process stdin and close the stream so the
     // process receives EOF after reading.
-    // Bun's FileSink exposes write() / flush() / end() — not getWriter().
-    proc.stdin.write(inputJson);
-    proc.stdin.flush();
-    proc.stdin.end();
+    proc.writeStdin(inputJson);
+    proc.closeStdin();
 
     // Kill the process if it exceeds the timeout.
     // Send SIGTERM first, then follow up with SIGKILL after a 5s grace period.
@@ -227,8 +220,8 @@ export class HookExecutor {
 
     try {
       [stdout, stderr] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
+        proc.stdoutText(),
+        proc.stderrText(),
       ]);
       await proc.exited;
     } finally {

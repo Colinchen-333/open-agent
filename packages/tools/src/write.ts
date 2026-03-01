@@ -1,6 +1,7 @@
 import { mkdir } from 'fs/promises';
 import { dirname } from 'path';
 import type { ToolDefinition, ToolContext, FileWriteInput } from './types.js';
+import { fileExists, writeText } from '@open-agent/core';
 
 export function createWriteTool(): ToolDefinition {
   return {
@@ -22,8 +23,7 @@ export function createWriteTool(): ToolDefinition {
     },
 
     async execute(input: FileWriteInput, ctx: ToolContext) {
-      const file = Bun.file(input.file_path);
-      const exists = await file.exists();
+      const exists = await fileExists(input.file_path);
 
       // Enforce read-before-overwrite safety for existing files:
       // the LLM must have read the file before overwriting it.
@@ -38,7 +38,7 @@ export function createWriteTool(): ToolDefinition {
       const dir = dirname(input.file_path);
       await mkdir(dir, { recursive: true });
 
-      await Bun.write(input.file_path, input.content);
+      await writeText(input.file_path, input.content);
 
       // Mark the file as read so a subsequent Edit doesn't reject it.
       ctx.fileReadTracker?.markRead(input.file_path);

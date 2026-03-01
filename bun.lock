@@ -93,6 +93,9 @@
       "version": "0.1.0",
       "dependencies": {
         "@open-agent/core": "workspace:*",
+        "@open-agent/hooks": "workspace:*",
+        "@open-agent/mcp": "workspace:*",
+        "@open-agent/permissions": "workspace:*",
         "@open-agent/providers": "workspace:*",
         "@open-agent/tools": "workspace:*",
       },

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { createSession, resumeSession } from '../session.js';
+import { createSession, resumeSession, forkSession } from '../session.js';
 
 describe('createSession()', () => {
   it('returns a session with required interface methods', () => {
@@ -49,6 +49,62 @@ describe('createSession()', () => {
       }
     } catch {
       threw = true;
+    }
+    expect(threw).toBe(true);
+  });
+});
+
+describe('forkSession()', () => {
+  it('is exported from session module', () => {
+    expect(typeof forkSession).toBe('function');
+  });
+
+  it('returns a session with a different ID than the source', () => {
+    const session = forkSession('non-existent-session-id');
+    expect(session.sessionId).toBeDefined();
+    expect(session.sessionId).not.toBe('non-existent-session-id');
+    session.close();
+  });
+
+  it('returns a session with required interface methods', () => {
+    const session = forkSession('any-session-id');
+    expect(typeof session.send).toBe('function');
+    expect(typeof session.close).toBe('function');
+    expect(typeof session[Symbol.asyncDispose]).toBe('function');
+    session.close();
+  });
+
+  it('each fork gets a unique session ID', () => {
+    const fork1 = forkSession('source-session');
+    const fork2 = forkSession('source-session');
+    expect(fork1.sessionId).not.toBe(fork2.sessionId);
+    fork1.close();
+    fork2.close();
+  });
+
+  it('is exported from @open-agent/sdk', () => {
+    const sdk = require('../index.js');
+    expect(typeof sdk.forkSession).toBe('function');
+  });
+
+  it('does not throw for non-existent source session (starts with empty history)', () => {
+    const session = forkSession('completely-unknown-session-99999');
+    expect(session).toBeDefined();
+    session.close();
+  });
+
+  it('send() throws after close()', async () => {
+    const session = forkSession('some-session');
+    session.close();
+
+    let threw = false;
+    try {
+      for await (const _msg of session.send('hello')) {
+        // should not reach
+      }
+    } catch (e) {
+      threw = true;
+      expect((e as Error).message).toContain('closed');
     }
     expect(threw).toBe(true);
   });

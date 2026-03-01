@@ -2,6 +2,7 @@ import { describe, it, expect } from 'bun:test';
 import { query } from '../query.js';
 import type { LLMProvider, Message, StreamEvent, ChatOptions } from '@open-agent/providers';
 import type { ModelInfo, SDKMessage } from '@open-agent/core';
+import type { QueryOptions } from '../types.js';
 
 // ===========================================================================
 // Mock Providers for Advanced Feature Testing
@@ -482,6 +483,124 @@ describe('edge cases', () => {
 
 // ===========================================================================
 // Behavior with Options Variants
+// ===========================================================================
+
+// ===========================================================================
+// Tests for additionalDirectories
+// ===========================================================================
+
+describe('additionalDirectories', () => {
+  it('option is accepted without error', () => {
+    const opts: QueryOptions = { additionalDirectories: ['/tmp/extra', '/tmp/other'] };
+    expect(opts.additionalDirectories).toHaveLength(2);
+  });
+
+  it('additionalDirectories is included in QueryOptions type', () => {
+    const opts: QueryOptions = { additionalDirectories: [] };
+    expect(Array.isArray(opts.additionalDirectories)).toBe(true);
+  });
+
+  it('works alongside other options', () => {
+    const q = query('Task', {
+      model: 'claude-sonnet-4-6',
+      additionalDirectories: ['/tmp/extra'],
+      maxTurns: 5,
+    });
+    expect(q).toBeDefined();
+    q.close();
+  });
+});
+
+// ===========================================================================
+// Tests for enableFileCheckpointing
+// ===========================================================================
+
+describe('enableFileCheckpointing', () => {
+  it('option is accepted', () => {
+    const opts: QueryOptions = { enableFileCheckpointing: true };
+    expect(opts.enableFileCheckpointing).toBe(true);
+  });
+
+  it('defaults to undefined', () => {
+    const opts: QueryOptions = {};
+    expect(opts.enableFileCheckpointing).toBeUndefined();
+  });
+
+  it('works alongside other options in query()', () => {
+    const q = query('Task', {
+      model: 'claude-sonnet-4-6',
+      enableFileCheckpointing: true,
+    });
+    expect(q).toBeDefined();
+    q.close();
+  });
+});
+
+// ===========================================================================
+// Tests for outputFormat / JSON schema
+// ===========================================================================
+
+describe('outputFormat', () => {
+  it('option is accepted with json_schema type', () => {
+    const opts: QueryOptions = {
+      outputFormat: {
+        type: 'json_schema',
+        schema: { type: 'object', properties: { answer: { type: 'string' } } },
+      },
+    };
+    expect(opts.outputFormat?.type).toBe('json_schema');
+    expect(opts.outputFormat?.schema).toBeDefined();
+  });
+
+  it('schema property is accessible', () => {
+    const schema = { type: 'object', properties: { name: { type: 'string' } } };
+    const opts: QueryOptions = {
+      outputFormat: { type: 'json_schema', schema },
+    };
+    expect(opts.outputFormat?.schema).toEqual(schema);
+  });
+
+  it('works alongside other options in query()', () => {
+    const q = query('Return JSON', {
+      model: 'claude-sonnet-4-6',
+      outputFormat: {
+        type: 'json_schema',
+        schema: { type: 'object' },
+      },
+    });
+    expect(q).toBeDefined();
+    q.close();
+  });
+});
+
+// ===========================================================================
+// Tests for forkSession query option
+// ===========================================================================
+
+describe('forkSession query option', () => {
+  it('option is accepted', () => {
+    const opts: QueryOptions = { forkSession: true, sessionId: 'original' };
+    expect(opts.forkSession).toBe(true);
+  });
+
+  it('defaults to undefined', () => {
+    const opts: QueryOptions = {};
+    expect(opts.forkSession).toBeUndefined();
+  });
+
+  it('works alongside other options in query()', () => {
+    const q = query('Task', {
+      model: 'claude-sonnet-4-6',
+      forkSession: true,
+      sessionId: 'some-session-id',
+    });
+    expect(q).toBeDefined();
+    q.close();
+  });
+});
+
+// ===========================================================================
+// Options Compatibility
 // ===========================================================================
 
 describe('options compatibility', () => {

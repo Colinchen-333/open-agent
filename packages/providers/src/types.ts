@@ -42,6 +42,8 @@ export interface ChatOptions {
   stopSequences?: string[];
   /** AbortSignal to cancel the in-flight HTTP request (Ctrl+C support). */
   signal?: AbortSignal;
+  /** Structured output format (e.g. JSON schema). */
+  responseFormat?: { type: 'json_schema'; schema: Record<string, unknown> };
 }
 
 export interface ToolSpec {

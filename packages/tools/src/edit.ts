@@ -1,4 +1,5 @@
 import type { ToolDefinition, ToolContext, FileEditInput } from './types.js';
+import { fileExists, readText, writeText } from '@open-agent/core';
 
 /**
  * Generate a simple unified-style diff showing the changed lines and up to
@@ -107,13 +108,12 @@ export function createEditTool(): ToolDefinition {
         );
       }
 
-      const file = Bun.file(input.file_path);
-      const exists = await file.exists();
+      const exists = await fileExists(input.file_path);
       if (!exists) {
         throw new Error(`File not found: ${input.file_path}`);
       }
 
-      const content = await file.text();
+      const content = await readText(input.file_path);
 
       if (!input.replace_all) {
         // Count occurrences to enforce uniqueness
@@ -132,7 +132,7 @@ export function createEditTool(): ToolDefinition {
         ? content.replaceAll(input.old_string, input.new_string)
         : content.replace(input.old_string, input.new_string);
 
-      await Bun.write(input.file_path, newContent);
+      await writeText(input.file_path, newContent);
 
       const replacements = input.replace_all
         ? content.split(input.old_string).length - 1

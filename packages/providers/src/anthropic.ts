@@ -236,13 +236,20 @@ export class AnthropicProvider implements LLMProvider {
       // budget_tokens + 4096 headroom for the visible response.
       const effectiveMaxTokens = thinkingParam
         ? Math.max(options.maxTokens ?? 16384, budgetTokens + 4096)
-        : (options.maxTokens ?? 8096);
+        : (options.maxTokens ?? 8192);
+
+      // If responseFormat is specified, instruct the model to output JSON
+      let effectiveSystem = system;
+      if (options.responseFormat) {
+        const schemaStr = JSON.stringify(options.responseFormat.schema);
+        effectiveSystem = (effectiveSystem ?? '') + `\n\nYou MUST respond with valid JSON matching this schema:\n${schemaStr}`;
+      }
 
       // Enable prompt caching on system prompt and tool definitions.
       // This can reduce costs by up to 90% and latency by 85% on long conversations
       // where the system prompt and tool specs repeat every turn.
-      const systemParam = system
-        ? [{ type: 'text' as const, text: system, cache_control: { type: 'ephemeral' as const } }]
+      const systemParam = effectiveSystem
+        ? [{ type: 'text' as const, text: effectiveSystem, cache_control: { type: 'ephemeral' as const } }]
         : undefined;
 
       // Mark the last tool definition for caching so the entire tool list is cached.

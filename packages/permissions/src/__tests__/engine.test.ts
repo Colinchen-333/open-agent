@@ -261,6 +261,30 @@ describe('PermissionEngine', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // permissionPromptTool
+  // ---------------------------------------------------------------------------
+
+  describe('permissionPromptTool', () => {
+    it('getPermissionPromptToolName returns undefined by default', () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      expect(engine.getPermissionPromptToolName()).toBeUndefined();
+    });
+
+    it('setPermissionPromptToolName stores the name and getPermissionPromptToolName returns it', () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      engine.setPermissionPromptToolName('my-tool');
+      expect(engine.getPermissionPromptToolName()).toBe('my-tool');
+    });
+
+    it('can overwrite permissionPromptToolName with a new value', () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      engine.setPermissionPromptToolName('first-tool');
+      engine.setPermissionPromptToolName('second-tool');
+      expect(engine.getPermissionPromptToolName()).toBe('second-tool');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Wildcard rules
   // ---------------------------------------------------------------------------
 

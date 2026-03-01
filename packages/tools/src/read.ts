@@ -1,5 +1,6 @@
 import { statSync, readFileSync } from 'fs';
 import type { ToolDefinition, ToolContext, FileReadInput } from './types.js';
+import { readText, fileExists, fileSize, exec } from '@open-agent/core';
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
 const DEFAULT_LINE_LIMIT = 2000;
@@ -60,8 +61,7 @@ export function createReadTool(): ToolDefinition {
       // for text-based LLM workflows. Use Bash + an image tool if you need
       // to inspect actual pixel content.
       if (IMAGE_EXTENSIONS.has(ext)) {
-        const file = Bun.file(input.file_path);
-        const exists = await file.exists();
+        const exists = await fileExists(input.file_path);
         if (!exists) {
           throw new Error(`File not found: ${input.file_path}`);
         }
@@ -80,7 +80,7 @@ export function createReadTool(): ToolDefinition {
 
         // For SVG files we can read them as text since they are XML.
         if (ext === '.svg') {
-          const content = await file.text();
+          const content = await readText(input.file_path);
           const lines = content.split('\n');
           const totalLines = lines.length;
           const startLine = Math.max(1, input.offset ?? 1);
@@ -119,8 +119,7 @@ export function createReadTool(): ToolDefinition {
       // Handle PDF files — try to extract text via pdftotext if available,
       // falling back to metadata + instructions if not installed.
       if (ext === '.pdf') {
-        const file = Bun.file(input.file_path);
-        const exists = await file.exists();
+        const exists = await fileExists(input.file_path);
         if (!exists) {
           throw new Error(`File not found: ${input.file_path}`);
         }
@@ -140,11 +139,9 @@ export function createReadTool(): ToolDefinition {
 
           pdfArgs.push(input.file_path, '-'); // output to stdout
 
-          const proc = Bun.spawn(pdfArgs, { stdout: 'pipe', stderr: 'pipe' });
-          const text = await new Response(proc.stdout).text();
-          await proc.exited;
+          const { exitCode, stdout: text } = await exec(pdfArgs);
 
-          if (proc.exitCode === 0 && text.trim().length > 0) {
+          if (exitCode === 0 && text.trim().length > 0) {
             const allLines = text.split('\n');
             const startLine = Math.max(1, input.offset ?? 1);
             const lineLimit = input.limit ?? DEFAULT_LINE_LIMIT;
@@ -194,12 +191,11 @@ export function createReadTool(): ToolDefinition {
 
       // Handle Jupyter Notebook files
       if (ext === '.ipynb') {
-        const file = Bun.file(input.file_path);
-        const exists = await file.exists();
+        const exists = await fileExists(input.file_path);
         if (!exists) {
           throw new Error(`File not found: ${input.file_path}`);
         }
-        const content = await file.text();
+        const content = await readText(input.file_path);
         let notebook: any;
         try {
           notebook = JSON.parse(content);
@@ -260,8 +256,7 @@ export function createReadTool(): ToolDefinition {
       }
 
       // Handle text files
-      const file = Bun.file(input.file_path);
-      const exists = await file.exists();
+      const exists = await fileExists(input.file_path);
       if (!exists) {
         throw new Error(`File not found: ${input.file_path}`);
       }
@@ -272,9 +267,13 @@ export function createReadTool(): ToolDefinition {
       const sampleSize = Math.min(8192, stat.size);
       if (sampleSize > 0) {
         const fd = require('fs').openSync(input.file_path, 'r');
-        const sampleBuf = Buffer.alloc(sampleSize);
-        require('fs').readSync(fd, sampleBuf, 0, sampleSize, 0);
-        require('fs').closeSync(fd);
+        let sampleBuf: Buffer;
+        try {
+          sampleBuf = Buffer.alloc(sampleSize);
+          require('fs').readSync(fd, sampleBuf, 0, sampleSize, 0);
+        } finally {
+          require('fs').closeSync(fd);
+        }
         if (sampleBuf.includes(0)) {
           const sizeKb = (stat.size / 1024).toFixed(1);
           return {
@@ -290,7 +289,7 @@ export function createReadTool(): ToolDefinition {
         }
       }
 
-      const raw = await file.text();
+      const raw = await readText(input.file_path);
 
       // Empty file detection
       if (raw.length === 0) {

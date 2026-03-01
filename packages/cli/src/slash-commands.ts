@@ -410,7 +410,9 @@ const SLASH_COMMANDS: Record<
         checks.push(`  ✓ ${rgVersion}`);
       } catch { checks.push('  ✗ ripgrep (rg) not found — Grep tool will not work'); }
       // Check Node/Bun
-      checks.push(`  ✓ Bun ${Bun.version}`);
+      const { runtimeVersion } = await import('@open-agent/core');
+      const runtimeLabel = ('Bun' in globalThis) ? `Bun ${runtimeVersion}` : `Node.js ${runtimeVersion}`;
+      checks.push(`  ✓ ${runtimeLabel}`);
       checks.push(`  ✓ CWD: ${ctx.cwd}`);
       checks.push(`  ✓ Model: ${ctx.model}`);
       checks.push(`  ✓ Permission mode: ${ctx.permissionMode ?? 'default'}`);

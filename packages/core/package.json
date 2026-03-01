@@ -10,6 +10,10 @@
       "types": "./src/index.ts"
     }
   },
+  "dependencies": {
+    "@open-agent/providers": "workspace:*",
+    "@open-agent/tools": "workspace:*"
+  },
   "scripts": {
     "build": "echo 'No build step for core'",
     "dev": "echo 'No dev step for core'"
