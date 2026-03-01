@@ -399,6 +399,7 @@ export function query(
   let effectivePermissionEngine: {
     evaluate: (request: { toolName: string; input: unknown; toolUseId?: string }) => { behavior: 'allow' | 'deny' | 'ask'; reason?: string } | Promise<{ behavior: 'allow' | 'deny' | 'ask'; reason?: string }>;
     addRule: (behavior: 'allow' | 'deny' | 'ask', rule: { toolName: string; ruleContent?: string }) => void;
+    removeRule?: (behavior: 'allow' | 'deny' | 'ask', rule: { toolName: string; ruleContent?: string }) => void;
     setMode?: (mode: string) => void;
   } = permissionEngine as any;
 
@@ -427,6 +428,15 @@ export function query(
             agentID: options.agent,
           },
         );
+
+        if (result && typeof result === 'object' && 'updatedPermissions' in result) {
+          applyPermissionUpdates(permissionEngine, result.updatedPermissions);
+        }
+
+        if (result && typeof result === 'object' && 'updatedInput' in result) {
+          applyUpdatedInput(request.input, result.updatedInput);
+        }
+
         if (result && typeof result === 'object' && 'behavior' in result) {
           if (result.behavior === 'allow') {
             return {
@@ -435,6 +445,9 @@ export function query(
             };
           }
           if (result.behavior === 'deny') {
+            if ('interrupt' in result && result.interrupt === true) {
+              internalAbortController.abort();
+            }
             const denyMessage = 'message' in result && typeof result.message === 'string'
               ? result.message
               : ('reason' in result && typeof result.reason === 'string'
@@ -581,6 +594,19 @@ export function query(
     if (abortCaller && callerAbortController && !callerAbortController.signal.aborted) {
       callerAbortController.abort();
     }
+  }
+
+  let cleanedUp = false;
+  function cleanupQueryResources(): void {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    if (mcpManager) {
+      mcpManager.disconnectAll().catch(() => {});
+    }
+    streamClosed = true;
+    notifyQueue();
+    removeCallerAbortListener();
+    restoreEnv();
   }
 
   // Wire up a cost calculator so ConversationLoop can track spending and
@@ -800,15 +826,7 @@ export function query(
       // Ensure the abort controller fires so any dangling HTTP requests or
       // child processes are cleaned up when the caller stops iterating early.
       abortQuery(false);
-      // Disconnect MCP servers when the conversation ends.
-      if (mcpManager) {
-        mcpManager.disconnectAll().catch(() => {});
-      }
-      streamClosed = true;
-      notifyQueue();
-      removeCallerAbortListener();
-      // Restore any env vars that were overridden by options.env or options.debug.
-      restoreEnv();
+      cleanupQueryResources();
     }
   }
 
@@ -838,25 +856,44 @@ export function query(
   // Attach control methods to make the generator satisfy Query
   // ------------------------------------------------------------------
   const queryObj = gen as unknown as Query;
+  const finalizeGenerator = () => {
+    const returnPromise = queryObj.return?.(undefined as any) as Promise<IteratorResult<SDKMessage, void>> | undefined;
+    if (returnPromise) {
+      void returnPromise.catch(() => {});
+    }
+  };
 
   queryObj.interrupt = async () => {
     abortQuery(true);
+    cleanupQueryResources();
+    finalizeGenerator();
   };
 
   queryObj.setPermissionMode = async (mode) => {
     if (mode !== undefined) {
+      if (mode === 'bypassPermissions' && options.allowDangerouslySkipPermissions !== true) {
+        throw new Error(
+          'permissionMode="bypassPermissions" requires allowDangerouslySkipPermissions=true',
+        );
+      }
       loop.setPermissionMode(mode);
     }
   };
 
   queryObj.setModel = async (newModel) => {
     if (newModel !== undefined) {
+      if (typeof newModel !== 'string' || newModel.trim().length === 0) {
+        throw new Error('setModel(model) requires a non-empty model string.');
+      }
       loop.setModel(newModel);
     }
   };
 
   queryObj.setMaxThinkingTokens = async (tokens) => {
     if (tokens !== null) {
+      if (!Number.isFinite(tokens) || tokens <= 0) {
+        throw new Error('setMaxThinkingTokens(maxThinkingTokens) requires a positive finite number or null.');
+      }
       loop.setThinking({ type: 'enabled', budgetTokens: tokens });
     } else {
       loop.setThinking({ type: 'disabled' });
@@ -915,22 +952,14 @@ export function query(
 
   queryObj.stopTask = async (_taskId: string) => {
     abortQuery(false);
+    cleanupQueryResources();
+    finalizeGenerator();
   };
 
   queryObj.close = () => {
     abortQuery(false);
-    streamClosed = true;
-    notifyQueue();
-    if (mcpManager) {
-      mcpManager.disconnectAll().catch(() => {});
-    }
-    removeCallerAbortListener();
-    restoreEnv();
-    // Trigger generator finally blocks even if caller never iterated.
-    const returnPromise = queryObj.return?.(undefined as any) as Promise<IteratorResult<SDKMessage, void>> | undefined;
-    if (returnPromise) {
-      void returnPromise.catch(() => {});
-    }
+    cleanupQueryResources();
+    finalizeGenerator();
   };
 
   // ── MCP dynamic management ────────────────────────────────────────────────
@@ -1126,6 +1155,67 @@ function resolveAgentModel(
     default:
       return String(model);
   }
+}
+
+function applyPermissionUpdates(
+  permissionEngine: PermissionEngine,
+  updates: unknown,
+): void {
+  if (!Array.isArray(updates)) return;
+
+  const knownBehaviors = new Set(['allow', 'deny', 'ask']);
+  for (const update of updates) {
+    if (!update || typeof update !== 'object') continue;
+    const u = update as Record<string, unknown>;
+    const type = u.type;
+    const behavior = u.behavior;
+    const rules = Array.isArray(u.rules) ? u.rules : [];
+    if (
+      (type !== 'addRules' && type !== 'replaceRules' && type !== 'removeRules') ||
+      typeof behavior !== 'string' ||
+      !knownBehaviors.has(behavior)
+    ) {
+      continue;
+    }
+
+    for (const rawRule of rules) {
+      if (!rawRule || typeof rawRule !== 'object') continue;
+      const ruleObj = rawRule as Record<string, unknown>;
+      if (typeof ruleObj.toolName !== 'string') continue;
+      const rule = {
+        toolName: ruleObj.toolName,
+        ...(typeof ruleObj.ruleContent === 'string'
+          ? { ruleContent: ruleObj.ruleContent }
+          : {}),
+      };
+
+      if (type === 'addRules') {
+        permissionEngine.addRule(behavior as 'allow' | 'deny' | 'ask', rule);
+        continue;
+      }
+
+      if (type === 'replaceRules') {
+        for (const b of ['allow', 'deny', 'ask'] as const) {
+          permissionEngine.removeRule(b, rule);
+        }
+        permissionEngine.addRule(behavior as 'allow' | 'deny' | 'ask', rule);
+        continue;
+      }
+
+      if (type === 'removeRules') {
+        permissionEngine.removeRule(behavior as 'allow' | 'deny' | 'ask', rule);
+      }
+    }
+  }
+}
+
+function applyUpdatedInput(
+  targetInput: unknown,
+  updatedInput: unknown,
+): void {
+  if (!targetInput || typeof targetInput !== 'object') return;
+  if (!updatedInput || typeof updatedInput !== 'object') return;
+  Object.assign(targetInput as Record<string, unknown>, updatedInput as Record<string, unknown>);
 }
 
 /**

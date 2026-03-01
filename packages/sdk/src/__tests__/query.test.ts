@@ -158,6 +158,28 @@ describe('query() env/debug lifecycle', () => {
     q.close();
     expect(process.env.DEBUG).toBe(originalDebug);
   });
+
+  it('restores env overrides on interrupt() even when not iterated', async () => {
+    const originalFoo = process.env.SDK_ENV_INTERRUPT_RESTORE_TEST;
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      env: { SDK_ENV_INTERRUPT_RESTORE_TEST: 'temporary-value' },
+    });
+    expect(process.env.SDK_ENV_INTERRUPT_RESTORE_TEST).toBe('temporary-value');
+    await q.interrupt();
+    expect(process.env.SDK_ENV_INTERRUPT_RESTORE_TEST).toBe(originalFoo);
+  });
+
+  it('restores env overrides on stopTask() even when not iterated', async () => {
+    const originalFoo = process.env.SDK_ENV_STOP_RESTORE_TEST;
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      env: { SDK_ENV_STOP_RESTORE_TEST: 'temporary-value' },
+    });
+    expect(process.env.SDK_ENV_STOP_RESTORE_TEST).toBe('temporary-value');
+    await q.stopTask('task-1');
+    expect(process.env.SDK_ENV_STOP_RESTORE_TEST).toBe(originalFoo);
+  });
 });
 
 describe('query()', () => {

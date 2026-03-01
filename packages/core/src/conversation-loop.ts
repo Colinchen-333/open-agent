@@ -711,6 +711,25 @@ export class ConversationLoop {
               uuid: randomUUID(),
               session_id: sessionId,
             };
+            if (this.options.abortSignal?.aborted) {
+              yield {
+                type: 'result',
+                subtype: 'error_during_execution',
+                duration_ms: Date.now() - startTime,
+                duration_api_ms: 0,
+                is_error: false,
+                num_turns: this.turnCount,
+                stop_reason: 'interrupted',
+                total_cost_usd: totalCostUsd,
+                usage: { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
+                modelUsage: {},
+                permission_denials: allPermissionDenials,
+                errors: [],
+                uuid: randomUUID(),
+                session_id: sessionId,
+              };
+              return;
+            }
             continue;
           }
 
@@ -776,6 +795,26 @@ export class ConversationLoop {
         approvedTools.push({ toolUse: toolUse as ApprovedEntry['toolUse'], tool });
       }
       // ── End Phase 1 ───────────────────────────────────────────────────────
+
+      if (this.options.abortSignal?.aborted) {
+        yield {
+          type: 'result',
+          subtype: 'error_during_execution',
+          duration_ms: Date.now() - startTime,
+          duration_api_ms: 0,
+          is_error: false,
+          num_turns: this.turnCount,
+          stop_reason: 'interrupted',
+          total_cost_usd: totalCostUsd,
+          usage: { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
+          modelUsage: {},
+          permission_denials: allPermissionDenials,
+          errors: [],
+          uuid: randomUUID(),
+          session_id: sessionId,
+        };
+        return;
+      }
 
       // ── Phase 2: Parallel execution of all approved tools ─────────────────
       type ExecutionResult = {

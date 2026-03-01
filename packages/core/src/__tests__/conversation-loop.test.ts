@@ -380,6 +380,73 @@ describe('ConversationLoop', () => {
       expect(toolResult.result).toContain('Permission denied');
     });
 
+    it('stops remaining tool scheduling when abortSignal is set during a deny decision', async () => {
+      const abortController = new AbortController();
+      const executed: string[] = [];
+      let evaluateCount = 0;
+
+      const toolA = {
+        name: 'ToolA',
+        description: 'A',
+        inputSchema: { type: 'object', properties: {} },
+        async execute() {
+          executed.push('ToolA');
+          return 'A';
+        },
+      };
+      const toolB = {
+        name: 'ToolB',
+        description: 'B',
+        inputSchema: { type: 'object', properties: {} },
+        async execute() {
+          executed.push('ToolB');
+          return 'B';
+        },
+      };
+
+      const denyThenAbortEngine: PermissionChecker = {
+        evaluate: ({ toolName }) => {
+          evaluateCount++;
+          if (toolName === 'ToolA') {
+            abortController.abort();
+            return { behavior: 'deny', reason: 'interrupted by callback' };
+          }
+          return { behavior: 'allow' };
+        },
+        addRule: () => {},
+      };
+
+      const provider = makeMockProvider([
+        [
+          { type: 'tool_use_start', id: 't1', name: 'ToolA' },
+          { type: 'tool_use_start', id: 't2', name: 'ToolB' },
+          { type: 'tool_use_delta', id: 't1', partial_json: '{}' },
+          { type: 'tool_use_delta', id: 't2', partial_json: '{}' },
+          { type: 'tool_use_end', id: 't1' },
+          { type: 'tool_use_end', id: 't2' },
+          { type: 'message_end', message: {}, usage: { input_tokens: 5, output_tokens: 7 } },
+        ],
+      ]);
+
+      const tools = new Map<string, any>([
+        ['ToolA', toolA],
+        ['ToolB', toolB],
+      ]);
+      const loop = new ConversationLoop(
+        baseOptions(provider, tools, {
+          permissionEngine: denyThenAbortEngine,
+          abortSignal: abortController.signal,
+        }),
+      );
+      const messages = await collectMessages(loop.run('run two tools'));
+
+      const result = messages.find((m) => m.type === 'result') as any;
+      expect(result).toBeDefined();
+      expect(result.stop_reason).toBe('interrupted');
+      expect(executed).toHaveLength(0);
+      expect(evaluateCount).toBe(1);
+    });
+
     it('ask behavior with always approval adds allow rule and proceeds', async () => {
       const toolId = 'always-tool-id';
       const addedRules: Array<{ behavior: string; rule: any }> = [];

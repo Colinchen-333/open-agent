@@ -80,6 +80,41 @@ describe('query().stopTask()', () => {
   });
 });
 
+describe('query().setPermissionMode()', () => {
+  it('rejects bypassPermissions at runtime without allowDangerouslySkipPermissions', async () => {
+    const q = query('test', { model: 'claude-sonnet-4-6' });
+    await expect(q.setPermissionMode('bypassPermissions')).rejects.toThrow(
+      /allowDangerouslySkipPermissions/i,
+    );
+    q.close();
+  });
+
+  it('allows bypassPermissions at runtime when allowDangerouslySkipPermissions=true', async () => {
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
+    });
+    await expect(q.setPermissionMode('bypassPermissions')).resolves.toBeUndefined();
+    q.close();
+  });
+});
+
+describe('query() runtime setter validation', () => {
+  it('setModel rejects empty string', async () => {
+    const q = query('test', { model: 'claude-sonnet-4-6' });
+    await expect(q.setModel('')).rejects.toThrow(/non-empty model string/i);
+    q.close();
+  });
+
+  it('setMaxThinkingTokens rejects non-positive values', async () => {
+    const q = query('test', { model: 'claude-sonnet-4-6' });
+    await expect(q.setMaxThinkingTokens(0)).rejects.toThrow(/positive finite number/i);
+    await expect(q.setMaxThinkingTokens(-1)).rejects.toThrow(/positive finite number/i);
+    q.close();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // close() abort behavior with caller-provided AbortController
 // ---------------------------------------------------------------------------
