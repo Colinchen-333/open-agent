@@ -404,11 +404,19 @@ export function query(
   // Stored as a promise so the async work completes inside the generator
   // without blocking the synchronous query() call.
   let mcpReadyPromise: Promise<void> | undefined;
+  const trackMcpSetup = <T>(operation: Promise<T>): Promise<T> => {
+    const setup = operation.then((result) => {
+      syncMcpToolsIntoRegistry();
+      return result;
+    });
+    mcpReadyPromise = setup.then(() => undefined);
+    // Prevent unhandled-rejection warnings when callers don't await setup.
+    void mcpReadyPromise.catch(() => {});
+    return setup;
+  };
   if (options.mcpServers && Object.keys(options.mcpServers).length > 0) {
     mcpManager = new McpManager();
-    mcpReadyPromise = mcpManager.setServers(options.mcpServers).then(() => {
-      syncMcpToolsIntoRegistry();
-    });
+    trackMcpSetup(mcpManager.setServers(options.mcpServers));
   }
 
   // (env and debug overrides already applied above, before provider resolution)
@@ -1072,8 +1080,7 @@ export function query(
     if (!mcpManager) {
       throw new Error('No MCP manager configured for this query. Pass mcpServers in QueryOptions.');
     }
-    await mcpManager.reconnect(serverName);
-    syncMcpToolsIntoRegistry();
+    await trackMcpSetup(mcpManager.reconnect(serverName));
     syncLoopToolsFromRegistry();
     const status = mcpManager.getStatus().find((conn) => conn.name === serverName);
     if (!status) {
@@ -1089,8 +1096,7 @@ export function query(
     if (!mcpManager) {
       throw new Error('No MCP manager configured for this query. Pass mcpServers in QueryOptions.');
     }
-    await mcpManager.toggle(serverName, enabled);
-    syncMcpToolsIntoRegistry();
+    await trackMcpSetup(mcpManager.toggle(serverName, enabled));
     syncLoopToolsFromRegistry();
     if (enabled) {
       const status = mcpManager.getStatus().find((conn) => conn.name === serverName);
@@ -1109,8 +1115,7 @@ export function query(
     if (!mcpManager) {
       mcpManager = new McpManager();
     }
-    const result = await mcpManager.setServers(servers);
-    syncMcpToolsIntoRegistry();
+    const result = await trackMcpSetup(mcpManager.setServers(servers));
     syncLoopToolsFromRegistry();
     return result;
   };
