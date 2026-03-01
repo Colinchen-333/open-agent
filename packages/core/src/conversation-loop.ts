@@ -169,6 +169,8 @@ export class ConversationLoop {
     let totalCostUsd = 0;
     const allPermissionDenials: PermissionDenial[] = [];
     let emptyResponseNudgeCount = 0;
+    let maxTokensContinuationCount = 0;
+    let contextErrorRetryCount = 0;
 
     // ── UserPromptSubmit hook ─────────────────────────────────────────
     // Allows hooks to inspect/reject/modify the user's prompt before processing.
@@ -540,7 +542,8 @@ export class ConversationLoop {
         // If the error is a context-length exceeded error, try to compact and retry.
         const isContextError = /context.length|token.limit|too.many.tokens|request.too.large|max.context/i.test(msg)
           || (msg.includes('400') && /tokens?/i.test(msg));
-        if (isContextError && this.messages.length > 4) {
+        if (isContextError && this.messages.length > 4 && contextErrorRetryCount < 3) {
+          contextErrorRetryCount++;
           yield {
             type: 'system',
             subtype: 'status',
@@ -662,16 +665,23 @@ export class ConversationLoop {
         // rather than treating it as a final response. This matches Claude
         // Code's behaviour of seamlessly continuing truncated output.
         if (stopReason === 'max_tokens') {
-          // Inject a transient continuation prompt so the LLM picks up where
-          // it left off. We push it to this.messages for the next API call but
-          // mark it so it can be stripped from persistent transcripts.
-          this.messages.push({
-            role: 'user',
-            content: 'Continue.',
-            // @ts-expect-error - transient marker, not part of the Message type
-            _transient: true,
-          });
-          continue; // Loop back to call the LLM again
+          maxTokensContinuationCount++;
+          // Safety valve: prevent infinite continuation loops. After 20
+          // consecutive max_tokens hits, stop and return whatever we have.
+          if (maxTokensContinuationCount > 20) {
+            // Fall through to the normal "finished" path below.
+          } else {
+            // Inject a transient continuation prompt so the LLM picks up where
+            // it left off. We push it to this.messages for the next API call but
+            // mark it so it can be stripped from persistent transcripts.
+            this.messages.push({
+              role: 'user',
+              content: 'Continue.',
+              // @ts-expect-error - transient marker, not part of the Message type
+              _transient: true,
+            });
+            continue; // Loop back to call the LLM again
+          }
         }
 
         // No tool calls — the model has finished. Extract the final text and
@@ -705,12 +715,16 @@ export class ConversationLoop {
 
         // ── Stop hook ───────────────────────────────────────────────────────
         if (this.options.hookExecutor) {
-          await this.options.hookExecutor.execute('Stop', {
-            ...this.hookBase(),
-            hook_event_name: 'Stop',
-            stop_reason: stopReason ?? 'end_turn',
-            result: resultText,
-          });
+          try {
+            await this.options.hookExecutor.execute('Stop', {
+              ...this.hookBase(),
+              hook_event_name: 'Stop',
+              stop_reason: stopReason ?? 'end_turn',
+              result: resultText,
+            });
+          } catch {
+            // Hook errors must not prevent the result from being yielded.
+          }
         }
         // ── End Stop hook ───────────────────────────────────────────────────
 
@@ -955,17 +969,21 @@ export class ConversationLoop {
 
             // ── PostToolUse hook (success) ───────────────────────────────
             if (this.options.hookExecutor) {
-              await this.options.hookExecutor.execute(
-                'PostToolUse',
-                {
-                  ...this.hookBase(),
-                  hook_event_name: 'PostToolUse',
-                  tool_name: toolUse.name,
-                  tool_input: toolUse.input,
-                  tool_response: resultStr,
-                },
-                toolUse.id,
-              );
+              try {
+                await this.options.hookExecutor.execute(
+                  'PostToolUse',
+                  {
+                    ...this.hookBase(),
+                    hook_event_name: 'PostToolUse',
+                    tool_name: toolUse.name,
+                    tool_input: toolUse.input,
+                    tool_response: resultStr,
+                  },
+                  toolUse.id,
+                );
+              } catch {
+                // Hook errors must not prevent tool results from reaching the LLM.
+              }
             }
             // ── End PostToolUse hook ─────────────────────────────────────
 
@@ -998,17 +1016,21 @@ export class ConversationLoop {
 
             // ── PostToolUseFailure hook ────────────────────────────────
             if (this.options.hookExecutor) {
-              await this.options.hookExecutor.execute(
-                'PostToolUseFailure',
-                {
-                  ...this.hookBase(),
-                  hook_event_name: 'PostToolUseFailure',
-                  tool_name: toolUse.name,
-                  tool_input: toolUse.input,
-                  error: msg,
-                },
-                toolUse.id,
-              );
+              try {
+                await this.options.hookExecutor.execute(
+                  'PostToolUseFailure',
+                  {
+                    ...this.hookBase(),
+                    hook_event_name: 'PostToolUseFailure',
+                    tool_name: toolUse.name,
+                    tool_input: toolUse.input,
+                    error: msg,
+                  },
+                  toolUse.id,
+                );
+              } catch {
+                // Hook errors must not prevent error results from reaching the LLM.
+              }
             }
             // ── End PostToolUseFailure hook ────────────────────────────
 
