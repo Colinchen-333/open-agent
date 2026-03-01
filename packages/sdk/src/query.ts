@@ -571,6 +571,7 @@ export function query(
     permissionPromptToolName: options.permissionPromptToolName,
     permissionPrompter: options.permissionPrompter,
     getMcpClient: () => mcpManager,
+    waitForMcpReady: () => mcpReadyPromise,
   });
 
   // ------------------------------------------------------------------

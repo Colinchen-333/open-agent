@@ -73,9 +73,45 @@ export function resolvePermissionPromptTool(
   configuredName: string,
   mcpClient?: PermissionPromptMcpClient,
 ): PermissionPromptToolRef | undefined {
-  const explicitRef = parsePermissionPromptToolReference(configuredName);
-  if (explicitRef) {
-    return explicitRef;
+  if (configuredName.startsWith('mcp__')) {
+    const rest = configuredName.slice('mcp__'.length);
+    // Try every possible split of "<server>__<tool>" and choose the unique
+    // split that matches an actually connected MCP tool. This supports server
+    // and tool names that may themselves contain "__".
+    if (mcpClient) {
+      let tools: McpToolDescriptor[] = [];
+      try {
+        tools = mcpClient.getAllTools();
+      } catch {
+        tools = [];
+      }
+      const matches: PermissionPromptToolRef[] = [];
+      let start = 0;
+      while (start < rest.length) {
+        const separatorIndex = rest.indexOf('__', start);
+        if (separatorIndex < 0) break;
+        const serverName = rest.slice(0, separatorIndex).trim();
+        const toolName = rest.slice(separatorIndex + 2).trim();
+        if (serverName && toolName) {
+          if (tools.some((tool) => tool.serverName === serverName && tool.name === toolName)) {
+            matches.push({ serverName, toolName });
+          }
+        }
+        start = separatorIndex + 2;
+      }
+      if (matches.length === 1) {
+        return matches[0];
+      }
+      if (matches.length > 1) {
+        return undefined;
+      }
+    }
+
+    const explicitRef = parsePermissionPromptToolReference(configuredName);
+    if (explicitRef) {
+      return explicitRef;
+    }
+    return undefined;
   }
 
   if (!mcpClient) {
@@ -104,14 +140,23 @@ export function createPermissionPrompterBridge(params: {
   permissionPromptToolName?: string;
   permissionPrompter?: PermissionPrompter['prompt'];
   getMcpClient?: () => PermissionPromptMcpClient | undefined;
+  waitForMcpReady?: () => Promise<void> | undefined;
 }): PermissionPrompter | undefined {
-  const { permissionPromptToolName, permissionPrompter, getMcpClient } = params;
+  const { permissionPromptToolName, permissionPrompter, getMcpClient, waitForMcpReady } = params;
   if (!permissionPromptToolName) {
     return permissionPrompter ? { prompt: permissionPrompter } : undefined;
   }
 
   return {
     prompt: async (request) => {
+      const readyPromise = waitForMcpReady?.();
+      if (readyPromise) {
+        try {
+          await readyPromise;
+        } catch {
+          // Continue to fallback logic below.
+        }
+      }
       const mcpClient = getMcpClient?.();
       const resolvedTool = resolvePermissionPromptTool(permissionPromptToolName, mcpClient);
       if (mcpClient && resolvedTool) {

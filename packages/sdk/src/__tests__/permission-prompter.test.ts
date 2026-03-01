@@ -54,6 +54,17 @@ describe('permission-prompter tool resolution', () => {
     });
   });
 
+  it('resolves mcp__ references with "__" in server name when unique tool exists', () => {
+    const mcp = makeMcpClient(
+      [{ serverName: 'approval__v2', name: 'ask_permission' }],
+      async () => 'allow',
+    );
+    expect(resolvePermissionPromptTool('mcp__approval__v2__ask_permission', mcp)).toEqual({
+      serverName: 'approval__v2',
+      toolName: 'ask_permission',
+    });
+  });
+
   it('returns undefined for non-mcp format', () => {
     expect(parsePermissionPromptToolReference('ask_permission')).toBeUndefined();
     expect(parsePermissionPromptToolReference('mcp__invalid')).toBeUndefined();
@@ -191,5 +202,35 @@ describe('createPermissionPrompterBridge()', () => {
     });
 
     await expect(prompter!.prompt(request)).resolves.toBe('deny');
+  });
+
+  it('waits for in-flight MCP setup before resolving the permission tool', async () => {
+    const order: string[] = [];
+    const mcp = makeMcpClient(
+      [{ serverName: 'approval', name: 'ask_permission' }],
+      async () => {
+        order.push('callTool');
+        return 'allow';
+      },
+    );
+    let resolveReady: (() => void) | null = null;
+    const readyPromise = new Promise<void>((resolve) => {
+      resolveReady = resolve;
+    });
+
+    const prompter = createPermissionPrompterBridge({
+      permissionPromptToolName: 'ask_permission',
+      getMcpClient: () => mcp,
+      waitForMcpReady: () => {
+        order.push('wait');
+        return readyPromise;
+      },
+    });
+
+    const pending = prompter!.prompt(request);
+    order.push('after-prompt-call');
+    resolveReady!();
+    await expect(pending).resolves.toBe('allow');
+    expect(order).toEqual(['wait', 'after-prompt-call', 'callTool']);
   });
 });
