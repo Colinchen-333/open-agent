@@ -153,10 +153,18 @@ export class SessionManager {
     const path = this.transcriptPath(projectDir, sessionId);
     if (!existsSync(path)) return [];
 
-    return readFileSync(path, 'utf-8')
+    const lines = readFileSync(path, 'utf-8')
       .split('\n')
-      .filter((line) => line.trim().length > 0)
-      .map((line) => JSON.parse(line));
+      .filter((line) => line.trim().length > 0);
+    const parsed: unknown[] = [];
+    for (const line of lines) {
+      try {
+        parsed.push(JSON.parse(line));
+      } catch {
+        // Skip malformed lines so one bad record does not invalidate resume.
+      }
+    }
+    return parsed;
   }
 
   /**

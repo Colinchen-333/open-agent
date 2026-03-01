@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, appendFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { SessionManager } from '../session-manager.js';
@@ -102,6 +102,20 @@ describe('SessionManager', () => {
     // Do not append anything — the .jsonl file should not exist yet.
     const result = sm.readTranscript(cwd, session.id);
     expect(result).toEqual([]);
+  });
+
+  it('readTranscript skips malformed lines and keeps valid entries', () => {
+    const session = sm.createSession(cwd, 'corrupt-transcript-model');
+    sm.appendToTranscript(cwd, session.id, { type: 'user', message: { role: 'user', content: 'hello' } });
+    const safePath = cwd.replace(/\//g, '-').replace(/^-/, '');
+    const transcriptPath = join(tmpBase, safePath, `${session.id}.jsonl`);
+    appendFileSync(transcriptPath, '{"type":bad json}\n');
+    sm.appendToTranscript(cwd, session.id, { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'hi' }] } });
+
+    const loaded = sm.readTranscript(cwd, session.id);
+    expect(loaded).toHaveLength(2);
+    expect((loaded[0] as any).type).toBe('user');
+    expect((loaded[1] as any).type).toBe('assistant');
   });
 
   it('loadTranscript reconstructs only user and assistant messages', () => {
