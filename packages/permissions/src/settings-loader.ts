@@ -8,6 +8,8 @@ export interface SettingsPermissions {
   allow?: PermissionRule[];
   deny?: PermissionRule[];
   ask?: PermissionRule[];
+  allowedPaths?: string[];
+  deniedPaths?: string[];
 }
 
 export interface SettingsFile {
@@ -56,12 +58,24 @@ export class SettingsLoader {
 
   private getSettingsPath(source: SettingSource, cwd: string): string | null {
     switch (source) {
-      case 'user':
-        return join(homedir(), '.open-agent', 'settings.json');
-      case 'project':
-        return join(cwd, '.open-agent', 'settings.json');
-      case 'local':
-        return join(cwd, '.open-agent', 'settings.local.json');
+      case 'user': {
+        const openAgentPath = join(homedir(), '.open-agent', 'settings.json');
+        return existsSync(openAgentPath)
+          ? openAgentPath
+          : join(homedir(), '.claude', 'settings.json');
+      }
+      case 'project': {
+        const openAgentPath = join(cwd, '.open-agent', 'settings.json');
+        return existsSync(openAgentPath)
+          ? openAgentPath
+          : join(cwd, '.claude', 'settings.json');
+      }
+      case 'local': {
+        const openAgentPath = join(cwd, '.open-agent', 'settings.local.json');
+        return existsSync(openAgentPath)
+          ? openAgentPath
+          : join(cwd, '.claude', 'settings.local.json');
+      }
       default:
         return null;
     }
@@ -97,6 +111,12 @@ export class SettingsLoader {
             ...incoming,
           ];
         }
+      }
+      if (Array.isArray(source.permissions.allowedPaths)) {
+        target.permissions.allowedPaths = [...source.permissions.allowedPaths];
+      }
+      if (Array.isArray(source.permissions.deniedPaths)) {
+        target.permissions.deniedPaths = [...source.permissions.deniedPaths];
       }
     }
 

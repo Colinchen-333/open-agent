@@ -284,6 +284,22 @@ describe('PermissionEngine', () => {
     });
   });
 
+  describe('loadFromSettings path restrictions', () => {
+    it('loads allowedPaths and deniedPaths from settings.permissions', () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      engine.loadFromSettings({
+        permissions: {
+          allowedPaths: ['/workspace'],
+          deniedPaths: ['/workspace/private'],
+        },
+      });
+
+      expect(engine.evaluate(req('Read', { file_path: '/workspace/file.txt' })).behavior).toBe('allow');
+      expect(engine.evaluate(req('Read', { file_path: '/workspace/private/secret.txt' })).behavior).toBe('deny');
+      expect(engine.evaluate(req('Read', { file_path: '/outside/file.txt' })).behavior).toBe('deny');
+    });
+  });
+
   // ---------------------------------------------------------------------------
   // Wildcard rules
   // ---------------------------------------------------------------------------

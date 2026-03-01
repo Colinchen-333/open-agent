@@ -182,6 +182,7 @@ describe('QueryOptions.canUseTool', () => {
     expect(q).toBeDefined();
     q.close();
   });
+
 });
 
 // ============================================================================
@@ -389,6 +390,42 @@ describe('QueryOptions.settingSources', () => {
 });
 
 // ============================================================================
+// sandbox
+// ============================================================================
+
+describe('QueryOptions.sandbox', () => {
+  it('option is accepted without error', () => {
+    const opts: QueryOptions = {
+      sandbox: {
+        enabled: true,
+        autoAllowBashIfSandboxed: true,
+      },
+    };
+    expect(opts.sandbox?.enabled).toBe(true);
+  });
+
+  it('is accepted by query() without throwing', () => {
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      sandbox: {
+        enabled: true,
+      },
+    });
+    expect(q).toBeDefined();
+    q.close();
+  });
+
+  it('throws when sandbox is provided without explicit enabled boolean', () => {
+    expect(() =>
+      query('test', {
+        model: 'claude-sonnet-4-6',
+        sandbox: { autoAllowBashIfSandboxed: true } as any,
+      }),
+    ).toThrow(/sandbox config.*enabled/i);
+  });
+});
+
+// ============================================================================
 // Combined: all three new options together
 // ============================================================================
 
@@ -581,7 +618,6 @@ describe('QueryOptions unsupported official placeholders', () => {
       { key: 'promptSuggestions', option: { promptSuggestions: true } },
       { key: 'onElicitation', option: { onElicitation: {} } },
       { key: 'plugins', option: { plugins: [] } },
-      { key: 'sandbox', option: { sandbox: { mode: 'workspace-write' } as any } },
       { key: 'debugFile', option: { debugFile: '/tmp/debug.log' } },
       { key: 'spawnClaudeCodeProcess', option: { spawnClaudeCodeProcess: {} } },
     ];

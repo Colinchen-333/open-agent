@@ -15,7 +15,8 @@ import { AgentLoader } from '@open-agent/agents';
 import { createDefaultToolRegistry } from '@open-agent/tools';
 import { autoDetectProvider, createProvider, calculateCost } from '@open-agent/providers';
 import type { Message } from '@open-agent/providers';
-import { PermissionEngine } from '@open-agent/permissions';
+import { PermissionEngine, SettingsLoader } from '@open-agent/permissions';
+import type { SandboxConfig, SettingsFile } from '@open-agent/permissions';
 import { HookExecutor } from '@open-agent/hooks';
 import { McpManager } from '@open-agent/mcp';
 import type { QueryOptions, Query, RewindFilesResult, AgentInfo } from './types.js';
@@ -91,6 +92,10 @@ export function query(
   const sessionId = options.forkSession
     ? randomUUID()
     : (options.sessionId ?? effectiveResumeSessionId ?? randomUUID());
+  const settingSources = options.settingSources ?? [];
+  const loadedSettings: SettingsFile | null = settingSources.length > 0
+    ? new SettingsLoader().load(cwd, settingSources)
+    : null;
   const shouldPersist = options.persistSession !== false;
   const availableAgents = loadAvailableAgents(cwd, options.agents);
   const selectedAgent = resolveSelectedAgent(options.agent, availableAgents);
@@ -406,7 +411,21 @@ export function query(
     );
   }
   const permMode = requestedPermissionMode;
-  const permissionEngine = new PermissionEngine({ mode: permMode });
+  const settingsSandbox = parseSandboxConfig(loadedSettings?.sandbox);
+  let optionSandbox: SandboxConfig | undefined;
+  if (options.sandbox !== undefined) {
+    optionSandbox = parseSandboxConfig(options.sandbox);
+    if (!optionSandbox) {
+      throw new Error('options.sandbox must be a valid sandbox config with an explicit boolean enabled field.');
+    }
+  }
+  const permissionEngine = new PermissionEngine({
+    mode: permMode,
+    ...(optionSandbox ?? settingsSandbox ? { sandbox: optionSandbox ?? settingsSandbox! } : {}),
+  });
+  if (loadedSettings) {
+    permissionEngine.loadFromSettings(loadedSettings as Record<string, any>);
+  }
   let effectivePermissionEngine: {
     evaluate: (request: { toolName: string; input: unknown; toolUseId?: string }) => { behavior: 'allow' | 'deny' | 'ask'; reason?: string } | Promise<{ behavior: 'allow' | 'deny' | 'ask'; reason?: string }>;
     addRule: (behavior: 'allow' | 'deny' | 'ask', rule: { toolName: string; ruleContent?: string }) => void;
@@ -518,7 +537,7 @@ export function query(
     const toolNames = toolRegistry.list().map(t => t.name);
     const configLoader = new ConfigLoader();
     let agentMdInstructions: string[] = [];
-    const sources = new Set(options.settingSources ?? []);
+    const sources = new Set(settingSources);
     if (sources.size > 0) {
       agentMdInstructions = configLoader.loadAgentMd(cwd);
     }
@@ -536,12 +555,13 @@ export function query(
       const userCount = hasUserAgentMd ? 1 : 0;
       agentMdInstructions = agentMdInstructions.filter((_instruction, idx) => {
         if (idx < userCount) return sources.has('user');
-        return sources.has('project') || sources.has('local');
+        // Project-level source gates CLAUDE/AGENT instructions discovered in cwd ancestry.
+        return sources.has('project');
       });
     }
     const memory = new AutoMemory(cwd);
     const memoryContent =
-      sources.has('project') || sources.has('local')
+      sources.has('project')
         ? memory.readMemory()
         : undefined;
 
@@ -1350,7 +1370,6 @@ function assertUnsupportedOptions(options: QueryOptions): void {
     'betas',
     'onElicitation',
     'plugins',
-    'sandbox',
     'debugFile',
     'spawnClaudeCodeProcess',
     'promptSuggestions',
@@ -1360,6 +1379,13 @@ function assertUnsupportedOptions(options: QueryOptions): void {
       throw new Error(`Option "${String(key)}" is not supported yet in open-agent/sdk.`);
     }
   }
+}
+
+function parseSandboxConfig(config: unknown): SandboxConfig | undefined {
+  if (!config || typeof config !== 'object') return undefined;
+  const candidate = config as Record<string, unknown>;
+  if (typeof candidate.enabled !== 'boolean') return undefined;
+  return config as SandboxConfig;
 }
 
 function readFileMaybe(filePath: string): string | null {

@@ -337,6 +337,12 @@ export class PermissionEngine {
     for (const rule of (perms.ask ?? []) as PermissionRule[]) {
       this.addRule('ask', rule);
     }
+    if (Array.isArray(perms.allowedPaths)) {
+      this.setAllowedPaths(perms.allowedPaths.filter((p: unknown): p is string => typeof p === 'string'));
+    }
+    if (Array.isArray(perms.deniedPaths)) {
+      this.setDeniedPaths(perms.deniedPaths.filter((p: unknown): p is string => typeof p === 'string'));
+    }
   }
 
   // ── Private helpers ──────────────────────────────────────────────────────────
