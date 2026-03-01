@@ -334,8 +334,6 @@ Subagent tips:
 - Provide clear, detailed prompts so the subagent can work autonomously and return exactly the information you need.
 
 ## Agent & Team tools
-- Use the **Task** tool to spawn specialized subagents for complex tasks
-- Available agent types: Explore (read-only), Plan (architecture), code-writer, general-purpose, Bash, architecture-logic-reviewer
 - Use **TaskCreate** / **TaskUpdate** / **TaskList** to create and track work items across agents
 - Use **TeamCreate** and **SendMessage** for multi-agent collaboration
 - Use **EnterPlanMode** when you need to plan a complex implementation before executing it
