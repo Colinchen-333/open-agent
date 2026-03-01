@@ -118,15 +118,16 @@ describe('forkSession()', () => {
 
 describe('resumeSession()', () => {
   it('returns a session with the provided session ID', () => {
-    const session = resumeSession('test-session-id', { model: 'claude-sonnet-4-6' });
-    expect(session.sessionId).toBe('test-session-id');
+    const sessionId = '11111111-1111-4111-8111-111111111141';
+    const session = resumeSession(sessionId, { model: 'claude-sonnet-4-6' });
+    expect(session.sessionId).toBe(sessionId);
     expect(typeof session.send).toBe('function');
     expect(typeof session.close).toBe('function');
     session.close();
   });
 
   it('does not throw for non-existent session (starts fresh)', () => {
-    const session = resumeSession('nonexistent-session-id', {
+    const session = resumeSession('11111111-1111-4111-8111-111111111142', {
       model: 'claude-sonnet-4-6',
       cwd: '/tmp',
     });
@@ -137,7 +138,8 @@ describe('resumeSession()', () => {
 
 describe('unstable_v2_resumeSession()', () => {
   it('uses the provided sessionId for streamed message session_id', async () => {
-    const session = unstable_v2_resumeSession('legacy-resume-id', {
+    const sessionId = '11111111-1111-4111-8111-111111111143';
+    const session = unstable_v2_resumeSession(sessionId, {
       model: 'claude-sonnet-4-6',
     });
     await session.send('hello from resume');
@@ -145,7 +147,7 @@ describe('unstable_v2_resumeSession()', () => {
     const first = await stream.next();
     expect(first.done).toBe(false);
     expect((first.value as any).type).toBe('user');
-    expect((first.value as any).session_id).toBe('legacy-resume-id');
+    expect((first.value as any).session_id).toBe(sessionId);
     session.close();
   });
 
