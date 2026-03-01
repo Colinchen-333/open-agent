@@ -503,6 +503,15 @@ describe('QueryOptions permission safety', () => {
 });
 
 describe('QueryOptions continue/resume semantics', () => {
+  it('throws when sessionId is not a valid UUID', () => {
+    expect(() =>
+      query('test', {
+        model: 'claude-sonnet-4-6',
+        sessionId: 'not-a-uuid',
+      }),
+    ).toThrow(/sessionId must be a valid UUID/i);
+  });
+
   it('throws when continue and resume are both set', () => {
     expect(() =>
       query('test', {

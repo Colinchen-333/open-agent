@@ -579,7 +579,7 @@ describe('outputFormat', () => {
 
 describe('forkSession query option', () => {
   it('option is accepted', () => {
-    const opts: QueryOptions = { forkSession: true, sessionId: 'original' };
+    const opts: QueryOptions = { forkSession: true, sessionId: '11111111-1111-4111-8111-111111111131' };
     expect(opts.forkSession).toBe(true);
   });
 
@@ -592,7 +592,7 @@ describe('forkSession query option', () => {
     const q = query('Task', {
       model: 'claude-sonnet-4-6',
       forkSession: true,
-      sessionId: 'some-session-id',
+      sessionId: '11111111-1111-4111-8111-111111111132',
     });
     expect(q).toBeDefined();
     q.close();

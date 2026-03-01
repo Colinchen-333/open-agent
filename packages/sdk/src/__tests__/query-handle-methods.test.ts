@@ -388,7 +388,7 @@ describe('query().rewindFiles()', () => {
     const q = query('test', {
       model: 'claude-sonnet-4-6',
       cwd,
-      sessionId: 'rewind-missing-session',
+      sessionId: '11111111-1111-4111-8111-111111111121',
       enableFileCheckpointing: true,
     });
     const result = await q.rewindFiles('missing-tool-use-id');
@@ -399,7 +399,7 @@ describe('query().rewindFiles()', () => {
 
   it('supports dryRun and actual rewind when checkpoints exist on disk', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'open-agent-rewind-dryrun-'));
-    const sessionId = 'rewind-dryrun-session';
+    const sessionId = '11111111-1111-4111-8111-111111111122';
     const targetFile = join(cwd, 'demo.txt');
     writeFileSync(targetFile, 'after', 'utf-8');
 
@@ -442,7 +442,7 @@ describe('query().rewindFiles()', () => {
 
   it('computes deletion stats when rewinding to a non-existent original file', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'open-agent-rewind-delete-'));
-    const sessionId = 'rewind-delete-session';
+    const sessionId = '11111111-1111-4111-8111-111111111123';
     const targetFile = join(cwd, 'remove-me.txt');
     writeFileSync(targetFile, 'line1\nline2', 'utf-8');
 
@@ -481,7 +481,7 @@ describe('query().rewindFiles()', () => {
 
   it('accepts userMessageId by resolving to underlying toolUseId from transcript', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'open-agent-rewind-user-msg-'));
-    const sessionId = 'rewind-user-msg-session';
+    const sessionId = '11111111-1111-4111-8111-111111111124';
     const targetFile = join(cwd, 'map-id.txt');
     writeFileSync(targetFile, 'after-map', 'utf-8');
 
@@ -529,7 +529,7 @@ describe('query().rewindFiles()', () => {
 
   it('stops resolving when a newer user message is encountered', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'open-agent-rewind-user-boundary-'));
-    const sessionId = 'rewind-user-boundary-session';
+    const sessionId = '11111111-1111-4111-8111-111111111125';
     const targetFile = join(cwd, 'boundary.txt');
     writeFileSync(targetFile, 'after-boundary', 'utf-8');
 

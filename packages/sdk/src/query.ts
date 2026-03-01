@@ -75,6 +75,9 @@ export function query(
   if (options.resume && options.continue) {
     throw new Error('options.resume and options.continue are mutually exclusive.');
   }
+  if (options.sessionId !== undefined && !isValidUuid(options.sessionId)) {
+    throw new Error('options.sessionId must be a valid UUID.');
+  }
   if (options.resumeSessionAt !== undefined && options.resume === undefined) {
     throw new Error('options.resumeSessionAt requires options.resume.');
   }
@@ -1386,6 +1389,10 @@ function parseSandboxConfig(config: unknown): SandboxConfig | undefined {
   const candidate = config as Record<string, unknown>;
   if (typeof candidate.enabled !== 'boolean') return undefined;
   return config as SandboxConfig;
+}
+
+function isValidUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
 function readFileMaybe(filePath: string): string | null {
