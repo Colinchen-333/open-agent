@@ -5,6 +5,7 @@ import {
   forkSession,
   unstable_v2_createSession,
   unstable_v2_resumeSession,
+  __internal_buildSessionTurnQueryOptions,
 } from '../session.js';
 
 describe('createSession()', () => {
@@ -167,5 +168,25 @@ describe('unstable_v2_resumeSession()', () => {
     expect(first.done).toBe(false);
     expect((first.value as any).session_id).toBe(session.sessionId);
     session.close();
+  });
+});
+
+describe('__internal_buildSessionTurnQueryOptions()', () => {
+  it('forces persistSession=false to prevent double transcript persistence', () => {
+    const ac = new AbortController();
+    const opts = __internal_buildSessionTurnQueryOptions(
+      {
+        model: 'claude-sonnet-4-6',
+        persistSession: true,
+      },
+      '11111111-1111-4111-8111-111111111144',
+      ac,
+      [{ role: 'user', content: 'hello' }],
+    );
+
+    expect(opts.persistSession).toBe(false);
+    expect(opts.sessionId).toBe('11111111-1111-4111-8111-111111111144');
+    expect(opts.abortController).toBe(ac);
+    expect(opts.initialMessages).toHaveLength(1);
   });
 });

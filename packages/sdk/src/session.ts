@@ -118,6 +118,23 @@ export interface SDKSession {
 
 const MAX_SESSION_HISTORY = 500;
 
+export function __internal_buildSessionTurnQueryOptions(
+  options: QueryOptions | undefined,
+  sessionId: string,
+  abortController: AbortController,
+  history: Message[],
+): QueryOptions & { initialMessages: Message[] } {
+  return {
+    ...options,
+    sessionId,
+    abortController,
+    initialMessages: history,
+    // Stable session API persists transcript itself; disable query-level
+    // persistence to avoid duplicate transcript entries.
+    persistSession: false,
+  };
+}
+
 function _buildSession(
   sessionId: string,
   options?: QueryOptions,
@@ -152,12 +169,10 @@ function _buildSession(
 
       // Each send() uses a fresh query() call with accumulated history
       // so the ConversationLoop sees the full prior context.
-      const q = query(message, {
-        ...options,
-        sessionId,
-        abortController,
-        initialMessages: history,
-      } as QueryOptions & { initialMessages: Message[] });
+      const q = query(
+        message,
+        __internal_buildSessionTurnQueryOptions(options, sessionId, abortController, history),
+      );
 
       try {
         for await (const msg of q) {
