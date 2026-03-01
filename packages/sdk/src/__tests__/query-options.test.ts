@@ -471,6 +471,37 @@ describe('QueryOptions continue/resume semantics', () => {
       }),
     ).toThrow(/mutually exclusive/i);
   });
+
+  it('throws when sessionId is combined with continue without forkSession', () => {
+    expect(() =>
+      query('test', {
+        model: 'claude-sonnet-4-6',
+        sessionId: '11111111-1111-4111-8111-111111111111',
+        continue: true,
+      }),
+    ).toThrow(/sessionId cannot be combined/i);
+  });
+
+  it('throws when sessionId is combined with resume without forkSession', () => {
+    expect(() =>
+      query('test', {
+        model: 'claude-sonnet-4-6',
+        sessionId: '11111111-1111-4111-8111-111111111111',
+        resume: '22222222-2222-4222-8222-222222222222',
+      }),
+    ).toThrow(/sessionId cannot be combined/i);
+  });
+
+  it('allows sessionId with continue when forkSession=true', () => {
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      continue: true,
+      forkSession: true,
+    });
+    expect(q).toBeDefined();
+    q.close();
+  });
 });
 
 describe('QueryOptions unsupported official placeholders', () => {

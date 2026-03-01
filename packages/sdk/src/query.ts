@@ -74,6 +74,13 @@ export function query(
   if (options.resume && options.continue) {
     throw new Error('options.resume and options.continue are mutually exclusive.');
   }
+  if (
+    options.sessionId &&
+    !options.forkSession &&
+    (options.resume !== undefined || options.continue === true)
+  ) {
+    throw new Error('options.sessionId cannot be combined with options.resume/options.continue unless forkSession=true.');
+  }
   const resumeManager = new SessionManager();
   const effectiveResumeSessionId =
     options.resume ??
