@@ -2,14 +2,18 @@
   <img src="https://img.shields.io/badge/runtime-Bun-f472b6?style=for-the-badge&logo=bun&logoColor=white" alt="Bun" />
   <img src="https://img.shields.io/badge/lang-TypeScript-3178c6?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript" />
   <img src="https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge" alt="MIT License" />
-  <img src="https://img.shields.io/badge/tests-334%20passing-22c55e?style=for-the-badge" alt="Tests" />
+  <img src="https://img.shields.io/badge/tests-542%20passing-22c55e?style=for-the-badge" alt="Tests" />
 </p>
 
 <h1 align="center">Open Agent</h1>
 
 <p align="center">
   <strong>An open-source AI coding agent framework with CLI and SDK</strong><br/>
-  Multi-provider LLM support · 27 built-in tools · Multi-agent teams · MCP integration
+  Multi-provider LLM support · 28 built-in tools · Multi-agent teams · MCP integration
+</p>
+
+<p align="center">
+  English | <a href="./README_CN.md">中文</a>
 </p>
 
 <p align="center">
@@ -24,18 +28,19 @@
 
 ## Overview
 
-Open Agent is a fully-featured AI coding agent framework built with Bun and TypeScript. It provides both an interactive CLI and a programmatic SDK for embedding AI-powered coding capabilities into any application.
+Open Agent is a fully-featured AI coding agent framework built with **Bun** and **TypeScript**. It provides both an **interactive CLI** for day-to-day coding and a **programmatic SDK** for embedding AI-powered coding capabilities into any application.
 
-**Key capabilities:**
+### Why Open Agent?
 
-- **Multi-provider** — Anthropic (with extended thinking & prompt caching), OpenAI-compatible APIs, Ollama
-- **27 built-in tools** — File I/O, shell execution, code search, web fetch, notebook editing, and more
-- **Multi-agent teams** — Spawn parallel agents with task management and inter-agent messaging
-- **MCP integration** — First-class Model Context Protocol support (stdio / HTTP / SSE)
-- **Permission system** — 5 permission modes from interactive approval to full bypass
-- **Session persistence** — Resume conversations across restarts with JSONL transcripts
-- **Hook system** — Lifecycle hooks for `PreToolUse`, `PostToolUse`, `SessionStart`, and 15+ events
-- **Extended thinking** — Adaptive and explicit thinking modes with configurable token budgets
+- **Full transparency** — Open source from top to bottom; no vendor lock-in.
+- **Multi-provider** — Anthropic (extended thinking & prompt caching), OpenAI-compatible APIs, Ollama (local models).
+- **28 built-in tools** — File I/O, shell execution, code search, web fetch, notebook editing, git worktrees, and more.
+- **Multi-agent teams** — Spawn parallel sub-agents with shared task boards and inter-agent messaging.
+- **MCP integration** — First-class Model Context Protocol support (stdio / HTTP / SSE transports).
+- **Permission system** — 5 permission modes from interactive approval to full bypass.
+- **Session persistence** — Resume conversations across restarts via JSONL transcripts.
+- **Hook system** — Lifecycle hooks for `PreToolUse`, `PostToolUse`, `SessionStart`, and 15+ other events.
+- **Extended thinking** — Adaptive and explicit thinking modes with configurable token budgets.
 
 ## Quick Start
 
@@ -235,7 +240,6 @@ const stream = query('Deploy the main branch to staging', {
 ```typescript
 import { query } from '@open-agent/sdk';
 
-// Spawn a sub-agent for parallel research
 const stream = query('Research the codebase architecture, then refactor the auth module', {
   model: 'claude-sonnet-4-6',
   permissionMode: 'acceptEdits',
@@ -249,7 +253,6 @@ const stream = query('Research the codebase architecture, then refactor the auth
 });
 
 for await (const event of stream) {
-  // The main agent can spawn 'researcher' sub-agents via the Task tool
   if (event.type === 'result') console.log('Done');
 }
 ```
@@ -299,6 +302,8 @@ interface QueryOptions {
 
 ## Architecture
 
+### Monorepo Structure
+
 ```
 open-agent/
 ├── apps/
@@ -307,13 +312,14 @@ open-agent/
 │   ├── sdk/                # Public SDK — query(), createSession(), MCP helpers
 │   ├── core/               # ConversationLoop, SessionManager, SystemPrompt
 │   ├── providers/          # LLM providers (Anthropic, OpenAI, Ollama)
-│   ├── tools/              # 27 built-in tool implementations
+│   ├── tools/              # 28 built-in tool implementations
 │   ├── agents/             # AgentRunner, TeamManager, TaskManager
 │   ├── permissions/        # PermissionEngine with 5 modes
 │   ├── hooks/              # Lifecycle hook executor
 │   ├── mcp/               # MCP client (stdio, HTTP, SSE transports)
 │   ├── cli/                # Terminal renderer, input handling, themes
 │   └── plugins/            # Plugin system
+├── examples/               # AGENT.md and settings.json templates
 ```
 
 ### Data Flow
@@ -352,7 +358,7 @@ User Input
 @open-agent/sdk
     ├── @open-agent/core
     │     ├── @open-agent/providers    (Anthropic, OpenAI, Ollama)
-    │     └── @open-agent/tools        (27 built-in tools)
+    │     └── @open-agent/tools        (28 built-in tools)
     ├── @open-agent/agents             (multi-agent teams)
     ├── @open-agent/permissions        (5-mode permission engine)
     ├── @open-agent/hooks              (lifecycle events)
@@ -463,8 +469,23 @@ const provider = new OllamaProvider({
 |------|---------|
 | `~/.open-agent/settings.json` | Global user settings |
 | `<project>/.open-agent/settings.json` | Project-level settings |
-| `AGENT.md` | Custom instructions per project |
+| `<project>/.open-agent/settings.local.json` | Local overrides (gitignored) |
+| `AGENT.md` | Custom instructions per project (root or `.open-agent/`) |
 | `~/.open-agent/hooks.json` | Global hook definitions |
+
+Example settings (`examples/settings.json`):
+
+```json
+{
+  "defaultModel": "claude-sonnet-4-6",
+  "permissionMode": "default",
+  "effort": "high",
+  "thinking": "adaptive",
+  "maxTurns": 50,
+  "mcpServers": {},
+  "customInstructions": ""
+}
+```
 
 ### Permission Modes
 
@@ -559,12 +580,12 @@ bun run build
 
 | Metric | Value |
 |--------|-------|
-| TypeScript | ~17,600 lines |
+| TypeScript source | ~17,200 lines across 79 files |
 | Packages | 10 |
-| Built-in tools | 27 |
-| LLM providers | 3 |
-| Test files | 19 |
-| Tests | 334 passing |
+| Built-in tools | 28 |
+| LLM providers | 3 (Anthropic, OpenAI, Ollama) |
+| Test files | 28 |
+| Tests | 542 passing |
 
 ## License
 
