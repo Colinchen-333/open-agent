@@ -168,6 +168,7 @@ export class ConversationLoop {
     let totalOutputTokens = 0;
     let totalCostUsd = 0;
     const allPermissionDenials: PermissionDenial[] = [];
+    let emptyResponseNudgeCount = 0;
 
     // ── UserPromptSubmit hook ─────────────────────────────────────────
     // Allows hooks to inspect/reject/modify the user's prompt before processing.
@@ -679,6 +680,28 @@ export class ConversationLoop {
           .filter((b) => b.type === 'text')
           .map((b: any) => b.text as string)
           .join('');
+
+        // If the model returned an empty response right after processing tool
+        // results (e.g. after a subagent Task completed), nudge it to provide
+        // a final summary rather than ending the run silently.  Limit to one
+        // retry to avoid infinite loops.
+        if (!resultText.trim() && emptyResponseNudgeCount < 1 && this.messages.length >= 2) {
+          const prevMsg = this.messages[this.messages.length - 2];
+          const prevContent = Array.isArray(prevMsg?.content) ? prevMsg.content : [];
+          const hadToolResult = prevContent.some(
+            (b: any) => b.type === 'tool_result',
+          );
+          if (hadToolResult) {
+            emptyResponseNudgeCount++;
+            this.messages.push({
+              role: 'user',
+              content: 'Please provide your final response summarizing the results.',
+              // @ts-expect-error - transient marker, not part of the Message type
+              _transient: true,
+            });
+            continue;
+          }
+        }
 
         // ── Stop hook ───────────────────────────────────────────────────────
         if (this.options.hookExecutor) {
