@@ -1090,6 +1090,9 @@ export function query(
     if (typeof prompt === 'string') {
       throw new Error('streamInput() requires async-iterable prompt mode.');
     }
+    if (streamClosed || internalAbortController.signal.aborted) {
+      throw new Error('streamInput() cannot be used after the query is closed or interrupted.');
+    }
     if (typeof input === 'string') {
       pushQueuedInput({
         type: 'user',

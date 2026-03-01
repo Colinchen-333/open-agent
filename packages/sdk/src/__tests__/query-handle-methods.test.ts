@@ -610,6 +610,20 @@ describe('query().streamInput()', () => {
     await q.streamInput(stream);
     q.close();
   });
+
+  it('throws after close() because stream is no longer writable', async () => {
+    const initialPrompt = (async function* () {})();
+    const q = query({ prompt: initialPrompt, options: { model: 'claude-sonnet-4-6' } });
+    q.close();
+    await expect(q.streamInput('after-close')).rejects.toThrow(/closed or interrupted/i);
+  });
+
+  it('throws after interrupt() because stream is no longer writable', async () => {
+    const initialPrompt = (async function* () {})();
+    const q = query({ prompt: initialPrompt, options: { model: 'claude-sonnet-4-6' } });
+    await q.interrupt();
+    await expect(q.streamInput('after-interrupt')).rejects.toThrow(/closed or interrupted/i);
+  });
 });
 
 // ---------------------------------------------------------------------------
