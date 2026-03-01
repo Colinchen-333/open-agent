@@ -339,7 +339,8 @@ describe('ConversationLoop', () => {
       expect(result.subtype).toBe('success');
       // The denial should be reflected in permission_denials on the result
       expect(result.permission_denials).toHaveLength(1);
-      expect(result.permission_denials[0]).toContain('BlockedTool');
+      expect(result.permission_denials[0].tool_name).toBe('BlockedTool');
+      expect(result.permission_denials[0].tool_use_id).toBe(toolId);
     });
 
     it('ask behavior with user denying emits denial and continues', async () => {

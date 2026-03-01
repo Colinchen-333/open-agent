@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'bun:test';
-import { createSession, resumeSession, forkSession } from '../session.js';
+import {
+  createSession,
+  resumeSession,
+  forkSession,
+  unstable_v2_createSession,
+  unstable_v2_resumeSession,
+} from '../session.js';
 
 describe('createSession()', () => {
   it('returns a session with required interface methods', () => {
@@ -125,6 +131,39 @@ describe('resumeSession()', () => {
       cwd: '/tmp',
     });
     expect(session).toBeDefined();
+    session.close();
+  });
+});
+
+describe('unstable_v2_resumeSession()', () => {
+  it('uses the provided sessionId for streamed message session_id', async () => {
+    const session = unstable_v2_resumeSession('legacy-resume-id', {
+      model: 'claude-sonnet-4-6',
+    });
+    await session.send('hello from resume');
+    const stream = session.stream();
+    const first = await stream.next();
+    expect(first.done).toBe(false);
+    expect((first.value as any).type).toBe('user');
+    expect((first.value as any).session_id).toBe('legacy-resume-id');
+    session.close();
+  });
+
+  it('normalizes enqueued SDKUserMessage session_id to the current session', async () => {
+    const session = unstable_v2_createSession({
+      model: 'claude-sonnet-4-6',
+    });
+    await session.send({
+      type: 'user',
+      message: { role: 'user', content: 'custom message' },
+      parent_tool_use_id: null,
+      session_id: 'wrong-session-id',
+      uuid: 'custom-uuid',
+    } as any);
+    const stream = session.stream();
+    const first = await stream.next();
+    expect(first.done).toBe(false);
+    expect((first.value as any).session_id).toBe(session.sessionId);
     session.close();
   });
 });

@@ -278,8 +278,9 @@ export async function unstable_v2_prompt(
 export function unstable_v2_createSession(
   options: SessionOptions,
   _initialMessages?: Message[],
+  _sessionId?: string,
 ): Session {
-  const sessionId = randomUUID();
+  const sessionId = _sessionId ?? randomUUID();
   let closed = false;
 
   const messageQueue: SDKUserMessage[] = [];
@@ -341,7 +342,13 @@ export function unstable_v2_createSession(
               uuid: randomUUID(),
               session_id: sessionId,
             }
-          : message;
+          : {
+              ...message,
+              type: 'user',
+              parent_tool_use_id: message.parent_tool_use_id ?? null,
+              session_id: sessionId,
+              uuid: message.uuid ?? randomUUID(),
+            };
 
       if (resolveNext) {
         const resolve = resolveNext;
@@ -398,13 +405,5 @@ export function unstable_v2_resumeSession(
 
   // Pass the loaded transcript into the session so the underlying query()
   // feeds prior conversation history to the model on the first turn.
-  const session = unstable_v2_createSession({ ...options }, initialMessages);
-
-  Object.defineProperty(session, 'sessionId', {
-    value: sessionId,
-    writable: false,
-    configurable: true,
-  });
-
-  return session;
+  return unstable_v2_createSession({ ...options }, initialMessages, sessionId);
 }

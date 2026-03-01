@@ -2,6 +2,7 @@ import type { LLMProvider, ChatOptions, Message, ContentBlock } from '@open-agen
 import type { ToolDefinition, ToolContext } from '@open-agent/tools';
 import type { ThinkingConfig } from './types.js';
 import type { SDKMessage } from './types.js';
+import type { PermissionDenial } from './types.js';
 import { randomUUID } from 'crypto';
 
 /**
@@ -158,7 +159,7 @@ export class ConversationLoop {
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
     let totalCostUsd = 0;
-    const allPermissionDenials: string[] = [];
+    const allPermissionDenials: PermissionDenial[] = [];
 
     // ── UserPromptSubmit hook ─────────────────────────────────────────
     // Allows hooks to inspect/reject/modify the user's prompt before processing.
@@ -664,7 +665,7 @@ export class ConversationLoop {
       //             for performance, matching Claude Code behaviour.
       //   Phase 3 — Yield results in original call order for determinism.
       const toolResults: ContentBlock[] = [];
-      const permissionDenials: string[] = [];
+      const permissionDenials: PermissionDenial[] = [];
 
       // Approved tools collected during Phase 1, preserving call order.
       type ApprovedEntry = { toolUse: ContentBlock & { id: string; name: string; input: any }; tool: ToolDefinition };
@@ -695,7 +696,11 @@ export class ConversationLoop {
 
           if (decision.behavior === 'deny') {
             const reason = decision.reason ?? 'permission denied';
-            permissionDenials.push(`${toolUse.name}: ${reason}`);
+            permissionDenials.push({
+              tool_name: toolUse.name,
+              tool_use_id: toolUse.id,
+              tool_input: toolUse.input,
+            });
             toolResults.push({
               type: 'tool_result',
               tool_use_id: toolUse.id,
@@ -737,7 +742,11 @@ export class ConversationLoop {
             if (!permissionPrompter) {
               // No prompter available — deny by default when mode requires confirmation.
               const reason = decision.reason ?? 'permission required but no prompter configured';
-              permissionDenials.push(`${toolUse.name}: ${reason}`);
+              permissionDenials.push({
+                tool_name: toolUse.name,
+                tool_use_id: toolUse.id,
+                tool_input: toolUse.input,
+              });
               toolResults.push({
                 type: 'tool_result',
                 tool_use_id: toolUse.id,
@@ -764,7 +773,11 @@ export class ConversationLoop {
 
             if (userDecision === 'deny') {
               const reason = 'user denied permission';
-              permissionDenials.push(`${toolUse.name}: ${reason}`);
+              permissionDenials.push({
+                tool_name: toolUse.name,
+                tool_use_id: toolUse.id,
+                tool_input: toolUse.input,
+              });
               toolResults.push({
                 type: 'tool_result',
                 tool_use_id: toolUse.id,

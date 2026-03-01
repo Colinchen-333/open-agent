@@ -157,7 +157,7 @@ export interface SDKResultSuccess {
   total_cost_usd: number;
   usage: any;
   modelUsage: Record<string, ModelUsage>;
-  permission_denials: any[];
+  permission_denials: PermissionDenial[];
   structured_output?: unknown;
   uuid: string;
   session_id: string;
@@ -174,13 +174,19 @@ export interface SDKResultError {
   total_cost_usd: number;
   usage: any;
   modelUsage: Record<string, ModelUsage>;
-  permission_denials: any[];
+  permission_denials: PermissionDenial[];
   errors: string[];
   uuid: string;
   session_id: string;
 }
 
 export type SDKResultMessage = SDKResultSuccess | SDKResultError;
+
+export interface PermissionDenial {
+  tool_name: string;
+  tool_use_id: string;
+  tool_input: unknown;
+}
 
 export interface SDKSystemMessage {
   type: 'system';
