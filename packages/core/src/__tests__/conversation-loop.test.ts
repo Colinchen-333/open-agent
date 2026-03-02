@@ -213,8 +213,13 @@ describe('ConversationLoop', () => {
       const loop = new ConversationLoop(baseOptions(provider));
       const messages = await collectMessages(loop.run('use unknown tool'));
 
-      // The loop should complete with success — the error is fed back to the LLM
-      // as a tool_result content block (internal), not as a top-level SDK message.
+      const toolResult = messages.find((m) => m.type === 'tool_result') as any;
+      expect(toolResult).toBeDefined();
+      expect(toolResult.tool_name).toBe('NonExistentTool');
+      expect(toolResult.is_error).toBe(true);
+      expect(toolResult.result).toContain("Tool 'NonExistentTool' not found");
+
+      // The loop should still complete with success after feeding the error back.
       const result = messages.find((m) => m.type === 'result') as any;
       expect(result).toBeDefined();
       expect(result.subtype).toBe('success');
@@ -563,6 +568,46 @@ describe('ConversationLoop', () => {
       expect(result).toBeDefined();
       expect(result.is_error).toBe(true);
       expect(result.stop_reason).toBe('interrupted');
+    });
+  });
+
+  describe('pre-tool hook blocked execution', () => {
+    it('emits top-level tool_result for blocked tool use and continues', async () => {
+      const toolId = 'blocked-by-hook';
+      const tool = {
+        name: 'BlockedByHook',
+        description: 'Should be blocked',
+        inputSchema: { type: 'object', properties: {} },
+        async execute() { return 'should-not-run'; },
+      };
+
+      const provider = makeMockProvider([
+        toolUseResponse(toolId, 'BlockedByHook', {}),
+        textResponse('Hook blocked handled.'),
+      ]);
+
+      const loop = new ConversationLoop(baseOptions(provider, new Map([['BlockedByHook', tool]]), {
+        hookExecutor: {
+          async execute(event) {
+            if (event === 'PreToolUse') {
+              return { continue: false, decision: 'blocked in test' };
+            }
+            return { continue: true };
+          },
+        },
+      }));
+      const messages = await collectMessages(loop.run('run blocked tool'));
+
+      const toolResult = messages.find((m) => m.type === 'tool_result') as any;
+      expect(toolResult).toBeDefined();
+      expect(toolResult.tool_name).toBe('BlockedByHook');
+      expect(toolResult.is_error).toBe(true);
+      expect(toolResult.result).toContain('blocked in test');
+
+      const result = messages.find((m) => m.type === 'result') as any;
+      expect(result).toBeDefined();
+      expect(result.subtype).toBe('success');
+      expect(result.result).toBe('Hook blocked handled.');
     });
   });
 

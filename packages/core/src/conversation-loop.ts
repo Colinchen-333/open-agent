@@ -151,6 +151,31 @@ export class ConversationLoop {
     };
   }
 
+  private interruptedResult(
+    startTime: number,
+    turnCount: number,
+    totalCostUsd: number,
+    usage: { input_tokens: number; output_tokens: number },
+    permissionDenials: PermissionDenial[],
+  ): SDKMessage {
+    return {
+      type: 'result',
+      subtype: 'error_during_execution',
+      duration_ms: Date.now() - startTime,
+      duration_api_ms: 0,
+      is_error: true,
+      num_turns: turnCount,
+      stop_reason: 'interrupted',
+      total_cost_usd: totalCostUsd,
+      usage,
+      modelUsage: {},
+      permission_denials: permissionDenials,
+      errors: ['Interrupted'],
+      uuid: randomUUID(),
+      session_id: this.options.sessionId,
+    };
+  }
+
   /**
    * Process a user message and stream back SDK messages for every significant
    * event in the agent loop (stream events, assistant turns, tool results,
@@ -287,22 +312,13 @@ export class ConversationLoop {
         for await (const event of this.chatWithRetry(this.messages, chatOptions)) {
           // Honour abort requests as promptly as possible.
           if (this.options.abortSignal?.aborted) {
-            yield {
-              type: 'result',
-              subtype: 'error_during_execution',
-              duration_ms: Date.now() - startTime,
-              duration_api_ms: 0,
-              is_error: true,
-              num_turns: this.turnCount,
-              stop_reason: 'interrupted',
-              total_cost_usd: totalCostUsd,
-              usage: { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
-              modelUsage: {},
-              permission_denials: [],
-              errors: ['Interrupted'],
-              uuid: randomUUID(),
-              session_id: sessionId,
-            };
+            yield this.interruptedResult(
+              startTime,
+              this.turnCount,
+              totalCostUsd,
+              { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
+              allPermissionDenials,
+            );
             return;
           }
 
@@ -521,22 +537,13 @@ export class ConversationLoop {
           (error instanceof DOMException && error.name === 'AbortError') ||
           this.options.abortSignal?.aborted
         ) {
-          yield {
-            type: 'result',
-            subtype: 'error_during_execution',
-            duration_ms: Date.now() - startTime,
-            duration_api_ms: 0,
-            is_error: false,
-            num_turns: this.turnCount,
-            stop_reason: 'interrupted',
-            total_cost_usd: totalCostUsd,
-            usage: { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
-            modelUsage: {},
-            permission_denials: allPermissionDenials,
-            errors: [],
-            uuid: randomUUID(),
-            session_id: sessionId,
-          };
+          yield this.interruptedResult(
+            startTime,
+            this.turnCount,
+            totalCostUsd,
+            { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
+            allPermissionDenials,
+          );
           return;
         }
 
@@ -769,12 +776,22 @@ export class ConversationLoop {
         const tool = this.options.tools.get(toolUse.name);
 
         if (!tool) {
+          const notFound = `Error: Tool '${toolUse.name}' not found`;
           toolResults.push({
             type: 'tool_result',
             tool_use_id: toolUse.id,
-            content: `Error: Tool '${toolUse.name}' not found`,
+            content: notFound,
             is_error: true,
           });
+          yield {
+            type: 'tool_result' as const,
+            tool_name: toolUse.name,
+            tool_use_id: toolUse.id,
+            result: notFound,
+            is_error: true,
+            uuid: randomUUID(),
+            session_id: sessionId,
+          };
           continue;
         }
 
@@ -810,22 +827,13 @@ export class ConversationLoop {
               session_id: sessionId,
             };
             if (this.options.abortSignal?.aborted) {
-              yield {
-                type: 'result',
-                subtype: 'error_during_execution',
-                duration_ms: Date.now() - startTime,
-                duration_api_ms: 0,
-                is_error: false,
-                num_turns: this.turnCount,
-                stop_reason: 'interrupted',
-                total_cost_usd: totalCostUsd,
-                usage: { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
-                modelUsage: {},
-                permission_denials: [...allPermissionDenials, ...permissionDenials],
-                errors: [],
-                uuid: randomUUID(),
-                session_id: sessionId,
-              };
+              yield this.interruptedResult(
+                startTime,
+                this.turnCount,
+                totalCostUsd,
+                { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
+                [...allPermissionDenials, ...permissionDenials],
+              );
               return;
             }
             continue;
@@ -903,22 +911,13 @@ export class ConversationLoop {
       // ── End Phase 1 ───────────────────────────────────────────────────────
 
       if (this.options.abortSignal?.aborted) {
-        yield {
-          type: 'result',
-          subtype: 'error_during_execution',
-          duration_ms: Date.now() - startTime,
-          duration_api_ms: 0,
-          is_error: false,
-          num_turns: this.turnCount,
-          stop_reason: 'interrupted',
-          total_cost_usd: totalCostUsd,
-          usage: { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
-          modelUsage: {},
-          permission_denials: [...allPermissionDenials, ...permissionDenials],
-          errors: [],
-          uuid: randomUUID(),
-          session_id: sessionId,
-        };
+        yield this.interruptedResult(
+          startTime,
+          this.turnCount,
+          totalCostUsd,
+          { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
+          [...allPermissionDenials, ...permissionDenials],
+        );
         return;
       }
 
@@ -1080,6 +1079,15 @@ export class ConversationLoop {
             content: resultStr,
             is_error: true,
           });
+          yield {
+            type: 'tool_result' as const,
+            tool_name: toolUse.name,
+            tool_use_id: toolUse.id,
+            result: resultStr,
+            is_error: true,
+            uuid: randomUUID(),
+            session_id: sessionId,
+          };
           continue;
         }
 

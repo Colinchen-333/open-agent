@@ -908,6 +908,25 @@ export function query(
   // Core generator – iterates over all SDKMessages
   // ------------------------------------------------------------------
   async function* generateMessages(): AsyncGenerator<SDKMessage, void> {
+    const executionErrorResult = (error: Error): SDKMessage => {
+      const { totalCostUsd, totalInputTokens, totalOutputTokens } = loop.getTotalCost();
+      return {
+        type: 'result',
+        subtype: 'error_during_execution',
+        duration_ms: 0,
+        duration_api_ms: 0,
+        is_error: true,
+        num_turns: loop.getTurnCount(),
+        stop_reason: internalAbortController.signal.aborted ? 'interrupted' : 'error',
+        total_cost_usd: totalCostUsd,
+        usage: { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
+        modelUsage: {},
+        permission_denials: [],
+        errors: [error.message || String(error)],
+        uuid: randomUUID(),
+        session_id: sessionId,
+      };
+    };
     try {
       // Wait for async setupTools to complete before the first LLM call.
       if (setupToolsReady) {
@@ -924,6 +943,7 @@ export function query(
         let usedFallback = false;
         // Retry loop — runs once normally; a second time with fallbackModel on model errors.
         while (true) {
+          let resultEmittedForTurn = false;
           // Buffer the result message so we can inspect it for model errors before
           // deciding whether to yield it or retry with the fallback model.
           let resultMessage: SDKMessage | undefined;
@@ -996,11 +1016,23 @@ export function query(
               continue; // retry with fallback model
             }
             // Not retrying — yield the buffered result if we have one, then surface error.
-            if (resultMessage) yield resultMessage;
-            if (!resultMessage) throw modelError;
+            if (resultMessage) {
+              if (!resultEmittedForTurn) {
+                yield resultMessage;
+                resultEmittedForTurn = true;
+              }
+            } else {
+              if (!resultEmittedForTurn) {
+                yield executionErrorResult(modelError);
+                resultEmittedForTurn = true;
+              }
+            }
           } else {
             // Normal completion — yield the buffered result message.
-            if (resultMessage) yield resultMessage;
+            if (resultMessage && !resultEmittedForTurn) {
+              yield resultMessage;
+              resultEmittedForTurn = true;
+            }
           }
           break; // normal completion
         }
@@ -1014,6 +1046,7 @@ export function query(
           const userPrompt = __internal_extractUserMessagePrompt(userMsg);
           if (userPrompt === undefined) continue;
           const preTurnMessages = loop.getMessages();
+          let resultEmittedForTurn = false;
 
           let modelError: Error | undefined;
           let resultMessage: SDKMessage | undefined;
@@ -1084,15 +1117,30 @@ export function query(
                   yield msg;
                 }
               } catch (retryErr) {
-                if (resultMessage) yield resultMessage;
-                throw retryErr instanceof Error ? retryErr : new Error(String(retryErr));
+                modelError = retryErr instanceof Error ? retryErr : new Error(String(retryErr));
               }
             } else {
-              if (resultMessage) yield resultMessage;
-              else throw modelError;
+              if (resultMessage) {
+                if (!resultEmittedForTurn) {
+                  yield resultMessage;
+                  resultEmittedForTurn = true;
+                }
+                resultMessage = undefined;
+              } else {
+                if (!resultEmittedForTurn) {
+                  yield executionErrorResult(modelError);
+                  resultEmittedForTurn = true;
+                }
+              }
             }
           }
-          if (resultMessage) yield resultMessage;
+          if (modelError && !resultMessage && !resultEmittedForTurn) {
+            yield executionErrorResult(modelError);
+            resultEmittedForTurn = true;
+          }
+          if (resultMessage && !resultEmittedForTurn) {
+            yield resultMessage;
+          }
         }
       }
     } finally {
