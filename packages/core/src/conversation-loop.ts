@@ -1280,10 +1280,33 @@ export class ConversationLoop {
 
         // Jitter: uniform random in [0, delay * 0.5]
         const jitter = Math.random() * delay * 0.5;
-        await new Promise<void>((resolve) => setTimeout(resolve, delay + jitter));
+        await this.delayWithAbort(delay + jitter);
         delay = Math.min(delay * 2, 60_000);
       }
     }
+  }
+
+  private async delayWithAbort(ms: number): Promise<void> {
+    const signal = this.options.abortSignal;
+    if (!signal) {
+      await new Promise<void>((resolve) => setTimeout(resolve, ms));
+      return;
+    }
+    if (signal.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
+    }
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', onAbort);
+        reject(new DOMException('Aborted', 'AbortError'));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   /**

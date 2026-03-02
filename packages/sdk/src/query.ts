@@ -136,6 +136,7 @@ export function query(
   let queueNotifier: (() => void) | null = null;
   let streamClosed = false;
   let sourcePumpStarted = false;
+  let sourcePumpError: Error | null = null;
 
   function notifyQueue(): void {
     if (queueNotifier) {
@@ -152,13 +153,18 @@ export function query(
   }
 
   async function readQueuedInput(): Promise<SDKUserMessage | typeof STREAM_DONE> {
-    while (!streamClosed && queuedInputs.length === 0) {
+    while (!streamClosed && queuedInputs.length === 0 && !sourcePumpError) {
       await new Promise<void>((resolve) => {
         queueNotifier = resolve;
       });
     }
     if (queuedInputs.length > 0) {
       return queuedInputs.shift()!;
+    }
+    if (sourcePumpError) {
+      const error = sourcePumpError;
+      sourcePumpError = null;
+      throw error;
     }
     return STREAM_DONE;
   }
@@ -172,6 +178,8 @@ export function query(
         for await (const msg of source) {
           pushQueuedInput(msg);
         }
+      } catch (error) {
+        sourcePumpError = error instanceof Error ? error : new Error(String(error));
       } finally {
         streamClosed = true;
         notifyQueue();
@@ -1041,7 +1049,14 @@ export function query(
         startSourcePromptPumpIfNeeded();
         let multiturnUsedFallback = false;
         while (true) {
-          const userMsg = await readQueuedInput();
+          let userMsg: SDKUserMessage | typeof STREAM_DONE;
+          try {
+            userMsg = await readQueuedInput();
+          } catch (sourceErr) {
+            const error = sourceErr instanceof Error ? sourceErr : new Error(String(sourceErr));
+            yield executionErrorResult(error);
+            break;
+          }
           if (userMsg === STREAM_DONE) break;
           const userPrompt = __internal_extractUserMessagePrompt(userMsg);
           if (userPrompt === undefined) continue;

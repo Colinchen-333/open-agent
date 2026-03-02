@@ -624,6 +624,31 @@ describe('query().streamInput()', () => {
     await q.interrupt();
     await expect(q.streamInput('after-interrupt')).rejects.toThrow(/closed or interrupted/i);
   });
+
+  it('emits error result when async prompt source throws', async () => {
+    const source = (async function* () {
+      throw new Error('source pump failed');
+      yield {
+        type: 'user',
+        message: 'unreachable',
+        parent_tool_use_id: null,
+        session_id: 's',
+        uuid: 'u',
+      } as any;
+    })();
+    const q = query({ prompt: source, options: { model: 'claude-sonnet-4-6' } });
+
+    const messages: any[] = [];
+    for await (const m of q) {
+      messages.push(m);
+    }
+    const result = messages.find((m) => m.type === 'result');
+    expect(result).toBeDefined();
+    expect(result.subtype).toBe('error_during_execution');
+    expect(result.is_error).toBe(true);
+    expect(Array.isArray(result.errors)).toBe(true);
+    expect(String(result.errors[0] || '')).toContain('source pump failed');
+  });
 });
 
 // ---------------------------------------------------------------------------

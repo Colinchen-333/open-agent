@@ -569,6 +569,35 @@ describe('ConversationLoop', () => {
       expect(result.is_error).toBe(true);
       expect(result.stop_reason).toBe('interrupted');
     });
+
+    it('aborts promptly during retry backoff', async () => {
+      const controller = new AbortController();
+      const provider: LLMProvider = {
+        name: 'retry-abort-mock',
+        async *chat() {
+          throw new Error('network timeout');
+          yield { type: 'text_delta', text: 'unreachable' } as StreamEvent;
+        },
+        async listModels() { return []; },
+      };
+
+      const loop = new ConversationLoop(
+        baseOptions(provider, new Map(), { abortSignal: controller.signal }),
+      );
+
+      const startedAt = Date.now();
+      const abortTimer = setTimeout(() => controller.abort(), 20);
+      const messages = await collectMessages(loop.run('trigger retry'));
+      clearTimeout(abortTimer);
+      const elapsed = Date.now() - startedAt;
+
+      const result = messages.find((m) => m.type === 'result') as any;
+      expect(result).toBeDefined();
+      expect(result.stop_reason).toBe('interrupted');
+      expect(result.is_error).toBe(true);
+      // With abort-aware backoff this should not wait for the 1s retry delay.
+      expect(elapsed).toBeLessThan(500);
+    });
   });
 
   describe('pre-tool hook blocked execution', () => {
