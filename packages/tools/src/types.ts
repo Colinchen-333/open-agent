@@ -83,6 +83,8 @@ export interface ToolDefinition {
   description: string;
   inputSchema: Record<string, any>; // JSON Schema
   execute(input: any, context: ToolContext): Promise<any>;
+  /** Custom timeout in milliseconds. Overrides the default 60s timeout in ConversationLoop. */
+  timeout?: number;
 }
 
 export interface ToolContext {

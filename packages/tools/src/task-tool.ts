@@ -30,6 +30,7 @@ export function createTaskTool(deps: TaskToolDeps): ToolDefinition {
   return {
     name: 'Task',
     description: 'Launch a new agent to handle complex, multi-step tasks autonomously. Specify subagent_type to choose the agent type and prompt to describe the task.',
+    timeout: 600_000, // 10 minutes — subagents may run complex multi-step tasks
     inputSchema: {
       type: 'object',
       properties: {

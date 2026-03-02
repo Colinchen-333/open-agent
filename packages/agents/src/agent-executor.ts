@@ -118,6 +118,9 @@ export class AgentExecutor {
     // Fire SubagentStart hook
     await this.fireSubagentStart(agentId, agentType, options.cwd);
 
+    // Emit launched event
+    try { options.onEvent?.({ type: 'launched', agentId, description: options.name }); } catch { /* non-fatal */ }
+
     try {
       // Import AgentRunner dynamically to avoid circular deps
       const { AgentRunner } = await import('./agent-runner.js');
@@ -167,8 +170,15 @@ export class AgentExecutor {
       await this.fireSubagentStop(agentId, agentType, agentResult.result, options.cwd);
 
       if (agentResult.isError) {
-        throw new Error(agentResult.result || 'Agent execution failed');
+        // Emit failed event
+        try { options.onEvent?.({ type: 'failed', agentId, error: agentResult.result, durationMs: session.durationMs }); } catch { /* non-fatal */ }
+        const err = new Error(agentResult.result || 'Agent execution failed');
+        (err as any).__lifecycleEmitted = true;
+        throw err;
       }
+
+      // Emit completed event
+      try { options.onEvent?.({ type: 'completed', agentId, durationMs: session.durationMs, totalToolUseCount: agentResult.totalToolUseCount }); } catch { /* non-fatal */ }
 
       return { agentId, result: agentResult.result, session };
     } catch (error: unknown) {
@@ -180,6 +190,11 @@ export class AgentExecutor {
 
       // Fire SubagentStop hook on failure too
       await this.fireSubagentStop(agentId, agentType, session.error, options.cwd);
+
+      // Emit failed event only if not already emitted (isError case already emitted above)
+      if (!(error as any).__lifecycleEmitted) {
+        try { options.onEvent?.({ type: 'failed', agentId, error: session.error, durationMs: session.durationMs }); } catch { /* non-fatal */ }
+      }
 
       throw error;
     }
@@ -229,6 +244,9 @@ export class AgentExecutor {
     // signal it to terminate.
     const abortController = new AbortController();
     this.agentAbortControllers.set(agentId, abortController);
+
+    // Emit launched event
+    try { options.onEvent?.({ type: 'launched', agentId, description: options.name }); } catch { /* non-fatal */ }
 
     // Fire and forget — run in background
     (async () => {
@@ -280,8 +298,10 @@ export class AgentExecutor {
 
         if (agentResult.isError) {
           appendFileSync(outputFile, `\n--- Agent failed ---\n${agentResult.result}\n`);
+          try { options.onEvent?.({ type: 'failed', agentId, error: agentResult.result, durationMs: session.durationMs }); } catch { /* non-fatal */ }
         } else {
           appendFileSync(outputFile, `\n--- Agent completed ---\n${agentResult.result}\n`);
+          try { options.onEvent?.({ type: 'completed', agentId, durationMs: session.durationMs, totalToolUseCount: agentResult.totalToolUseCount }); } catch { /* non-fatal */ }
         }
       } catch (error: unknown) {
         session.state = 'failed';
@@ -292,6 +312,8 @@ export class AgentExecutor {
 
         // Fire SubagentStop hook on failure
         await this.fireSubagentStop(agentId, agentType, session.error, options.cwd);
+
+        try { options.onEvent?.({ type: 'failed', agentId, error: session.error, durationMs: session.durationMs }); } catch { /* non-fatal */ }
       }
 
       // Clean up abort controller entry for this agent

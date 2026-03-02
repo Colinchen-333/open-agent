@@ -987,8 +987,9 @@ export class ConversationLoop {
 
           try {
             let toolTimer: ReturnType<typeof setTimeout>;
+            const toolTimeout = tool.timeout ?? TOOL_EXECUTE_TIMEOUT_MS;
             const timeoutPromise = new Promise<never>((_, reject) => {
-              toolTimer = setTimeout(() => reject(new Error('Tool execution timed out after 60s')), TOOL_EXECUTE_TIMEOUT_MS);
+              toolTimer = setTimeout(() => reject(new Error(`Tool execution timed out after ${Math.round(toolTimeout / 1000)}s`)), toolTimeout);
             });
             const result = await Promise.race([tool.execute(toolUse.input, toolCtx), timeoutPromise])
               .finally(() => clearTimeout(toolTimer!));
