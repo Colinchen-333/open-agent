@@ -3,6 +3,7 @@ import type { AgentDefinition } from '@open-agent/core';
 import type { LLMProvider } from '@open-agent/providers';
 import type { ToolDefinition } from '@open-agent/tools';
 import { randomUUID } from 'crypto';
+import { TeamManager } from './team-manager.js';
 
 /** Lightweight event emitted by subagent for parent visibility. */
 export interface SubagentStreamEvent {
@@ -40,6 +41,10 @@ export interface AgentRunnerOptions {
   onMessage?: (message: unknown) => void;
   /** Callback to stream tool events to the parent agent for real-time visibility. */
   onEvent?: (event: SubagentStreamEvent) => void;
+  /** Team name for inbox polling — when set with agentName, enables team message injection */
+  teamName?: string;
+  /** Agent name for inbox polling — identifies which inbox to read */
+  agentName?: string;
 }
 
 export interface AgentUsage {
@@ -130,53 +135,103 @@ export class AgentRunner {
     let toolUseCount = 0;
     let resultUsage: any = {};
 
-    for await (const msg of loop.run(prompt)) {
-      if (this.options.onMessage) {
-        this.options.onMessage(msg);
-      }
+    const teamManager = (this.options.teamName && this.options.agentName)
+      ? new TeamManager()
+      : null;
 
-      // Emit tool events for parent visibility
-      if (this.options.onEvent) {
-        try {
-          if (msg.type === 'assistant') {
-            const content = (msg as any).message?.content;
-            if (Array.isArray(content)) {
-              for (const block of content) {
-                if (block.type === 'tool_use') {
-                  this.options.onEvent({
-                    type: 'tool_start',
-                    toolName: block.name,
-                    toolUseId: block.id,
-                    input: typeof block.input === 'object' && block.input ? block.input : undefined,
-                  });
+    // Outer loop: allows re-entering the conversation after receiving inbox messages.
+    let currentPrompt: string = prompt;
+    let shutdownRequested = false;
+
+    while (true) {
+      for await (const msg of loop.run(currentPrompt)) {
+        if (this.options.onMessage) {
+          this.options.onMessage(msg);
+        }
+
+        // Emit tool events for parent visibility
+        if (this.options.onEvent) {
+          try {
+            if (msg.type === 'assistant') {
+              const content = (msg as any).message?.content;
+              if (Array.isArray(content)) {
+                for (const block of content) {
+                  if (block.type === 'tool_use') {
+                    this.options.onEvent({
+                      type: 'tool_start',
+                      toolName: block.name,
+                      toolUseId: block.id,
+                      input: typeof block.input === 'object' && block.input ? block.input : undefined,
+                    });
+                  }
                 }
               }
             }
+            if (msg.type === 'tool_result') {
+              this.options.onEvent({
+                type: 'tool_result',
+                toolName: (msg as any).tool_name,
+                toolUseId: (msg as any).tool_use_id,
+                ok: !(msg as any).is_error,
+                output: typeof (msg as any).result === 'string' ? (msg as any).result : undefined,
+                error: (msg as any).is_error ? (msg as any).result : undefined,
+              });
+            }
+          } catch { /* onEvent callback error must not interrupt subagent execution */ }
+        }
+
+        if (msg.type === 'tool_result') {
+          toolUseCount++;
+        }
+        if (msg.type === 'result') {
+          if ('result' in msg) {
+            resultText = (msg as any).result ?? '';
           }
-          if (msg.type === 'tool_result') {
-            this.options.onEvent({
-              type: 'tool_result',
-              toolName: (msg as any).tool_name,
-              toolUseId: (msg as any).tool_use_id,
-              ok: !(msg as any).is_error,
-              output: typeof (msg as any).result === 'string' ? (msg as any).result : undefined,
-              error: (msg as any).is_error ? (msg as any).result : undefined,
-            });
-          }
-        } catch { /* onEvent callback error must not interrupt subagent execution */ }
+          isError = msg.is_error;
+          numTurns = msg.num_turns;
+          resultUsage = (msg as any).usage ?? {};
+        }
       }
 
-      if (msg.type === 'tool_result') {
-        toolUseCount++;
-      }
-      if (msg.type === 'result') {
-        if ('result' in msg) {
-          resultText = (msg as any).result ?? '';
+      // After each run completes, check inbox for team messages if in a team context.
+      if (teamManager && this.options.teamName && this.options.agentName && !isError) {
+        const inboxMessages = teamManager.readInbox(this.options.teamName, this.options.agentName);
+
+        if (inboxMessages.length === 0) {
+          // No pending messages — exit the outer loop normally.
+          break;
         }
-        isError = msg.is_error;
-        numTurns = msg.num_turns;
-        resultUsage = (msg as any).usage ?? {};
+
+        // Check for shutdown_request first.
+        const shutdownMsg = inboxMessages.find(m => m.type === 'shutdown_request');
+        if (shutdownMsg) {
+          // Send shutdown_response acknowledging the request.
+          teamManager.sendMessage(this.options.teamName, {
+            type: 'shutdown_response' as any,
+            from: this.options.agentName,
+            to: shutdownMsg.from,
+            content: `Agent "${this.options.agentName}" acknowledges shutdown request.`,
+            summary: `${this.options.agentName} shutting down`,
+            timestamp: new Date().toISOString(),
+            requestId: shutdownMsg.requestId,
+            approve: true,
+          });
+          shutdownRequested = true;
+          break;
+        }
+
+        // Compose inbox messages into a single user turn for the next loop run.
+        const injectedContent = inboxMessages
+          .map(m => `[Team message from ${m.from}]: ${m.content}`)
+          .join('\n\n');
+
+        currentPrompt = injectedContent;
+        // Continue the outer loop with the injected content as next prompt.
+        continue;
       }
+
+      // If there's an error, or no team context, exit the outer loop.
+      break;
     }
 
     const inputTokens = resultUsage.input_tokens ?? 0;

@@ -145,6 +145,8 @@ export class AgentExecutor {
         model: options.model,
         initialMessages,
         worktreePath: options.worktreePath,
+        teamName: options.teamName,
+        agentName: options.name,
         onMessage: (msg) => {
           try { appendFileSync(transcriptPath, JSON.stringify(msg) + '\n'); } catch { /* non-fatal */ }
         },
@@ -273,6 +275,8 @@ export class AgentExecutor {
           model: options.model,
           initialMessages,
           worktreePath: options.worktreePath,
+          teamName: options.teamName,
+          agentName: options.name,
           onMessage: (msg) => {
             try { appendFileSync(bgTranscriptPath, JSON.stringify(msg) + '\n'); } catch { /* non-fatal */ }
           },
