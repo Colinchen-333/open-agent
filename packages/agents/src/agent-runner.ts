@@ -142,6 +142,9 @@ export class AgentRunner {
     // Outer loop: allows re-entering the conversation after receiving inbox messages.
     let currentPrompt: string = prompt;
     let shutdownRequested = false;
+    // pendingInboxInjection: inbox messages collected mid-run that need to be
+    // injected as the next prompt after the current run completes.
+    let pendingInboxInjection: string | null = null;
 
     while (true) {
       for await (const msg of loop.run(currentPrompt)) {
@@ -190,47 +193,51 @@ export class AgentRunner {
           isError = msg.is_error;
           numTurns = msg.num_turns;
           resultUsage = (msg as any).usage ?? {};
+
+          // ── 每轮结束后立即检查 inbox ──────────────────────────────────────
+          // Check inbox on every result (turn completion), not just at outer-loop end.
+          // This lets the agent react to team messages with lower latency.
+          if (teamManager && this.options.teamName && this.options.agentName && !isError) {
+            const inboxMessages = teamManager.readInbox(this.options.teamName, this.options.agentName);
+            if (inboxMessages.length > 0) {
+              const shutdownMsg = inboxMessages.find(m => m.type === 'shutdown_request');
+              if (shutdownMsg) {
+                // Acknowledge shutdown and signal outer loop to exit.
+                teamManager.sendMessage(this.options.teamName, {
+                  type: 'shutdown_response' as any,
+                  from: this.options.agentName,
+                  to: shutdownMsg.from,
+                  content: `Agent "${this.options.agentName}" acknowledges shutdown request.`,
+                  summary: `${this.options.agentName} shutting down`,
+                  timestamp: new Date().toISOString(),
+                  requestId: shutdownMsg.requestId,
+                  approve: true,
+                });
+                shutdownRequested = true;
+                pendingInboxInjection = null;
+              } else {
+                // Collect non-shutdown messages to inject as the next prompt.
+                pendingInboxInjection = inboxMessages
+                  .map(m => `[Team message from ${m.from}]: ${m.content}`)
+                  .join('\n\n');
+              }
+            }
+          }
         }
       }
 
-      // After each run completes, check inbox for team messages if in a team context.
-      if (teamManager && this.options.teamName && this.options.agentName && !isError) {
-        const inboxMessages = teamManager.readInbox(this.options.teamName, this.options.agentName);
+      // After each run completes, process any pending inbox injection.
+      if (shutdownRequested) {
+        break;
+      }
 
-        if (inboxMessages.length === 0) {
-          // No pending messages — exit the outer loop normally.
-          break;
-        }
-
-        // Check for shutdown_request first.
-        const shutdownMsg = inboxMessages.find(m => m.type === 'shutdown_request');
-        if (shutdownMsg) {
-          // Send shutdown_response acknowledging the request.
-          teamManager.sendMessage(this.options.teamName, {
-            type: 'shutdown_response' as any,
-            from: this.options.agentName,
-            to: shutdownMsg.from,
-            content: `Agent "${this.options.agentName}" acknowledges shutdown request.`,
-            summary: `${this.options.agentName} shutting down`,
-            timestamp: new Date().toISOString(),
-            requestId: shutdownMsg.requestId,
-            approve: true,
-          });
-          shutdownRequested = true;
-          break;
-        }
-
-        // Compose inbox messages into a single user turn for the next loop run.
-        const injectedContent = inboxMessages
-          .map(m => `[Team message from ${m.from}]: ${m.content}`)
-          .join('\n\n');
-
-        currentPrompt = injectedContent;
-        // Continue the outer loop with the injected content as next prompt.
+      if (pendingInboxInjection) {
+        currentPrompt = pendingInboxInjection;
+        pendingInboxInjection = null;
         continue;
       }
 
-      // If there's an error, or no team context, exit the outer loop.
+      // If there's an error, or no team context, or no inbox messages, exit.
       break;
     }
 

@@ -7,6 +7,7 @@ import { execSync } from '@open-agent/core';
 import type { LLMProvider } from '@open-agent/providers';
 import type { ToolDefinition } from '@open-agent/tools';
 import type { SubagentStreamEvent } from './agent-runner.js';
+import { TeamManager } from './team-manager.js';
 
 export type AgentState = 'spawning' | 'running' | 'idle' | 'completed' | 'failed' | 'shutdown';
 
@@ -182,6 +183,14 @@ export class AgentExecutor {
       // Emit completed event
       try { options.onEvent?.({ type: 'completed', agentId, durationMs: session.durationMs, totalToolUseCount: agentResult.totalToolUseCount }); } catch { /* non-fatal */ }
 
+      // Notify team lead that this agent is now idle (if running in a team).
+      if (options.teamName && options.name) {
+        try {
+          const tm = new TeamManager();
+          tm.notifyIdle(options.teamName, options.name);
+        } catch { /* non-fatal */ }
+      }
+
       return { agentId, result: agentResult.result, session };
     } catch (error: unknown) {
       session.state = 'failed';
@@ -306,6 +315,13 @@ export class AgentExecutor {
         } else {
           appendFileSync(outputFile, `\n--- Agent completed ---\n${agentResult.result}\n`);
           try { options.onEvent?.({ type: 'completed', agentId, durationMs: session.durationMs, totalToolUseCount: agentResult.totalToolUseCount }); } catch { /* non-fatal */ }
+          // Notify team lead that this background agent is now idle.
+          if (options.teamName && options.name) {
+            try {
+              const tm = new TeamManager();
+              tm.notifyIdle(options.teamName, options.name);
+            } catch { /* non-fatal */ }
+          }
         }
       } catch (error: unknown) {
         session.state = 'failed';
