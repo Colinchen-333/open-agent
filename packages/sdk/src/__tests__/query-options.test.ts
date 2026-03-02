@@ -774,7 +774,7 @@ describe('__internal_extractUserMessagePrompt()', () => {
 
   it('preserves non-text content blocks instead of dropping them', () => {
     const blocks = [
-      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'abc' } },
+      { type: 'image' as const, source: { type: 'base64' as const, media_type: 'image/png', data: 'abc' } },
     ];
     const prompt = __internal_extractUserMessagePrompt({
       type: 'user',
