@@ -39,45 +39,43 @@ export class SettingsLoader {
     const merged: SettingsFile = {};
 
     for (const source of sources) {
-      const filePath = this.getSettingsPath(source, cwd);
-      if (!filePath || !existsSync(filePath)) {
-        continue;
-      }
-
-      try {
-        const raw = readFileSync(filePath, 'utf-8');
-        const parsed: SettingsFile = JSON.parse(raw);
-        this.mergeSettings(merged, parsed);
-      } catch {
-        // Silently skip unreadable or malformed settings files
+      const filePaths = this.getSettingsPaths(source, cwd);
+      for (const filePath of filePaths) {
+        if (!existsSync(filePath)) {
+          continue;
+        }
+        try {
+          const raw = readFileSync(filePath, 'utf-8');
+          const parsed: SettingsFile = JSON.parse(raw);
+          this.mergeSettings(merged, parsed);
+        } catch {
+          // Silently skip unreadable or malformed settings files
+        }
       }
     }
 
     return merged;
   }
 
-  private getSettingsPath(source: SettingSource, cwd: string): string | null {
+  private getSettingsPaths(source: SettingSource, cwd: string): string[] {
     switch (source) {
-      case 'user': {
-        const openAgentPath = join(homedir(), '.open-agent', 'settings.json');
-        return existsSync(openAgentPath)
-          ? openAgentPath
-          : join(homedir(), '.claude', 'settings.json');
-      }
-      case 'project': {
-        const openAgentPath = join(cwd, '.open-agent', 'settings.json');
-        return existsSync(openAgentPath)
-          ? openAgentPath
-          : join(cwd, '.claude', 'settings.json');
-      }
-      case 'local': {
-        const openAgentPath = join(cwd, '.open-agent', 'settings.local.json');
-        return existsSync(openAgentPath)
-          ? openAgentPath
-          : join(cwd, '.claude', 'settings.local.json');
-      }
+      case 'user':
+        return [
+          join(homedir(), '.open-agent', 'settings.json'),
+          join(homedir(), '.claude', 'settings.json'),
+        ];
+      case 'project':
+        return [
+          join(cwd, '.open-agent', 'settings.json'),
+          join(cwd, '.claude', 'settings.json'),
+        ];
+      case 'local':
+        return [
+          join(cwd, '.open-agent', 'settings.local.json'),
+          join(cwd, '.claude', 'settings.local.json'),
+        ];
       default:
-        return null;
+        return [];
     }
   }
 

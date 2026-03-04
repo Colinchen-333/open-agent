@@ -33,6 +33,30 @@ describe('SettingsLoader', () => {
     expect(loaded.permissions?.allow).toEqual([{ toolName: 'Read' }]);
   });
 
+  it('loads both .open-agent and .claude project settings when both exist', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-settings-dual-project-'));
+    tempDirs.push(cwd);
+    writeJson(join(cwd, '.open-agent', 'settings.json'), {
+      permissions: {
+        allow: [{ toolName: 'Read' }],
+      },
+      env: { OPEN_AGENT_FLAG: '1' },
+    });
+    writeJson(join(cwd, '.claude', 'settings.json'), {
+      permissions: {
+        deny: [{ toolName: 'Bash', ruleContent: 'rm -rf' }],
+      },
+      sandbox: { enabled: true },
+    });
+
+    const loader = new SettingsLoader();
+    const loaded = loader.load(cwd, ['project']);
+    expect(loaded.permissions?.allow).toEqual([{ toolName: 'Read' }]);
+    expect(loaded.permissions?.deny).toEqual([{ toolName: 'Bash', ruleContent: 'rm -rf' }]);
+    expect(loaded.env).toEqual({ OPEN_AGENT_FLAG: '1' });
+    expect(loaded.sandbox).toEqual({ enabled: true });
+  });
+
   it('merges rules and applies higher-priority overrides for sandbox and path lists', () => {
     const cwd = mkdtempSync(join(tmpdir(), 'open-agent-settings-merge-'));
     tempDirs.push(cwd);
