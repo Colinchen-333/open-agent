@@ -27,23 +27,36 @@ export function createToolSearchTool(deps: ToolSearchDeps): ToolDefinition {
       required: ['query'],
     },
     async execute(input: any, _ctx: ToolContext) {
-      const query: string = input.query;
+      const query: string = String(input.query ?? '').trim();
       const maxResults: number = (input.max_results as number) ?? 5;
 
       if (query.startsWith('select:')) {
-        const toolName = query.slice(7);
+        const toolName = query.slice(7).trim();
+        if (!toolName) {
+          return 'Missing tool name. Use "select:<tool_name>".';
+        }
         const tool = await deps.selectTool(toolName);
         if (tool) {
           return `Tool "${toolName}" loaded successfully. It is now available for use.`;
         }
-        return `Tool "${toolName}" not found.`;
+        return `Tool "${toolName}" not found. Try ToolSearch with keywords first, then run select:<tool_name>.`;
+      }
+
+      if (!query) {
+        return [
+          'Please provide keywords to search tools.',
+          'Examples:',
+          '- "search: git diff"',
+          '- "search: browser automation"',
+          '- "select:ToolName" to load a known tool directly',
+        ].join('\n');
       }
 
       const results = await deps.searchTools(query);
       const limited = results.slice(0, maxResults);
 
       if (limited.length === 0) {
-        return 'No matching tools found.';
+        return `No matching tools found for "${query}". Try broader keywords or use "select:<tool_name>".`;
       }
 
       return limited.map((t) => `- ${t.name}: ${t.description}`).join('\n');
