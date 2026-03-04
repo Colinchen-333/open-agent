@@ -45,6 +45,8 @@ export interface AgentRunnerOptions {
   teamName?: string;
   /** Agent name for inbox polling — identifies which inbox to read */
   agentName?: string;
+  /** Abort signal used to interrupt the conversation loop. */
+  abortSignal?: AbortSignal;
 }
 
 export interface AgentUsage {
@@ -127,6 +129,7 @@ export class AgentRunner {
       cwd: effectiveCwd,
       sessionId: `subagent-${this.agentId}`,
       initialMessages: this.options.initialMessages,
+      abortSignal: this.options.abortSignal,
     });
 
     let resultText = '';

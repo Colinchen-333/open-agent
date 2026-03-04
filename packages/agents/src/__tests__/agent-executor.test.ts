@@ -341,6 +341,26 @@ describe('AgentExecutor', () => {
       expect(lastRunnerOptions.onEvent).toBe(onEvent);
     });
 
+    it('executeInBackground 传递 abortSignal 给 AgentRunner', async () => {
+      const { agentId } = await executor.executeInBackground({
+        definition: mockDefinition,
+        provider: mockProvider as any,
+        tools: mockTools,
+        prompt: 'Background with abort signal',
+        cwd: '/tmp',
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(lastRunnerOptions).not.toBeNull();
+      expect(lastRunnerOptions.abortSignal).toBeDefined();
+
+      const session = (executor as any).agents.get(agentId);
+      if (session) session.state = 'running';
+      const stopped = executor.stopAgent(agentId);
+      expect(stopped).toBe(true);
+    });
+
     it('execute (前台) 也传递 onEvent', async () => {
       const onEvent = (_e: any) => {};
       await executor.execute({

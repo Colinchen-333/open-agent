@@ -53,6 +53,8 @@ export interface ExecuteOptions {
   onWorktreeCleanup?: (worktreePath: string, hasChanges: boolean) => Promise<void>;
   /** Callback to stream tool events to the parent for real-time visibility. */
   onEvent?: (event: SubagentStreamEvent) => void;
+  /** Optional abort signal for foreground runs. */
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -154,6 +156,7 @@ export class AgentExecutor {
           try { appendFileSync(transcriptPath, JSON.stringify(msg) + '\n'); } catch { /* non-fatal */ }
         },
         onEvent: options.onEvent,
+        abortSignal: options.abortSignal,
       });
 
       const agentResult = await runner.run(options.prompt);
@@ -293,6 +296,7 @@ export class AgentExecutor {
             try { appendFileSync(bgTranscriptPath, JSON.stringify(msg) + '\n'); } catch { /* non-fatal */ }
           },
           onEvent: options.onEvent,
+          abortSignal: abortController.signal,
         });
 
         const agentResult = await runner.run(options.prompt);
@@ -396,7 +400,7 @@ export class AgentExecutor {
   /** Stop a background agent by sending an abort signal */
   stopAgent(agentId: string): boolean {
     const session = this.agents.get(agentId);
-    if (!session || session.state !== 'running') return false;
+    if (!session || (session.state !== 'running' && session.state !== 'spawning')) return false;
 
     // Signal the agent's runner to abort via its AbortController
     const controller = this.agentAbortControllers.get(agentId);
