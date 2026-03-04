@@ -14,6 +14,7 @@ import { ConversationLoop, SessionManager, buildSystemPrompt, ConfigLoader, Auto
 import { AgentLoader, AgentExecutor } from '@open-agent/agents';
 import {
   createDefaultToolRegistry,
+  createToolSearchTool,
   createTaskTool,
   createTaskOutputTool,
   createTaskStopTool,
@@ -268,6 +269,23 @@ export function query(
       setupToolsReady = result as Promise<void>;
       void setupToolsReady.catch(() => {});
     }
+  }
+
+  if (!toolRegistry.get('ToolSearch')) {
+    toolRegistry.register(createToolSearchTool({
+      searchTools: async (searchQuery: string) => {
+        const q = searchQuery.toLowerCase().trim();
+        return toolRegistry
+          .list()
+          .map((tool) => ({ name: tool.name, description: tool.description }))
+          .filter((tool) => tool.name !== 'ToolSearch')
+          .filter((tool) => q.length === 0 || tool.name.toLowerCase().includes(q) || tool.description.toLowerCase().includes(q));
+      },
+      selectTool: async (name: string) => {
+        const hit = toolRegistry.get(name);
+        return hit ?? null;
+      },
+    }));
   }
 
   // ------------------------------------------------------------------
