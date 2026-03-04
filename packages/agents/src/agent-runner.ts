@@ -7,18 +7,18 @@ import { TeamManager } from './team-manager.js';
 
 /** Lightweight event emitted by subagent for parent visibility. */
 export interface SubagentStreamEvent {
-  type: 'tool_start' | 'tool_result' | 'launched' | 'completed' | 'failed';
+  type: 'tool_start' | 'tool_result' | 'launched' | 'completed' | 'failed' | 'shutdown';
   toolName?: string;
   toolUseId?: string;
   input?: Record<string, unknown>;
   ok?: boolean;
   output?: string;
   error?: string;
-  /** Agent ID for lifecycle events (launched/completed/failed) */
+  /** Agent ID for lifecycle events (launched/completed/failed/shutdown) */
   agentId?: string;
   /** Task description for lifecycle events */
   description?: string;
-  /** Duration in milliseconds (completed/failed events) */
+  /** Duration in milliseconds (completed/failed/shutdown events) */
   durationMs?: number;
   /** Total tool use count (completed events) */
   totalToolUseCount?: number;

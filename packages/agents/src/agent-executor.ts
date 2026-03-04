@@ -78,6 +78,8 @@ export class AgentExecutor {
   private agents = new Map<string, AgentSession>();
   /** Abort controllers per agent — used to signal background agents to stop */
   private agentAbortControllers = new Map<string, AbortController>();
+  /** Lifecycle event callbacks for background agents (used by stopAgent). */
+  private backgroundEventCallbacks = new Map<string, (event: SubagentStreamEvent) => void>();
   private baseDir: string;
   private outputDir: string;
   private hookExecutor?: AgentHookExecutor;
@@ -247,6 +249,7 @@ export class AgentExecutor {
     this.agents.set(agentId, session);
     writeFileSync(outputFile, ''); // Create empty output file
     this.saveSession(session);
+    if (options.onEvent) this.backgroundEventCallbacks.set(agentId, options.onEvent);
 
     // Fire SubagentStart hook before launching background task
     await this.fireSubagentStart(agentId, agentType, options.cwd);
@@ -294,6 +297,15 @@ export class AgentExecutor {
 
         const agentResult = await runner.run(options.prompt);
 
+        const wasShutdown = this.agents.get(agentId)?.state === 'shutdown';
+        if (wasShutdown) {
+          session.completedAt = session.completedAt || new Date().toISOString();
+          session.durationMs = Date.now() - startTime;
+          appendFileSync(outputFile, '\n--- Agent stopped ---\n');
+          this.saveSession(session);
+          return;
+        }
+
         session.state = agentResult.isError ? 'failed' : 'completed';
         session.completedAt = new Date().toISOString();
         session.durationMs = Date.now() - startTime;
@@ -324,6 +336,13 @@ export class AgentExecutor {
           }
         }
       } catch (error: unknown) {
+        const wasShutdown = this.agents.get(agentId)?.state === 'shutdown';
+        if (wasShutdown) {
+          session.completedAt = session.completedAt || new Date().toISOString();
+          session.durationMs = Date.now() - startTime;
+          this.saveSession(session);
+          return;
+        }
         session.state = 'failed';
         session.completedAt = new Date().toISOString();
         session.durationMs = Date.now() - startTime;
@@ -338,6 +357,7 @@ export class AgentExecutor {
 
       // Clean up abort controller entry for this agent
       this.agentAbortControllers.delete(agentId);
+      this.backgroundEventCallbacks.delete(agentId);
       if (this.agentAbortControllers.size > 200) {
         console.warn(`[AgentExecutor] agentAbortControllers Map has ${this.agentAbortControllers.size} entries — possible leak`);
       }
@@ -387,6 +407,14 @@ export class AgentExecutor {
 
     session.state = 'shutdown';
     session.completedAt = new Date().toISOString();
+    session.durationMs = Math.max(0, Date.now() - new Date(session.startedAt).getTime());
+    try {
+      const cb = this.backgroundEventCallbacks.get(agentId);
+      cb?.({ type: 'shutdown', agentId, durationMs: session.durationMs });
+    } catch {
+      // non-fatal
+    }
+    this.backgroundEventCallbacks.delete(agentId);
     this.saveSession(session);
     return true;
   }
