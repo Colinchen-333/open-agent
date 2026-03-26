@@ -135,7 +135,8 @@ export function query(
   const queuedInputs: SDKUserMessage[] = [];
   const STREAM_DONE = Symbol('stream-done');
   let queueNotifier: (() => void) | null = null;
-  let streamClosed = false;
+  let sourceExhausted = false;  // The original AsyncIterable prompt has ended.
+  let inputClosed = false;       // The query is truly closed — no more input accepted.
   let sourcePumpStarted = false;
   let sourcePumpError: Error | null = null;
 
@@ -148,13 +149,13 @@ export function query(
   }
 
   function pushQueuedInput(msg: SDKUserMessage): void {
-    if (streamClosed) return;
+    if (inputClosed) return;
     queuedInputs.push(msg);
     notifyQueue();
   }
 
   async function readQueuedInput(): Promise<SDKUserMessage | typeof STREAM_DONE> {
-    while (!streamClosed && queuedInputs.length === 0 && !sourcePumpError) {
+    while (!inputClosed && queuedInputs.length === 0 && !sourcePumpError) {
       await new Promise<void>((resolve) => {
         queueNotifier = resolve;
       });
@@ -182,7 +183,12 @@ export function query(
       } catch (error) {
         sourcePumpError = error instanceof Error ? error : new Error(String(error));
       } finally {
-        streamClosed = true;
+        sourceExhausted = true;
+        // When idleOnPromptExhaustion is enabled, keep accepting input via
+        // streamInput() even after the original source is exhausted.
+        if (!options.idleOnPromptExhaustion) {
+          inputClosed = true;
+        }
         notifyQueue();
       }
     })();
@@ -895,7 +901,7 @@ export function query(
         }
       }
     }
-    streamClosed = true;
+    inputClosed = true;
     notifyQueue();
     removeCallerAbortListener();
     restoreEnv();
@@ -1426,7 +1432,7 @@ export function query(
     if (typeof prompt === 'string') {
       throw new Error('streamInput() requires async-iterable prompt mode.');
     }
-    if (streamClosed || internalAbortController.signal.aborted) {
+    if (inputClosed || internalAbortController.signal.aborted) {
       throw new Error('streamInput() cannot be used after the query is closed or interrupted.');
     }
     if (typeof input === 'string') {

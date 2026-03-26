@@ -184,6 +184,12 @@ export interface QueryOptions {
   sandbox?: SandboxConfig;
   /** Server-side tools executed by the API provider (e.g. Anthropic native web search). */
   serverTools?: import('@open-agent/providers').ServerToolSpec[];
+  /**
+   * When `true` and the prompt is an `AsyncIterable`, the query stays alive
+   * after the source iterable is exhausted, waiting for new messages pushed
+   * via `streamInput()`.  Defaults to `false` for backwards compatibility.
+   */
+  idleOnPromptExhaustion?: boolean;
   debugFile?: string;
   spawnClaudeCodeProcess?: unknown;
   promptSuggestions?: boolean;
