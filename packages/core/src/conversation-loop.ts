@@ -1607,9 +1607,21 @@ export class ConversationLoop {
       uuid: randomUUID(),
     } as const;
 
+    const preCount = this.messages.length;
     const compacted = await this.compactInternal();
+    const removedCount = preCount - this.messages.length;
 
     if (compacted) {
+      if (removedCount > 0) {
+        yield {
+          type: 'tombstone',
+          originalMessageId: `compacted-${removedCount}-messages`,
+          reason: 'compacted',
+          uuid: randomUUID(),
+          session_id: sessionId,
+        } as SDKMessage;
+      }
+
       yield {
         type: 'system',
         subtype: 'compact_boundary',
