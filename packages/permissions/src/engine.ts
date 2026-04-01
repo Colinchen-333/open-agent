@@ -6,6 +6,7 @@ import type {
   PermissionRule,
   SandboxConfig,
 } from './types';
+import { classifyBashCommand } from './bash-risk';
 
 // Read-only tools that are always safe for informational access
 const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion'];
@@ -15,34 +16,6 @@ const EDIT_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit', 'We
 
 // Tools that are always safe regardless of mode (never destructive)
 const SAFE_TOOLS = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion'];
-
-// Patterns that indicate a potentially destructive or privileged command.
-// Matches Claude Code's dangerous command detection list.
-const DANGEROUS_COMMAND_PATTERNS = [
-  /\brm\s+(-rf?|-r\s+-f|-f\s+-r|--recursive)\b/,
-  /\bgit\s+push(\s+--force|-f)\b/,
-  /\bgit\s+push\b/,
-  /\bgit\s+reset\s+--hard\b/,
-  /\bgit\s+checkout\s+\.\b/,
-  /\bgit\s+clean\b/,
-  /\bsudo\b/,
-  /\bchmod\b/,
-  /\bchown\b/,
-  /\bmkfs\b/,
-  /\bdd\s+/,
-  /\bkill\s+-9\b/,
-  /\bpkill\b/,
-  />\s*\/dev\//,
-  // Output redirection to a file (> or >>). Require the > to appear after a
-  // space, pipe, semicolon, or at the start of the command to avoid matching
-  // shell comparison operators like `[ "$a" > "$b" ]`.
-  /(?:^|[|;&\s])>{1,2}\s*\S/,
-  /\bcurl\b.*\|\s*bash\b/,
-  /\bwget\b.*\|\s*bash\b/,
-  // Command substitution with network commands — potential remote code exec
-  /\$\(\s*(curl|wget)\b/,
-  /\beval\b/,
-];
 
 // File-system tools that operate on paths — subject to allowedPaths/deniedPaths checks
 const FILE_SYSTEM_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit'];
@@ -148,18 +121,48 @@ export class PermissionEngine {
       // Bash commands are audited for destructive patterns
       if (request.toolName === 'Bash') {
         const cmd = String((request.input as Record<string, unknown>)?.command ?? '');
-        if (this.isDangerousCommand(cmd)) {
+        const disableSandbox = Boolean((request.input as Record<string, unknown>)?.dangerouslyDisableSandbox);
+        if (disableSandbox) {
           return {
             behavior: 'ask',
-            reason: `potentially dangerous command: ${cmd.slice(0, 100)}`,
+            reason: 'sandbox bypass requires explicit approval',
           };
         }
-        // In acceptEdits mode, non-dangerous Bash is allowed automatically
-        if (this.mode === 'acceptEdits') {
-          return { behavior: 'allow', reason: 'acceptEdits mode: non-dangerous bash' };
+
+        const classification = classifyBashCommand(cmd);
+        if (classification.level === 'destructive') {
+          return {
+            behavior: 'ask',
+            reason: `destructive bash command (${classification.reason})`,
+          };
         }
-        // In default mode, ask before running any Bash command
-        return { behavior: 'ask', reason: 'requires approval in default mode' };
+
+        if (this.mode === 'default') {
+          if (classification.level === 'read-only') {
+            return {
+              behavior: 'allow',
+              reason: `read-only bash command (${classification.reason})`,
+            };
+          }
+          return {
+            behavior: 'ask',
+            reason: `bash command requires approval (${classification.level}: ${classification.reason})`,
+          };
+        }
+
+        // In acceptEdits mode, local workspace commands are allowed automatically.
+        if (this.mode === 'acceptEdits') {
+          if (classification.level === 'network') {
+            return {
+              behavior: 'ask',
+              reason: `networked bash command requires approval (${classification.reason})`,
+            };
+          }
+          return {
+            behavior: 'allow',
+            reason: `acceptEdits mode: ${classification.level} bash`,
+          };
+        }
       }
 
       // Write/Edit/other tools need user confirmation in default mode
@@ -222,13 +225,6 @@ export class PermissionEngine {
     } catch {
       return value.includes(pattern);
     }
-  }
-
-  /**
-   * Return true when a Bash command matches at least one known-dangerous pattern.
-   */
-  private isDangerousCommand(cmd: string): boolean {
-    return DANGEROUS_COMMAND_PATTERNS.some(re => re.test(cmd));
   }
 
   // ── Dynamic rule management ─────────────────────────────────────────────────

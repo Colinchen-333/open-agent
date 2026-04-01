@@ -31,6 +31,12 @@ describe('PermissionEngine', () => {
       expect(decision.behavior).toBe('ask');
     });
 
+    it('auto-allows read-only Bash commands', () => {
+      const decision = engine.evaluate(req('Bash', { command: 'git status --short' }));
+      expect(decision.behavior).toBe('allow');
+      expect(decision.reason).toContain('read-only bash');
+    });
+
     it('asks for dangerous Bash commands (rm -rf)', () => {
       const decision = engine.evaluate(req('Bash', { command: 'rm -rf /tmp/test' }));
       expect(decision.behavior).toBe('ask');
@@ -83,8 +89,7 @@ describe('PermissionEngine', () => {
       }
     });
 
-    it('asks for non-dangerous Bash commands', () => {
-      // acceptEdits auto-allows non-dangerous Bash
+    it('allows non-dangerous local Bash commands', () => {
       const decision = engine.evaluate(req('Bash', { command: 'ls -la' }));
       expect(decision.behavior).toBe('allow');
     });
@@ -92,6 +97,12 @@ describe('PermissionEngine', () => {
     it('asks for dangerous Bash commands', () => {
       const decision = engine.evaluate(req('Bash', { command: 'rm -rf /important' }));
       expect(decision.behavior).toBe('ask');
+    });
+
+    it('asks for network Bash commands', () => {
+      const decision = engine.evaluate(req('Bash', { command: 'curl https://example.com' }));
+      expect(decision.behavior).toBe('ask');
+      expect(decision.reason).toContain('networked bash command');
     });
   });
 
@@ -258,6 +269,15 @@ describe('PermissionEngine', () => {
         expect(decision.behavior).toBe('ask');
       });
     }
+
+    it('asks when sandbox bypass is requested explicitly', () => {
+      const decision = engine.evaluate(req('Bash', {
+        command: 'git status',
+        dangerouslyDisableSandbox: true,
+      }));
+      expect(decision.behavior).toBe('ask');
+      expect(decision.reason).toContain('sandbox bypass');
+    });
   });
 
   // ---------------------------------------------------------------------------
