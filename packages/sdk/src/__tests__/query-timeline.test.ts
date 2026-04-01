@@ -1,29 +1,10 @@
-import { describe, expect, it, mock } from 'bun:test';
+import { describe, expect, it } from 'bun:test';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { homedir, tmpdir } from 'os';
 import { join } from 'path';
 import type { ChatOptions, LLMProvider, Message, StreamEvent } from '@open-agent/providers';
 import type { Query, WorkerRecord, SDKTimelineItem } from '../types.js';
-
-let providerFactory: (() => LLMProvider) | null = null;
-
-mock.module('@open-agent/providers', () => ({
-  autoDetectProvider: () => {
-    if (!providerFactory) {
-      throw new Error('No mock provider configured for timeline test.');
-    }
-    return providerFactory();
-  },
-  createProvider: () => {
-    if (!providerFactory) {
-      throw new Error('No mock provider configured for timeline test.');
-    }
-    return providerFactory();
-  },
-  calculateCost: () => 0,
-}));
-
-const { query } = await import('../query.js');
+import { query } from '../query.js';
 
 function makeTempHome(prefix: string): { cwd: string; cleanup(): void } {
   const cwd = mkdtempSync(join(tmpdir(), prefix));
@@ -134,7 +115,6 @@ async function readTimelineItem(
 describe('query() timeline control plane', () => {
   it('reads a merged snapshot of team inbox messages and task notifications', async () => {
     const temp = makeTempHome('open-agent-sdk-timeline-snapshot-');
-    providerFactory = () => makeStaticProvider();
     const teamName = `alpha-team-${Date.now()}`;
     const workerId = `worker-${Date.now()}`;
     let workerDir = '';
@@ -143,7 +123,7 @@ describe('query() timeline control plane', () => {
       const q = query('timeline snapshot', {
         cwd: temp.cwd,
         model: 'mock-model',
-        provider: 'anthropic',
+        provider: makeStaticProvider(),
       });
 
       await q.createTeam({ name: teamName, setActive: true });
@@ -176,27 +156,29 @@ describe('query() timeline control plane', () => {
       });
 
       expect(timeline.some((item) => item.kind === 'team_message' && item.teamMessage?.content === 'Review the worker result.')).toBe(true);
-      expect(timeline.some((item) => item.kind === 'task_notification' && item.taskNotification?.task_id === workerId)).toBe(true);
+      const taskNotification = timeline.find((item) =>
+        item.kind === 'task_notification' && item.taskNotification?.taskId === workerId,
+      );
+      expect(taskNotification?.taskNotification?.teamName).toBe(teamName);
+      expect(taskNotification?.taskNotification?.followUps.some((item) => item.scaffold.kind === 'resume_worker')).toBe(true);
       q.close();
     } finally {
       if (workerDir) {
         rmSync(workerDir, { recursive: true, force: true });
       }
-      providerFactory = null;
       temp.cleanup();
     }
   });
 
   it('streams team messages, worker events, and task notifications through subscribeTimeline()', async () => {
     const temp = makeTempHome('open-agent-sdk-timeline-live-');
-    providerFactory = () => makeBackgroundProvider();
     const teamName = `alpha-team-${Date.now()}`;
 
     try {
       const q = query('timeline live', {
         cwd: temp.cwd,
         model: 'mock-model',
-        provider: 'anthropic',
+        provider: makeBackgroundProvider(),
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
       });
@@ -239,12 +221,12 @@ describe('query() timeline control plane', () => {
         && item.taskNotification?.status === 'stopped',
       );
       expect(notificationItem?.kind).toBe('task_notification');
-      expect(notificationItem?.taskNotification?.team_name).toBe(teamName);
+      expect(notificationItem?.taskNotification?.teamName).toBe(teamName);
+      expect(notificationItem?.taskNotification?.followUps.some((item) => item.scaffold.kind === 'stopped_worker_followup')).toBe(true);
 
       await iterator.return?.();
       q.close();
     } finally {
-      providerFactory = null;
       temp.cleanup();
     }
   });

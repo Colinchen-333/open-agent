@@ -68,6 +68,7 @@ import type {
   TeamCreateInput,
   TeamMessageInput,
   TeamInboxOptions,
+  TimelineInboxOptions,
   SDKOrchestrationEvent,
   SubscribeOrchestrationEventsOptions,
   SDKTimelineItem,
@@ -442,7 +443,7 @@ export function query(
     ...(message.team_name ? { teamName: message.team_name } : {}),
     workerId: message.task_id,
     ...(message.tool_use_id ? { parentToolCallId: message.tool_use_id } : {}),
-    taskNotification: cloneTaskNotificationMessage(message),
+    taskNotification: buildTimelineTaskNotificationRecord(message, responseLanguage),
   });
   const toTaskRecord = (task: TaskItem, teamName: string): TaskRecord => ({
     id: task.id,
@@ -2019,13 +2020,20 @@ export function query(
     return sdkTeamManager.getInboxCount(teamName, memberName);
   };
 
-  queryObj.readTimelineInbox = async (options: TeamInboxOptions) => {
-    const messages = await queryObj.readTeamInbox(options);
-    const taskNotifications = collectTimelineTaskNotifications(options.teamName);
-    return sortTimelineItems([
-      ...messages.map((message) => toTimelineTeamMessage(message)),
-      ...taskNotifications.map((message) => toTimelineTaskNotification(message)),
-    ]);
+  queryObj.readTimelineInbox = async (options: TimelineInboxOptions = {}) => {
+    const items: SDKTimelineItem[] = [];
+    if (options.includeTeamMessages !== false && options.memberName) {
+      const messages = await queryObj.readTeamInbox({
+        teamName: options.teamName,
+        memberName: options.memberName,
+        consume: options.consume,
+      });
+      items.push(...messages.map((message) => toTimelineTeamMessage(message)));
+    }
+    if (options.includeTaskNotifications !== false) {
+      items.push(...collectTimelineTaskNotifications(options.teamName).map((message) => toTimelineTaskNotification(message)));
+    }
+    return sortTimelineItems(items);
   };
 
   queryObj.subscribeOrchestrationEvents = (
@@ -2137,11 +2145,11 @@ export function query(
         const teamMessages = await queryObj.readTeamInbox({
           teamName: subscriptionOptions.teamName,
           memberName: subscriptionOptions.memberName,
-          consume: subscriptionOptions.consumeTeamInbox,
+          consume: subscriptionOptions.consume,
         });
         for (const message of teamMessages) {
           const fingerprint = buildTimelineTeamMessageFingerprint(message);
-          if (subscriptionOptions.consumeTeamInbox === true || !teamSeen.has(fingerprint)) {
+          if (subscriptionOptions.consume === true || !teamSeen.has(fingerprint)) {
             teamSeen.add(fingerprint);
             push(toTimelineTeamMessage(message));
           }
@@ -2198,7 +2206,10 @@ export function query(
               push(toTimelineOrchestrationItem(next.value));
             }
             if (includeTaskNotifications) {
-              const taskNotification = buildTimelineTaskNotificationFromOrchestrationEvent(next.value);
+              const taskNotification = buildTimelineTaskNotificationFromOrchestrationEvent(
+                next.value,
+                responseLanguage,
+              );
               if (taskNotification) {
                 push(taskNotification);
               }
@@ -3543,6 +3554,72 @@ function cloneTaskNotificationMessage(message: SDKTaskNotificationMessage): SDKT
   return JSON.parse(JSON.stringify(message));
 }
 
+function buildTimelineTaskNotificationRecord(
+  message: SDKTaskNotificationMessage,
+  language?: string,
+) {
+  return {
+    taskId: message.task_id,
+    status: message.status,
+    ...(message.team_name ? { teamName: message.team_name } : {}),
+    ...(message.description ? { description: message.description } : {}),
+    ...(message.completed_at ? { completedAt: message.completed_at } : {}),
+    ...(message.output_file ? { outputFile: message.output_file } : {}),
+    summary: message.summary ?? summarizePlainText(message.result),
+    ...(message.result ? { result: message.result } : {}),
+    ...(message.usage ? { usage: JSON.parse(JSON.stringify(message.usage)) } : {}),
+    ...(message.orchestration_templates
+      ? { orchestrationTemplates: JSON.parse(JSON.stringify(message.orchestration_templates)) }
+      : {}),
+    followUps: buildTimelineTaskNotificationFollowUps(message, language),
+  };
+}
+
+function buildTimelineTaskNotificationFollowUps(
+  message: SDKTaskNotificationMessage,
+  language?: string,
+): WorkerFollowUpSuggestion[] {
+  const observation = createPromptSuggestionObservation();
+  observation.sawTask = true;
+  observation.sawSubagent = true;
+  observation.lastTaskId = message.task_id;
+  observation.lastTaskStatus = message.status;
+  observation.lastTaskTeamName = normalizeOptionalString(message.team_name) ?? observation.lastTaskTeamName;
+  observation.lastTaskDescription = normalizeOptionalString(message.description) ?? observation.lastTaskDescription;
+  observation.lastTaskTemplates = message.orchestration_templates;
+
+  const resultMessage: SDKResultMessage = {
+    type: 'result',
+    subtype: message.status === 'failed' ? 'error_max_turns' : 'success',
+    duration_ms: message.usage?.duration_ms ?? 0,
+    duration_api_ms: 0,
+    is_error: message.status === 'failed',
+    num_turns: 0,
+    result: message.result ?? message.summary ?? '',
+    stop_reason: 'end_turn',
+    total_cost_usd: 0,
+    usage: {
+      input_tokens: 0,
+      output_tokens: message.usage?.total_tokens ?? 0,
+    },
+    modelUsage: {},
+    permission_denials: [],
+    uuid: message.uuid ?? randomUUID(),
+    session_id: message.session_id,
+  };
+
+  return __internal_buildPromptSuggestions({
+    result: resultMessage,
+    observation,
+    language,
+  })
+    .filter((item): item is WorkerFollowUpSuggestion => Boolean(item.scaffold))
+    .map((item) => ({
+      suggestion: item.suggestion,
+      scaffold: item.scaffold!,
+    }));
+}
+
 function extractTimelineTimestamp(event: SDKOrchestrationEvent): string {
   const raw = event.raw as Record<string, unknown>;
   const completedAt = typeof raw.completedAt === 'string' ? raw.completedAt : undefined;
@@ -3584,6 +3661,7 @@ function extractTimelineTaskNotificationsFromTranscriptEntries(
 
 function buildTimelineTaskNotificationFromOrchestrationEvent(
   event: SDKOrchestrationEvent,
+  language?: string,
 ): SDKTimelineItem | null {
   const taskNotification = convertSubagentEventToSdkMessages(
     event.parentToolCallId,
@@ -3599,7 +3677,7 @@ function buildTimelineTaskNotificationFromOrchestrationEvent(
     ...(taskNotification.team_name ? { teamName: taskNotification.team_name } : {}),
     workerId: taskNotification.task_id,
     ...(taskNotification.tool_use_id ? { parentToolCallId: taskNotification.tool_use_id } : {}),
-    taskNotification,
+    taskNotification: buildTimelineTaskNotificationRecord(taskNotification, language),
   } : null;
 }
 
