@@ -78,6 +78,46 @@ export interface GrepOutput {
   numMatches?: number;
 }
 
+export type ToolCapabilityCategory =
+  | 'filesystem'
+  | 'shell'
+  | 'search'
+  | 'web'
+  | 'task'
+  | 'agent'
+  | 'workspace'
+  | 'configuration'
+  | 'skill'
+  | 'planning'
+  | 'mcp'
+  | 'utility'
+  | 'other';
+
+export type ToolCapabilityRisk = 'low' | 'medium' | 'high';
+
+export interface ToolCapability {
+  category: ToolCapabilityCategory;
+  tags?: string[];
+  risk?: ToolCapabilityRisk;
+  needsWorkspaceWrite?: boolean;
+  concurrencySafe?: boolean;
+  readOnly?: boolean;
+}
+
+export interface ResolvedToolCapability extends ToolCapability {
+  source: 'explicit' | 'derived';
+}
+
+export interface ToolCapabilityExportEntry {
+  name: string;
+  description: string;
+  capability: ResolvedToolCapability;
+}
+
+export interface ToolCapabilityManifest {
+  tools: ToolCapabilityExportEntry[];
+}
+
 // Tool definition interface
 export interface ToolDefinition {
   name: string;
@@ -94,6 +134,8 @@ export interface ToolDefinition {
   isReadOnly?: boolean | ((input: any) => boolean);
   /** Whether this tool may safely run in parallel with other tools. Defaults to true when omitted. */
   isConcurrencySafe?: boolean | ((input: any) => boolean);
+  /** Optional capability metadata for plan, routing, and export layers. */
+  capability?: ToolCapability;
 }
 
 export interface ToolContext {

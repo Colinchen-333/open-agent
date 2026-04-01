@@ -14,9 +14,16 @@ export type {
   ToolDefinition,
   ToolContext,
   FileReadTracker,
+  ToolCapability,
+  ToolCapabilityCategory,
+  ToolCapabilityExportEntry,
+  ToolCapabilityManifest,
+  ToolCapabilityRisk,
+  ResolvedToolCapability,
 } from './types.js';
 
 export { ToolRegistry, createDefaultToolRegistry } from './registry.js';
+export { describeToolCapability, resolveToolCapability } from './capability.js';
 export { createReadTool } from './read.js';
 export { createWriteTool } from './write.js';
 export { createEditTool } from './edit.js';

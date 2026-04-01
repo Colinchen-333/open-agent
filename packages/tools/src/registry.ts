@@ -1,4 +1,5 @@
-import type { ToolDefinition } from './types.js';
+import type { ToolCapabilityExportEntry, ToolCapabilityManifest, ToolDefinition } from './types.js';
+import { describeToolCapability } from './capability.js';
 import { createReadTool } from './read.js';
 import { createWriteTool } from './write.js';
 import { createEditTool } from './edit.js';
@@ -39,6 +40,27 @@ export class ToolRegistry {
   /** Return all registered tools. */
   list(): ToolDefinition[] {
     return Array.from(this.tools.values());
+  }
+
+  /** Return tool capability metadata for every registered tool. */
+  listCapabilities(): ToolCapabilityExportEntry[] {
+    return this.list().map((tool) => describeToolCapability(tool));
+  }
+
+  /** Return capability metadata for a single tool, if registered. */
+  getCapability(name: string): ToolCapabilityExportEntry | undefined {
+    const tool = this.get(name);
+    if (!tool) {
+      return undefined;
+    }
+    return describeToolCapability(tool);
+  }
+
+  /** Export a stable capability manifest for planning, routing, and diagnostics. */
+  exportCapabilityManifest(): ToolCapabilityManifest {
+    return {
+      tools: this.listCapabilities(),
+    };
   }
 
   /**
