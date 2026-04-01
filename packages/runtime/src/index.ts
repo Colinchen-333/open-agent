@@ -10,11 +10,59 @@ import {
 } from '@open-agent/tools';
 import { SkillRegistry, type SkillCatalogEntry, type SkillRegistryOptions } from '@open-agent/skills';
 
+export type CapabilityGroup =
+  | 'files'
+  | 'execution'
+  | 'coordination'
+  | 'integration'
+  | 'external'
+  | 'utility';
+
+export type CapabilityAccess = 'read-only' | 'mutable' | 'meta' | 'external';
+
+export interface ToolCapabilitySource {
+  name: string;
+  description?: string;
+  isReadOnly?: boolean | ((input: unknown) => boolean);
+  isConcurrencySafe?: boolean | ((input: unknown) => boolean);
+}
+
+export interface ToolCapabilityProfile {
+  toolName: string;
+  description: string;
+  group: CapabilityGroup;
+  access: CapabilityAccess;
+  readOnly: boolean;
+  concurrencySafe: boolean;
+  source: 'built-in' | 'dynamic' | 'mcp';
+  tags: string[];
+}
+
+export interface CapabilityPreset {
+  name: CapabilityGroup;
+  description: string;
+  toolNames: string[];
+  toolCount: number;
+}
+
+export interface CapabilitySnapshot {
+  totalTools: number;
+  profiles: ToolCapabilityProfile[];
+  presets: CapabilityPreset[];
+  summary: {
+    accessCounts: Record<CapabilityAccess, number>;
+    groupCounts: Record<CapabilityGroup, number>;
+    mcpTools: number;
+    dynamicTools: number;
+  };
+}
+
 export interface RuntimeSnapshot {
   tools: string[];
   agents: { name: string; description: string; model?: string }[];
   skills: SkillCatalogEntry[];
   mcpServers: { name: string; status: string }[];
+  capabilitySnapshot: CapabilitySnapshot;
 }
 
 export interface RuntimeMcpOptions {
@@ -188,8 +236,11 @@ export class OpenAgentRuntime {
   }
 
   buildSnapshot(): RuntimeSnapshot {
+    const tools = this.options.toolRegistry.list();
+    const capabilitySnapshot = buildCapabilitySnapshot(tools);
+
     return {
-      tools: this.options.toolRegistry.list().map((tool) => tool.name),
+      tools: tools.map((tool) => tool.name),
       agents: [...(this.options.availableAgents ?? new Map()).entries()].map(([name, definition]) => ({
         name,
         description: definition.description,
@@ -200,6 +251,7 @@ export class OpenAgentRuntime {
         name: status.name,
         status: status.status,
       })),
+      capabilitySnapshot,
     };
   }
 
@@ -288,4 +340,220 @@ export class OpenAgentRuntime {
     const formatted = this.options.mcp?.formatResult?.(value) ?? value;
     return typeof formatted === 'string' ? formatted : JSON.stringify(formatted);
   }
+}
+
+const FILE_TOOL_NAMES = new Set([
+  'Read',
+  'Write',
+  'Edit',
+  'NotebookEdit',
+  'Glob',
+  'Grep',
+]);
+
+const EXECUTION_TOOL_NAMES = new Set([
+  'Bash',
+  'EnterWorktree',
+  'Config',
+]);
+
+const COORDINATION_TOOL_NAMES = new Set([
+  'Task',
+  'TaskCreate',
+  'TaskUpdate',
+  'TaskGet',
+  'TaskList',
+  'TaskOutput',
+  'TaskStop',
+  'TeamCreate',
+  'TeamDelete',
+  'SendMessage',
+  'AskUserQuestion',
+  'EnterPlanMode',
+  'ExitPlanMode',
+]);
+
+const INTEGRATION_TOOL_NAMES = new Set([
+  'Skill',
+  'ToolSearch',
+  'ListMcpResourcesTool',
+  'ReadMcpResourceTool',
+]);
+
+const EXTERNAL_TOOL_NAMES = new Set([
+  'WebSearch',
+  'WebFetch',
+]);
+
+const MUTABLE_TOOL_NAMES = new Set([
+  'Write',
+  'Edit',
+  'NotebookEdit',
+  'Bash',
+  'EnterWorktree',
+  'Config',
+  'TaskCreate',
+  'TaskUpdate',
+  'TaskStop',
+  'TeamCreate',
+  'TeamDelete',
+  'SendMessage',
+]);
+
+const CAPABILITY_GROUP_DESCRIPTIONS: Record<CapabilityGroup, string> = {
+  files: 'Filesystem inspection and editing tools.',
+  execution: 'Local execution and workspace-control tools.',
+  coordination: 'Agent orchestration, task, and planning tools.',
+  integration: 'Skills, tool discovery, and MCP integration tools.',
+  external: 'Network-facing tools.',
+  utility: 'General-purpose tools that do not fit another group.',
+};
+
+function hasMcpPrefix(name: string): boolean {
+  return name.startsWith('mcp__');
+}
+
+function determineCapabilityGroup(name: string): CapabilityGroup {
+  if (FILE_TOOL_NAMES.has(name)) return 'files';
+  if (EXECUTION_TOOL_NAMES.has(name)) return 'execution';
+  if (COORDINATION_TOOL_NAMES.has(name)) return 'coordination';
+  if (INTEGRATION_TOOL_NAMES.has(name) || hasMcpPrefix(name)) return 'integration';
+  if (EXTERNAL_TOOL_NAMES.has(name)) return 'external';
+  return 'utility';
+}
+
+function determineCapabilityAccess(tool: ToolCapabilitySource, group: CapabilityGroup): CapabilityAccess {
+  if (hasMcpPrefix(tool.name) || group === 'external') {
+    return 'external';
+  }
+  if (MUTABLE_TOOL_NAMES.has(tool.name)) {
+    return 'mutable';
+  }
+  if (tool.name === 'Skill' || tool.name === 'ToolSearch' || tool.name === 'Config' || group === 'integration') {
+    return 'meta';
+  }
+  if (group === 'coordination') {
+    return 'meta';
+  }
+  if (typeof tool.isReadOnly === 'boolean') {
+    return tool.isReadOnly ? 'read-only' : 'mutable';
+  }
+  return (
+    group === 'files'
+    || group === 'utility'
+  ) ? 'read-only' : 'mutable';
+}
+
+function determineCapabilitySource(tool: ToolCapabilitySource): 'built-in' | 'dynamic' | 'mcp' {
+  if (hasMcpPrefix(tool.name) || tool.name === 'ListMcpResourcesTool' || tool.name === 'ReadMcpResourceTool') {
+    return 'mcp';
+  }
+  if (tool.name === 'ToolSearch') {
+    return 'dynamic';
+  }
+  return 'built-in';
+}
+
+function resolveReadOnly(tool: ToolCapabilitySource): boolean {
+  if (typeof tool.isReadOnly === 'boolean') {
+    return tool.isReadOnly;
+  }
+  return determineCapabilityAccess(tool, determineCapabilityGroup(tool.name)) === 'read-only';
+}
+
+function resolveConcurrencySafe(tool: ToolCapabilitySource): boolean {
+  if (typeof tool.isConcurrencySafe === 'boolean') {
+    return tool.isConcurrencySafe;
+  }
+  return true;
+}
+
+function buildCapabilityProfile(tool: ToolCapabilitySource): ToolCapabilityProfile {
+  const group = determineCapabilityGroup(tool.name);
+  const readOnly = resolveReadOnly(tool);
+  const concurrencySafe = resolveConcurrencySafe(tool);
+  const access = determineCapabilityAccess(tool, group);
+  const tags = [
+    group,
+    access,
+    readOnly ? 'read-only' : 'mutable',
+    concurrencySafe ? 'parallel-safe' : 'serialized',
+  ];
+
+  if (hasMcpPrefix(tool.name)) tags.push('mcp');
+  if (group === 'external') tags.push('network');
+  if (group === 'coordination') tags.push('orchestration');
+  if (group === 'execution') tags.push('workspace');
+
+  return {
+    toolName: tool.name,
+    description: tool.description ?? tool.name,
+    group,
+    access,
+    readOnly,
+    concurrencySafe,
+    source: determineCapabilitySource(tool),
+    tags: [...new Set(tags)],
+  };
+}
+
+function buildCapabilityPreset(group: CapabilityGroup, profiles: ToolCapabilityProfile[]): CapabilityPreset {
+  const toolNames = profiles
+    .filter((profile) => profile.group === group)
+    .map((profile) => profile.toolName)
+    .sort((left, right) => left.localeCompare(right));
+
+  return {
+    name: group,
+    description: CAPABILITY_GROUP_DESCRIPTIONS[group],
+    toolNames,
+    toolCount: toolNames.length,
+  };
+}
+
+export function buildCapabilitySnapshot(tools: ToolCapabilitySource[]): CapabilitySnapshot {
+  const profiles = tools
+    .map((tool) => buildCapabilityProfile(tool))
+    .sort((left, right) =>
+      left.group.localeCompare(right.group) || left.toolName.localeCompare(right.toolName));
+
+  const presets = (Object.keys(CAPABILITY_GROUP_DESCRIPTIONS) as CapabilityGroup[])
+    .map((group) => buildCapabilityPreset(group, profiles))
+    .filter((preset) => preset.toolCount > 0);
+
+  const summary = profiles.reduce<CapabilitySnapshot['summary']>((acc, profile) => {
+    acc.accessCounts[profile.access] += 1;
+    acc.groupCounts[profile.group] += 1;
+    if (profile.source === 'mcp') {
+      acc.mcpTools += 1;
+    }
+    if (profile.source === 'dynamic') {
+      acc.dynamicTools += 1;
+    }
+    return acc;
+  }, {
+    accessCounts: {
+      'read-only': 0,
+      mutable: 0,
+      meta: 0,
+      external: 0,
+    },
+    groupCounts: {
+      files: 0,
+      execution: 0,
+      coordination: 0,
+      integration: 0,
+      external: 0,
+      utility: 0,
+    },
+    mcpTools: 0,
+    dynamicTools: 0,
+  });
+
+  return {
+    totalTools: profiles.length,
+    profiles,
+    presets,
+    summary,
+  };
 }

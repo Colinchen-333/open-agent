@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { ToolRegistry, type ToolDefinition } from '@open-agent/tools';
-import { OpenAgentRuntime } from '../index.js';
+import { OpenAgentRuntime, buildCapabilitySnapshot } from '../index.js';
 
 function createSdkServer(toolName: string, description = 'MCP tool') {
   return {
@@ -27,6 +27,32 @@ function createSdkServer(toolName: string, description = 'MCP tool') {
 }
 
 describe('OpenAgentRuntime MCP wiring', () => {
+  it('builds a capability snapshot with layered presets', () => {
+    const snapshot = buildCapabilitySnapshot([
+      { name: 'Read', description: 'Read files' },
+      { name: 'Write', description: 'Write files', isReadOnly: false, isConcurrencySafe: false },
+      { name: 'Task', description: 'Spawn agents' },
+      { name: 'mcp__demo__echo', description: 'Echo from MCP' },
+      { name: 'ToolSearch', description: 'Load deferred tools' },
+    ]);
+
+    expect(snapshot.totalTools).toBe(5);
+    expect(snapshot.summary.groupCounts.files).toBe(2);
+    expect(snapshot.summary.groupCounts.coordination).toBe(1);
+    expect(snapshot.summary.groupCounts.integration).toBe(2);
+    expect(snapshot.summary.accessCounts['read-only']).toBe(1);
+    expect(snapshot.summary.accessCounts.mutable).toBe(1);
+    expect(snapshot.summary.accessCounts.meta).toBe(2);
+    expect(snapshot.summary.accessCounts.external).toBe(1);
+    expect(snapshot.summary.dynamicTools).toBe(1);
+    expect(snapshot.summary.mcpTools).toBe(1);
+    expect(snapshot.presets.map((preset) => preset.name)).toEqual([
+      'files',
+      'coordination',
+      'integration',
+    ]);
+  });
+
   it('同步 namespaced MCP 工具并让 ToolSearch 可见', async () => {
     const registry = new ToolRegistry();
     const runtime = new OpenAgentRuntime({
@@ -51,6 +77,10 @@ describe('OpenAgentRuntime MCP wiring', () => {
     const toolSearch = registry.get('ToolSearch');
     const searchResult = await toolSearch!.execute({ query: 'echo' }, {} as any);
     expect(searchResult).toContain('mcp__demo__echo');
+
+    const snapshot = runtime.buildSnapshot();
+    expect(snapshot.capabilitySnapshot.presets.map((preset) => preset.name)).toContain('integration');
+    expect(snapshot.capabilitySnapshot.summary.mcpTools).toBeGreaterThan(0);
   });
 
   it('在 raw 命名模式下移除 MCP 工具时恢复基线工具', async () => {
