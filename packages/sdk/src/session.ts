@@ -97,7 +97,9 @@ type SessionControlMethods = Pick<
   | 'sendTeamMessage'
   | 'readTeamInbox'
   | 'getTeamInboxCount'
+  | 'readTimelineInbox'
   | 'subscribeOrchestrationEvents'
+  | 'subscribeTimeline'
   | 'listWorkers'
   | 'getWorker'
   | 'getWorkerFollowUps'
@@ -360,7 +362,9 @@ function _buildSession(
     sendTeamMessage: (...args) => q.sendTeamMessage(...args),
     readTeamInbox: (...args) => q.readTeamInbox(...args),
     getTeamInboxCount: (...args) => q.getTeamInboxCount(...args),
+    readTimelineInbox: (...args) => q.readTimelineInbox(...args),
     subscribeOrchestrationEvents: (...args) => q.subscribeOrchestrationEvents(...args),
+    subscribeTimeline: (...args) => q.subscribeTimeline(...args),
     listWorkers: (...args) => q.listWorkers(...args),
     getWorker: (...args) => q.getWorker(...args),
     getWorkerFollowUps: (...args) => q.getWorkerFollowUps(...args),
@@ -587,7 +591,9 @@ export function unstable_v2_createSession(
     sendTeamMessage: (...args) => q.sendTeamMessage(...args),
     readTeamInbox: (...args) => q.readTeamInbox(...args),
     getTeamInboxCount: (...args) => q.getTeamInboxCount(...args),
+    readTimelineInbox: (...args) => q.readTimelineInbox(...args),
     subscribeOrchestrationEvents: (...args) => q.subscribeOrchestrationEvents(...args),
+    subscribeTimeline: (...args) => q.subscribeTimeline(...args),
     listWorkers: (...args) => q.listWorkers(...args),
     getWorker: (...args) => q.getWorker(...args),
     getWorkerFollowUps: (...args) => q.getWorkerFollowUps(...args),

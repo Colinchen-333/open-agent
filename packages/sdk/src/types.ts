@@ -10,6 +10,7 @@ import type {
   McpServerStatus,
   AgentDefinition,
   SDKPromptSuggestionMessage,
+  SDKTaskNotificationMessage,
   ThinkingConfig,
   ModelUsage,
   SlashCommand,
@@ -509,6 +510,32 @@ export interface SubscribeOrchestrationEventsOptions {
   signal?: AbortSignal;
 }
 
+export type SDKTimelineItemKind = 'team_message' | SDKOrchestrationEventKind | 'task_notification';
+
+export interface SDKTimelineItem {
+  kind: SDKTimelineItemKind;
+  sessionId: string;
+  timestamp: string;
+  teamName?: string;
+  workerId?: string;
+  parentToolCallId?: string;
+  teamMessage?: TeamMessageRecord;
+  orchestrationEvent?: SDKOrchestrationEvent;
+  taskNotification?: SDKTaskNotificationMessage;
+}
+
+export interface SubscribeTimelineOptions {
+  teamName?: string;
+  memberName?: string;
+  includeTeamMessages?: boolean;
+  includeOrchestration?: boolean;
+  includeTaskNotifications?: boolean;
+  consumeTeamInbox?: boolean;
+  orchestrationTypes?: SDKOrchestrationEventKind[];
+  pollIntervalMs?: number;
+  signal?: AbortSignal;
+}
+
 /**
  * Returned by `query()`.  Implements `AsyncGenerator<SDKMessage>` so callers
  * can iterate with `for await … of` as well as calling control methods.
@@ -559,8 +586,12 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   readTeamInbox(options: TeamInboxOptions): Promise<TeamMessageRecord[]>;
   /** Return the unread inbox count for a member in the selected or named team. */
   getTeamInboxCount(memberName: string, options?: { teamName?: string }): Promise<number>;
+  /** Read the selected team inbox and normalize messages into unified timeline items. */
+  readTimelineInbox(options: TeamInboxOptions): Promise<SDKTimelineItem[]>;
   /** Subscribe to live worker orchestration events for this SDK session. */
   subscribeOrchestrationEvents(options?: SubscribeOrchestrationEventsOptions): AsyncIterable<SDKOrchestrationEvent>;
+  /** Subscribe to a merged timeline of team inbox messages and worker orchestration events. */
+  subscribeTimeline(options?: SubscribeTimelineOptions): AsyncIterable<SDKTimelineItem>;
   /** List known worker sessions visible to this SDK session. */
   listWorkers(options?: WorkerListOptions): Promise<WorkerRecord[]>;
   /** Return one worker session by ID, or null if it does not exist. */
@@ -688,8 +719,12 @@ export interface Session {
   readTeamInbox(options: TeamInboxOptions): Promise<TeamMessageRecord[]>;
   /** Return the unread inbox count for a member in the selected or named team. */
   getTeamInboxCount(memberName: string, options?: { teamName?: string }): Promise<number>;
+  /** Read the selected team inbox and normalize messages into unified timeline items. */
+  readTimelineInbox(options: TeamInboxOptions): Promise<SDKTimelineItem[]>;
   /** Subscribe to live worker orchestration events for this SDK session. */
   subscribeOrchestrationEvents(options?: SubscribeOrchestrationEventsOptions): AsyncIterable<SDKOrchestrationEvent>;
+  /** Subscribe to a merged timeline of team inbox messages and worker orchestration events. */
+  subscribeTimeline(options?: SubscribeTimelineOptions): AsyncIterable<SDKTimelineItem>;
   /** List known worker sessions visible to this SDK session. */
   listWorkers(options?: WorkerListOptions): Promise<WorkerRecord[]>;
   /** Return one worker session by ID, or null if it does not exist. */

@@ -70,6 +70,8 @@ import type {
   TeamInboxOptions,
   SDKOrchestrationEvent,
   SubscribeOrchestrationEventsOptions,
+  SDKTimelineItem,
+  SubscribeTimelineOptions,
 } from './types.js';
 import { applyPermissionUpdates } from './permission-updates.js';
 import { createPermissionPrompterBridge } from './permission-prompter.js';
@@ -416,6 +418,22 @@ export function query(
     ...(typeof message.approve === 'boolean' ? { approve: message.approve } : {}),
     ...(message.idleReason ? { idleReason: message.idleReason } : {}),
     ...(message.routing ? { routing: JSON.parse(JSON.stringify(message.routing)) } : {}),
+  });
+  const toTimelineTeamMessage = (message: TeamMessageRecord): SDKTimelineItem => ({
+    kind: 'team_message',
+    sessionId,
+    timestamp: message.timestamp,
+    teamName: message.teamName,
+    teamMessage: JSON.parse(JSON.stringify(message)),
+  });
+  const toTimelineOrchestrationItem = (event: SDKOrchestrationEvent): SDKTimelineItem => ({
+    kind: event.kind,
+    sessionId: event.sessionId,
+    timestamp: extractTimelineTimestamp(event),
+    ...(event.teamName ? { teamName: event.teamName } : {}),
+    ...(event.workerId ? { workerId: event.workerId } : {}),
+    ...(event.parentToolCallId ? { parentToolCallId: event.parentToolCallId } : {}),
+    orchestrationEvent: cloneOrchestrationEvent(event),
   });
   const toTaskRecord = (task: TaskItem, teamName: string): TaskRecord => ({
     id: task.id,
@@ -1992,6 +2010,11 @@ export function query(
     return sdkTeamManager.getInboxCount(teamName, memberName);
   };
 
+  queryObj.readTimelineInbox = async (options: TeamInboxOptions) => {
+    const messages = await queryObj.readTeamInbox(options);
+    return messages.map((message) => toTimelineTeamMessage(message));
+  };
+
   queryObj.subscribeOrchestrationEvents = (
     subscriptionOptions: SubscribeOrchestrationEventsOptions = {},
   ): AsyncIterable<SDKOrchestrationEvent> => {
@@ -2058,6 +2081,128 @@ export function query(
       },
       async return() {
         subscriber.close();
+        return { done: true, value: undefined };
+      },
+    };
+  };
+
+  queryObj.subscribeTimeline = (
+    subscriptionOptions: SubscribeTimelineOptions = {},
+  ): AsyncIterable<SDKTimelineItem> => {
+    const queue: SDKTimelineItem[] = [];
+    const teamSeen = new Set<string>();
+    const includeTeamMessages = subscriptionOptions.includeTeamMessages !== false;
+    const includeOrchestration = subscriptionOptions.includeOrchestration !== false;
+    const pollIntervalMs = Math.max(25, subscriptionOptions.pollIntervalMs ?? 250);
+    let closed = false;
+    let queueNotifier: (() => void) | null = null;
+    let teamPollInFlight = false;
+    let teamPollTimer: ReturnType<typeof setInterval> | null = null;
+    let orchestrationIterator: AsyncIterator<SDKOrchestrationEvent> | null = null;
+
+    const notify = () => {
+      if (queueNotifier) {
+        const resolve = queueNotifier;
+        queueNotifier = null;
+        resolve();
+      }
+    };
+
+    const push = (item: SDKTimelineItem) => {
+      if (closed) return;
+      queue.push(cloneTimelineItem(item));
+      notify();
+    };
+
+    const pollTeamInbox = async () => {
+      if (!includeTeamMessages || !subscriptionOptions.memberName || teamPollInFlight || closed) {
+        return;
+      }
+      teamPollInFlight = true;
+      try {
+        const teamMessages = await queryObj.readTeamInbox({
+          teamName: subscriptionOptions.teamName,
+          memberName: subscriptionOptions.memberName,
+          consume: subscriptionOptions.consumeTeamInbox,
+        });
+        for (const message of teamMessages) {
+          const fingerprint = buildTimelineTeamMessageFingerprint(message);
+          if (subscriptionOptions.consumeTeamInbox === true || !teamSeen.has(fingerprint)) {
+            teamSeen.add(fingerprint);
+            push(toTimelineTeamMessage(message));
+          }
+        }
+      } finally {
+        teamPollInFlight = false;
+      }
+    };
+
+    const close = async () => {
+      if (closed) return;
+      closed = true;
+      if (teamPollTimer) {
+        clearInterval(teamPollTimer);
+        teamPollTimer = null;
+      }
+      if (subscriptionOptions.signal) {
+        subscriptionOptions.signal.removeEventListener('abort', abortListener);
+      }
+      if (orchestrationIterator?.return) {
+        await orchestrationIterator.return();
+      }
+      notify();
+    };
+
+    const abortListener = () => {
+      void close();
+    };
+
+    if (subscriptionOptions.signal?.aborted) {
+      void close();
+    } else {
+      if (includeTeamMessages && subscriptionOptions.memberName) {
+        void pollTeamInbox();
+        teamPollTimer = setInterval(() => {
+          void pollTeamInbox();
+        }, pollIntervalMs);
+      }
+
+      if (includeOrchestration) {
+        orchestrationIterator = queryObj.subscribeOrchestrationEvents({
+          teamName: subscriptionOptions.teamName,
+          types: subscriptionOptions.orchestrationTypes,
+        })[Symbol.asyncIterator]();
+        void (async () => {
+          while (!closed && orchestrationIterator) {
+            const next = await orchestrationIterator.next();
+            if (next.done || closed) {
+              break;
+            }
+            push(toTimelineOrchestrationItem(next.value));
+          }
+        })();
+      }
+
+      subscriptionOptions.signal?.addEventListener('abort', abortListener, { once: true });
+    }
+
+    return {
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      async next() {
+        while (queue.length === 0) {
+          if (closed) {
+            return { done: true, value: undefined };
+          }
+          await new Promise<void>((resolve) => {
+            queueNotifier = resolve;
+          });
+        }
+        return { done: false, value: queue.shift()! };
+      },
+      async return() {
+        await close();
         return { done: true, value: undefined };
       },
     };
@@ -3328,6 +3473,30 @@ function cloneSubagentEvent(event: SubagentStreamEvent): SubagentStreamEvent {
 
 function cloneOrchestrationEvent(event: SDKOrchestrationEvent): SDKOrchestrationEvent {
   return JSON.parse(JSON.stringify(event));
+}
+
+function cloneTimelineItem(item: SDKTimelineItem): SDKTimelineItem {
+  return JSON.parse(JSON.stringify(item));
+}
+
+function extractTimelineTimestamp(event: SDKOrchestrationEvent): string {
+  const raw = event.raw as Record<string, unknown>;
+  const completedAt = typeof raw.completedAt === 'string' ? raw.completedAt : undefined;
+  const timestamp = typeof raw.timestamp === 'string' ? raw.timestamp : undefined;
+  return completedAt ?? timestamp ?? new Date().toISOString();
+}
+
+function buildTimelineTeamMessageFingerprint(message: TeamMessageRecord): string {
+  return JSON.stringify([
+    message.teamName,
+    message.type,
+    message.from,
+    message.to ?? '',
+    message.timestamp,
+    message.requestId ?? '',
+    message.summary ?? '',
+    message.content,
+  ]);
 }
 
 function buildTaskNotificationFingerprint(input: {

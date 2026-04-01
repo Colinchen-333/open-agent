@@ -174,6 +174,11 @@ describe('createSession()', () => {
       recipient: 'alice',
       content: 'Continue the session-scoped task.',
     });
+    const timelineInbox = await session.readTimelineInbox({ memberName: 'alice', consume: false });
+    expect(timelineInbox).toHaveLength(1);
+    expect(timelineInbox[0]?.kind).toBe('team_message');
+    expect(timelineInbox[0]?.teamMessage?.teamName).toBe(teamName);
+
     const inbox = await session.readTeamInbox({ memberName: 'alice', consume: true });
     expect(inbox).toHaveLength(1);
     expect(inbox[0]?.teamName).toBe(teamName);
