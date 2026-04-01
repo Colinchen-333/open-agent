@@ -6,6 +6,7 @@ export interface TaskToolsDeps {
     description: string;
     activeForm?: string;
     metadata?: Record<string, unknown>;
+    priority?: number;
   }) => Promise<{ id: string; subject: string }>;
   updateTask: (params: {
     taskId: string;
@@ -14,6 +15,7 @@ export interface TaskToolsDeps {
     description?: string;
     activeForm?: string;
     owner?: string;
+    priority?: number;
     addBlocks?: string[];
     addBlockedBy?: string[];
     metadata?: Record<string, unknown>;
@@ -34,6 +36,10 @@ export function createTaskCreateTool(deps: TaskToolsDeps): ToolDefinition {
         activeForm: {
           type: 'string',
           description: 'Present continuous form shown when in_progress (e.g., "Running tests")',
+        },
+        priority: {
+          type: 'integer',
+          description: 'Higher numbers are claimed earlier when multiple tasks are available',
         },
         metadata: { type: 'object', description: 'Arbitrary metadata to attach' },
       },
@@ -59,6 +65,7 @@ export function createTaskUpdateTool(deps: TaskToolsDeps): ToolDefinition {
         description: { type: 'string' },
         activeForm: { type: 'string' },
         owner: { type: 'string' },
+        priority: { type: 'integer' },
         addBlocks: { type: 'array', items: { type: 'string' } },
         addBlockedBy: { type: 'array', items: { type: 'string' } },
         metadata: { type: 'object' },
@@ -106,7 +113,8 @@ export function createTaskListTool(deps: TaskToolsDeps): ToolDefinition {
         .map((t: any) => {
           const blocked = t.blockedBy?.length ? ` [blocked by: ${t.blockedBy.join(', ')}]` : '';
           const owner = t.owner ? ` (${t.owner})` : '';
-          return `#${t.id} [${t.status}] ${t.subject}${owner}${blocked}`;
+          const priority = Number.isInteger(t.priority) ? ` [priority ${t.priority}]` : '';
+          return `#${t.id} [${t.status}]${priority} ${t.subject}${owner}${blocked}`;
         })
         .join('\n');
     },

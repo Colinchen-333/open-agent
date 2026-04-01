@@ -117,6 +117,7 @@ export function getToolPromptDescriptions(): Record<string, string> {
 - subject: short imperative title (e.g., "Add authentication middleware")
 - description: full context and acceptance criteria so any agent can pick it up
 - activeForm: present-continuous label shown in the spinner while in_progress (e.g., "Adding middleware")
+- priority: optional integer; higher priority tasks are claimed earlier by workers
 - New tasks start with status "pending" and no owner
 - Use this proactively for multi-step work spanning 3 or more distinct steps`,
 
@@ -124,6 +125,7 @@ export function getToolPromptDescriptions(): Record<string, string> {
 - Status workflow: pending → in_progress → completed (use "deleted" to remove)
 - Mark a task in_progress BEFORE you start working on it
 - Mark a task completed only when you have FULLY finished it — not on partial progress
+- Use priority to raise or lower a task in the worker queue without rewriting the rest of the task
 - Use addBlocks / addBlockedBy to wire up dependencies between tasks
 - Read the latest task state with TaskGet before updating to avoid stale overwrites`,
 
@@ -132,7 +134,7 @@ export function getToolPromptDescriptions(): Record<string, string> {
 - Always fetch a task before starting work to confirm its blockedBy list is empty`,
 
     TaskList: `List all tasks in the current task list with a summary of each.
-- Shows id, subject, status, owner, and which task IDs are blocking each entry
+- Shows id, subject, status, priority, owner, and which task IDs are blocking each entry
 - After completing a task, call TaskList to find newly unblocked work
 - Prefer working on tasks in ascending ID order when multiple tasks are available`,
 

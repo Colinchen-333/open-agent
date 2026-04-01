@@ -364,8 +364,20 @@ async function main(): Promise<void> {
   const taskManager = new TaskManager(defaultTeamName);
 
   const taskToolsDeps = {
-    createTask: async (params: { subject: string; description: string; activeForm?: string; metadata?: Record<string, unknown> }) => {
-      const item = taskManager.create(params.subject, params.description, params.activeForm, params.metadata);
+    createTask: async (params: {
+      subject: string;
+      description: string;
+      activeForm?: string;
+      metadata?: Record<string, unknown>;
+      priority?: number;
+    }) => {
+      const item = taskManager.create(
+        params.subject,
+        params.description,
+        params.activeForm,
+        params.metadata,
+        params.priority,
+      );
       return { id: item.id, subject: item.subject };
     },
     updateTask: async (params: { taskId: string; [key: string]: unknown }) => {
