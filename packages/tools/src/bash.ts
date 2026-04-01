@@ -1,7 +1,16 @@
 import { randomUUID } from 'crypto';
+import { closeSync, openSync, readFileSync } from 'fs';
+import { spawn } from 'child_process';
 import type { ToolDefinition, ToolContext, BashInput } from './types.js';
 import { getBackgroundTasks } from './task-management.js';
+import {
+  getBackgroundTask,
+  registerBackgroundTask,
+  updateBackgroundTask,
+} from './background-registry.js';
 import { spawnProcess } from '@open-agent/core';
+import { summarizeCommand } from './tool-summary.js';
+import { getBackgroundTaskOutputFile } from './background-task-store.js';
 
 const MAX_OUTPUT_LENGTH = 30000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -39,8 +48,13 @@ function pruneBackgroundTasks(tasks: Map<string, { status: string; startTime: nu
 export function createBashTool(): ToolDefinition {
   return {
     name: 'Bash',
+    isConcurrencySafe: false,
     description:
       'Execute a bash command in the current working directory. Stdout is captured and returned. Output exceeding 30 000 characters is truncated. Working directory persists between commands; shell state (everything else) does not.',
+    getToolUseSummary(input: BashInput, _result, isError) {
+      const summary = summarizeCommand(input.command, input.description);
+      return isError ? `Command failed: ${summary}` : `Ran ${summary}`;
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -82,40 +96,48 @@ export function createBashTool(): ToolDefinition {
       if (input.run_in_background) {
         const taskId = `bg_${randomUUID().slice(0, 12)}`;
         const backgroundTasks = getBackgroundTasks();
+        const commandSummary = summarizeCommand(input.command, input.description);
+        const outputFile = getBackgroundTaskOutputFile(taskId);
 
         // Auto-prune old completed tasks to prevent memory leaks
         pruneBackgroundTasks(backgroundTasks);
 
-        const proc = await spawnProcess(['bash', '-c', wrappedCommand], {
+        const outputFd = openSync(outputFile, 'a');
+        const child = spawn('bash', ['-lc', wrappedCommand], {
           cwd: effectiveCwd,
-          env: { TERM: 'dumb' },
+          env: { ...process.env, TERM: 'dumb' },
+          detached: true,
+          stdio: ['ignore', outputFd, outputFd],
         });
+        closeSync(outputFd);
+        child.unref();
 
-        backgroundTasks.set(taskId, {
-          process: proc,
+        registerBackgroundTask({
+          task_id: taskId,
+          command: input.command,
+          summary: commandSummary,
+          session_id: ctx.sessionId,
+          cwd: effectiveCwd,
+          process: child,
           output: '',
           status: 'running',
-          startTime: Date.now(),
+          start_time: Date.now(),
+          output_file: outputFile,
+          pid: child.pid,
         });
 
         // Async collection of output
-        (async () => {
-          const task = backgroundTasks.get(taskId)!;
-          try {
-            const [stdout, stderr] = await Promise.all([
-              proc.stdoutText(),
-              proc.stderrText(),
-            ]);
-            // Strip CWD sentinel from output and update persistentCwd
-            const { cleanOutput, finalCwd } = extractCwd(stdout, CWD_SENTINEL);
-            if (finalCwd) persistentCwdBySession.set(ctx.sessionId, finalCwd);
-            task.output =
-              truncate(cleanOutput) + (stderr ? '\nSTDERR:\n' + truncate(stderr) : '');
-            task.status = 'completed';
-          } catch {
-            task.status = 'error';
-          }
-        })();
+        child.on('exit', (code) => {
+          const rawOutput = safeReadBackgroundOutput(outputFile);
+          const { cleanOutput, finalCwd } = extractCwd(rawOutput, CWD_SENTINEL);
+          if (finalCwd) persistentCwdBySession.set(ctx.sessionId, finalCwd);
+          updateBackgroundTask(taskId, {
+            output: truncate(cleanOutput),
+            status: code === 0 ? 'completed' : 'error',
+            summary: `${code === 0 ? 'Completed' : 'Errored'}: ${commandSummary}`,
+            completed_time: Date.now(),
+          });
+        });
 
         return `Background task started (id: ${taskId})`;
       }
@@ -181,6 +203,14 @@ export function createBashTool(): ToolDefinition {
       return output + exitInfo + interruptedNote;
     },
   };
+}
+
+function safeReadBackgroundOutput(path: string): string {
+  try {
+    return readFileSync(path, 'utf-8');
+  } catch {
+    return '';
+  }
 }
 
 /**

@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { createBashTool } from '../bash.js';
+import { createTaskOutputTool } from '../task-management.js';
 
 describe('Bash tool', () => {
   let tmpDir: string;
@@ -143,5 +144,27 @@ describe('Bash tool', () => {
     const result = await tool.execute({ command: 'true' }, makeCtx()) as string;
     // `true` exits 0 with no stdout/stderr
     expect(result).toBe('(no output)');
+  });
+
+  it('supports background execution with retrievable output', async () => {
+    const started = await tool.execute(
+      { command: 'echo "background hello"', run_in_background: true },
+      makeCtx(),
+    );
+    const match = String(started).match(/id:\s*(bg_[^\)\s]+)/i);
+    expect(match).not.toBeNull();
+
+    const outputTool = createTaskOutputTool();
+    const raw = await outputTool.execute({
+      task_id: match![1],
+      block: true,
+      timeout: 5000,
+    }, makeCtx() as any);
+    const result = JSON.parse(raw);
+
+    expect(result.type).toBe('bash');
+    expect(['running', 'completed']).toContain(result.status);
+    expect(result.output).toContain('background hello');
+    expect(typeof result.output_file).toBe('string');
   });
 });
