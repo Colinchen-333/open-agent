@@ -1,5 +1,29 @@
 import { describe, expect, it } from 'bun:test';
-import { normalizeMcpToolInfo } from '../tool-info';
+import { normalizeMcpAnnotations, normalizeMcpToolInfo } from '../tool-info';
+
+describe('normalizeMcpAnnotations', () => {
+  it('只保留支持的布尔 annotation 字段', () => {
+    expect(normalizeMcpAnnotations({
+      readOnly: true,
+      destructive: false,
+      openWorld: true,
+      ignored: 'x',
+    } as any)).toEqual({
+      readOnly: true,
+      destructive: false,
+      openWorld: true,
+    });
+  });
+
+  it('当没有有效布尔字段时省略 annotations', () => {
+    expect(normalizeMcpAnnotations(undefined)).toBeUndefined();
+    expect(normalizeMcpAnnotations({
+      readOnly: 'yes',
+      destructive: 1,
+      openWorld: null,
+    } as any)).toBeUndefined();
+  });
+});
 
 describe('normalizeMcpToolInfo', () => {
   it('保留 MCP annotations 并过滤非布尔值', () => {
@@ -31,7 +55,7 @@ describe('normalizeMcpToolInfo', () => {
       name: 'echo',
       inputSchema: { type: 'object', properties: { value: { type: 'string' } } },
       annotations: {
-        readOnly: undefined,
+        readOnly: 'yes' as any,
         destructive: undefined,
         openWorld: undefined,
       },

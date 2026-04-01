@@ -1,39 +1,40 @@
 import type { McpToolInfo } from './types';
 
-type RawMcpToolInfo = {
+type RawMcpAnnotations = {
+  readOnly?: unknown;
+  destructive?: unknown;
+  openWorld?: unknown;
+} | null | undefined;
+
+type RawMcpTool = {
   name: string;
   description?: string;
   inputSchema?: Record<string, any>;
-  annotations?: {
-    readOnly?: boolean;
-    destructive?: boolean;
-    openWorld?: boolean;
-  } | null;
+  annotations?: RawMcpAnnotations;
 };
 
-export function normalizeMcpToolInfo(
-  serverName: string,
-  tool: RawMcpToolInfo,
-): McpToolInfo {
-  const annotations = tool.annotations
-    ? {
-        ...(typeof tool.annotations.readOnly === 'boolean'
-          ? { readOnly: tool.annotations.readOnly }
-          : {}),
-        ...(typeof tool.annotations.destructive === 'boolean'
-          ? { destructive: tool.annotations.destructive }
-          : {}),
-        ...(typeof tool.annotations.openWorld === 'boolean'
-          ? { openWorld: tool.annotations.openWorld }
-          : {}),
-      }
-    : undefined;
+export function normalizeMcpAnnotations(annotations: RawMcpAnnotations): McpToolInfo['annotations'] | undefined {
+  if (!annotations) {
+    return undefined;
+  }
+
+  const normalized = {
+    ...(typeof annotations.readOnly === 'boolean' ? { readOnly: annotations.readOnly } : {}),
+    ...(typeof annotations.destructive === 'boolean' ? { destructive: annotations.destructive } : {}),
+    ...(typeof annotations.openWorld === 'boolean' ? { openWorld: annotations.openWorld } : {}),
+  };
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+export function normalizeMcpToolInfo(serverName: string, tool: RawMcpTool): McpToolInfo {
+  const annotations = normalizeMcpAnnotations(tool.annotations);
 
   return {
     name: tool.name,
     description: tool.description,
     inputSchema: tool.inputSchema ?? { type: 'object', properties: {} },
     serverName,
-    ...(annotations && Object.keys(annotations).length > 0 ? { annotations } : {}),
+    ...(annotations ? { annotations } : {}),
   };
 }
