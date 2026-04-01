@@ -288,4 +288,98 @@ describe('query() worker lifecycle control plane', () => {
       temp.cleanup();
     }
   });
+
+  it('builds Claude Code style follow-up suggestions for finished workers', async () => {
+    const temp = makeTempHome('open-agent-sdk-worker-followups-');
+    providerFactory = () => makeStaticProvider([textResponse('unused')]);
+    const completedWorkerId = `worker-completed-${Date.now()}`;
+    const failedWorkerId = `worker-failed-${Date.now()}`;
+    const stoppedWorkerId = `worker-stopped-${Date.now()}`;
+    const runningWorkerId = `worker-running-${Date.now()}`;
+    const cleanupDirs: string[] = [];
+
+    try {
+      cleanupDirs.push(writeWorkerSession({
+        agentId: completedWorkerId,
+        agentType: 'worker',
+        state: 'completed',
+        startedAt: '2026-04-01T10:00:00.000Z',
+        completedAt: '2026-04-01T10:05:00.000Z',
+        model: 'mock-model',
+        numTurns: 3,
+        durationMs: 300_000,
+        result: 'implemented the requested change',
+      }));
+      cleanupDirs.push(writeWorkerSession({
+        agentId: failedWorkerId,
+        agentType: 'worker',
+        state: 'failed',
+        startedAt: '2026-04-01T11:00:00.000Z',
+        completedAt: '2026-04-01T11:02:00.000Z',
+        model: 'mock-model',
+        numTurns: 2,
+        durationMs: 120_000,
+        error: 'tests failed on the narrowed fix',
+      }));
+      cleanupDirs.push(writeWorkerSession({
+        agentId: stoppedWorkerId,
+        agentType: 'worker',
+        state: 'shutdown',
+        startedAt: '2026-04-01T12:00:00.000Z',
+        completedAt: '2026-04-01T12:01:00.000Z',
+        model: 'mock-model',
+        numTurns: 1,
+        durationMs: 60_000,
+        result: 'interrupted after partial progress',
+      }));
+      cleanupDirs.push(writeWorkerSession({
+        agentId: runningWorkerId,
+        agentType: 'worker',
+        state: 'running',
+        startedAt: '2026-04-01T13:00:00.000Z',
+        model: 'mock-model',
+        numTurns: 0,
+        durationMs: 0,
+      }));
+
+      const q = query('worker followups', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: 'anthropic',
+      });
+
+      const completed = await q.getWorkerFollowUps(completedWorkerId);
+      expect(completed.map((item) => item.scaffold.kind)).toEqual([
+        'resume_worker',
+        'launch_verifier',
+      ]);
+      expect(completed[0]?.scaffold.action).toEqual({
+        tool: 'Task',
+        arguments: {
+          description: 'Resume existing worker',
+          prompt: completed[0]?.scaffold.prompt,
+          subagent_type: 'worker',
+          resume: completedWorkerId,
+        },
+      });
+
+      const failed = await q.getWorkerFollowUps(failedWorkerId);
+      expect(failed.map((item) => item.scaffold.kind)).toEqual(['retry_worker']);
+      expect(failed[0]?.scaffold.resume_task_id).toBe(failedWorkerId);
+
+      const stopped = await q.getWorkerFollowUps(stoppedWorkerId);
+      expect(stopped.map((item) => item.scaffold.kind)).toEqual(['stopped_worker_followup']);
+      expect(stopped[0]?.scaffold.resume_task_id).toBe(stoppedWorkerId);
+
+      await expect(q.getWorkerFollowUps(runningWorkerId)).resolves.toEqual([]);
+      await expect(q.getWorkerFollowUps('missing-worker')).resolves.toEqual([]);
+      q.close();
+    } finally {
+      for (const dir of cleanupDirs) {
+        rmSync(dir, { recursive: true, force: true });
+      }
+      providerFactory = null;
+      temp.cleanup();
+    }
+  });
 });

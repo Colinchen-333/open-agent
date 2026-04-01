@@ -9,6 +9,7 @@ import type {
   McpServerConfig,
   McpServerStatus,
   AgentDefinition,
+  SDKPromptSuggestionMessage,
   ThinkingConfig,
   ModelUsage,
   SlashCommand,
@@ -346,6 +347,11 @@ export interface WorkerListOptions {
   teamName?: string;
 }
 
+export interface WorkerFollowUpSuggestion {
+  suggestion: string;
+  scaffold: NonNullable<SDKPromptSuggestionMessage['scaffold']>;
+}
+
 export interface TaskLeaseInfo {
   owner: string;
   claimedAt: string;
@@ -548,6 +554,8 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   listWorkers(options?: WorkerListOptions): Promise<WorkerRecord[]>;
   /** Return one worker session by ID, or null if it does not exist. */
   getWorker(workerId: string): Promise<WorkerRecord | null>;
+  /** Build Claude Code style follow-up suggestions for a finished worker. */
+  getWorkerFollowUps(workerId: string): Promise<WorkerFollowUpSuggestion[]>;
   /** Stop a live worker in the current runtime and report whether it was found. */
   stopWorker(workerId: string): Promise<{ success: boolean }>;
   /** Return visible background bash/agent tasks for the current runtime. */

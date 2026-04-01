@@ -61,6 +61,7 @@ import type {
   TaskRecord,
   WorkerListOptions,
   WorkerRecord,
+  WorkerFollowUpSuggestion,
   TeamRecord,
   TeamMessageRecord,
   TeamCreateInput,
@@ -2074,6 +2075,65 @@ export function query(
     const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
     const session = persistedAgentExecutor.getAgent(workerId);
     return session ? toWorkerRecord(session) : null;
+  };
+
+  queryObj.getWorkerFollowUps = async (workerId: string) => {
+    const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
+    const session = persistedAgentExecutor.getAgent(workerId);
+    if (!session) {
+      return [];
+    }
+
+    const taskStatus = mapAgentStateToTaskStatus(session.state);
+    if (!taskStatus) {
+      return [];
+    }
+
+    const observation = createPromptSuggestionObservation();
+    observation.sawTask = true;
+    observation.sawSubagent = true;
+    observation.lastTaskId = session.agentId;
+    observation.lastTaskStatus = taskStatus;
+    observation.lastTaskTeamName = session.teamName;
+    observation.lastTaskDescription = session.name ?? session.agentType;
+    observation.lastTaskTemplates = buildTaskOrchestrationTemplates({
+      taskId: session.agentId,
+      status: taskStatus,
+      description: session.name ?? session.agentType,
+      summary: summarizePlainText(session.result ?? session.error),
+      result: session.result ?? session.error,
+    });
+
+    const resultMessage: SDKResultMessage = {
+      type: 'result',
+      subtype: 'success',
+      duration_ms: session.durationMs,
+      duration_api_ms: 0,
+      is_error: false,
+      num_turns: session.numTurns,
+      result: session.result ?? session.error ?? '',
+      stop_reason: 'end_turn',
+      total_cost_usd: 0,
+      usage: {
+        input_tokens: 0,
+        output_tokens: typeof session.totalTokens === 'number' ? session.totalTokens : 0,
+      },
+      modelUsage: {},
+      permission_denials: [],
+      uuid: randomUUID(),
+      session_id: sessionId,
+    };
+
+    return __internal_buildPromptSuggestions({
+      result: resultMessage,
+      observation,
+      language: responseLanguage,
+    })
+      .filter((item): item is WorkerFollowUpSuggestion => Boolean(item.scaffold))
+      .map((item) => ({
+        suggestion: item.suggestion,
+        scaffold: item.scaffold!,
+      }));
   };
 
   queryObj.stopWorker = async (workerId: string) => ({
