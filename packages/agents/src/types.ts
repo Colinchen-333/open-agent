@@ -33,6 +33,7 @@ export interface TaskItem {
   status: 'pending' | 'in_progress' | 'completed' | 'deleted';
   owner?: string;
   priority?: number;
+  attempts?: number;
   activeForm?: string;
   blocks?: string[];
   blockedBy?: string[];

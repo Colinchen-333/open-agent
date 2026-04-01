@@ -42,6 +42,7 @@ export class TaskManager {
       description,
       status: 'pending',
       priority,
+      attempts: 0,
       activeForm,
       blocks: [],
       blockedBy: [],
@@ -128,6 +129,8 @@ export class TaskManager {
 
   // Return tasks that are pending, unowned, and not blocked by any incomplete task
   listAvailable(now = new Date()): TaskItem[] {
+    this.releaseExpiredLeases(now);
+
     return this.listAll().filter(t => {
       if (!this.isClaimableStatus(t, now)) return false;
       if (!t.blockedBy || t.blockedBy.length === 0) return true;
@@ -147,9 +150,10 @@ export class TaskManager {
     const task = this.listAvailable(now)[0];
     if (!task) return null;
 
-    const attempts = (task.lease?.attempts ?? 0) + 1;
+    const attempts = (task.attempts ?? 0) + 1;
     task.status = 'in_progress';
     task.owner = owner;
+    task.attempts = attempts;
     task.lease = {
       owner,
       claimedAt: now.toISOString(),
@@ -169,6 +173,10 @@ export class TaskManager {
     }
 
     const now = options.now ?? new Date();
+    if (!this.hasActiveLease(task, now)) {
+      throw new Error(`Task ${id} lease has expired`);
+    }
+
     task.status = 'in_progress';
     task.owner = owner;
     task.lease = {
@@ -180,6 +188,10 @@ export class TaskManager {
     task.updatedAt = now.toISOString();
     this.persistTask(task);
     return task;
+  }
+
+  heartbeat(id: string, owner: string, extendMs = DEFAULT_LEASE_MS, now = new Date()): TaskItem {
+    return this.renewLease(id, owner, { leaseMs: extendMs, now });
   }
 
   releaseLease(id: string, owner: string, status: 'pending' | 'completed' = 'pending'): TaskItem {
@@ -199,6 +211,29 @@ export class TaskManager {
     }
     this.persistTask(task);
     return task;
+  }
+
+  releaseExpiredLeases(now = new Date()): TaskItem[] {
+    const released: TaskItem[] = [];
+
+    for (const task of this.listAll()) {
+      if (!task.lease || this.hasActiveLease(task, now) || task.status === 'deleted') {
+        continue;
+      }
+
+      const releasedTask: TaskItem = {
+        ...task,
+        status: task.status === 'completed' ? 'completed' : 'pending',
+        updatedAt: now.toISOString(),
+      };
+      if (releasedTask.owner === releasedTask.lease.owner) {
+        delete releasedTask.owner;
+      }
+      this.persistTask(releasedTask);
+      released.push(releasedTask);
+    }
+
+    return released;
   }
 
   private isClaimableStatus(task: TaskItem, now: Date): boolean {

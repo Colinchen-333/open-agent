@@ -17,23 +17,42 @@ describe('TaskManager scheduling', () => {
     rmSync(rootDir, { recursive: true, force: true });
   });
 
-  it('claims the highest-priority available task first', () => {
+  it('claimNext 会领取最高优先级的可用任务并写入 lease', () => {
     manager.create('low', 'low priority', undefined, undefined, 1);
-    manager.create('high', 'high priority', undefined, undefined, 10);
+    const high = manager.create('high', 'high priority', undefined, undefined, 10);
 
     const claimed = manager.claimNext('worker-a', {
       now: new Date('2026-04-01T10:00:00.000Z'),
       leaseMs: 60_000,
     });
 
+    expect(claimed?.id).toBe(high.id);
     expect(claimed?.subject).toBe('high');
     expect(claimed?.status).toBe('in_progress');
     expect(claimed?.owner).toBe('worker-a');
     expect(claimed?.lease?.attempts).toBe(1);
+    expect(claimed?.lease?.expiresAt).toBe('2026-04-01T10:01:00.000Z');
     expect(manager.listAvailable(new Date('2026-04-01T10:00:30.000Z')).map((task) => task.subject)).toEqual(['low']);
   });
 
-  it('reclaims expired leases and increments attempts', () => {
+  it('有效 lease 不可重复领取', () => {
+    const task = manager.create('claim-once', 'single claim', undefined, undefined, 5);
+
+    const firstClaim = manager.claimNext('worker-a', {
+      now: new Date('2026-04-01T10:00:00.000Z'),
+      leaseMs: 60_000,
+    });
+    const secondClaim = manager.claimNext('worker-b', {
+      now: new Date('2026-04-01T10:00:30.000Z'),
+      leaseMs: 60_000,
+    });
+
+    expect(firstClaim?.id).toBe(task.id);
+    expect(secondClaim).toBeNull();
+    expect(manager.get(task.id)?.owner).toBe('worker-a');
+  });
+
+  it('过期 lease 会被释放并重新可领取', () => {
     manager.create('recover', 'recover expired worker lease', undefined, undefined, 5);
 
     const firstClaim = manager.claimNext('worker-a', {
@@ -43,6 +62,11 @@ describe('TaskManager scheduling', () => {
     expect(firstClaim?.lease?.owner).toBe('worker-a');
 
     expect(manager.listAvailable(new Date('2026-04-01T10:00:00.500Z'))).toHaveLength(0);
+    const released = manager.releaseExpiredLeases(new Date('2026-04-01T10:00:02.000Z'));
+    expect(released).toHaveLength(1);
+    expect(released[0]?.status).toBe('pending');
+    expect(released[0]?.owner).toBeUndefined();
+    expect(released[0]?.lease).toBeUndefined();
 
     const reclaimed = manager.claimNext('worker-b', {
       now: new Date('2026-04-01T10:00:02.000Z'),
@@ -55,29 +79,61 @@ describe('TaskManager scheduling', () => {
     expect(reclaimed?.lease?.expiresAt).toBe('2026-04-01T10:00:07.000Z');
   });
 
-  it('renews and releases leases with ownership checks', () => {
+  it('heartbeat 只能续租当前 owner 的有效 lease', () => {
     const task = manager.create('ship', 'ship release', undefined, undefined, 3);
     manager.claimNext('worker-a', {
       now: new Date('2026-04-01T10:00:00.000Z'),
       leaseMs: 60_000,
     });
 
-    expect(() => manager.renewLease(task.id, 'worker-b')).toThrow(`Task ${task.id} is not leased by worker-b`);
+    expect(() => manager.heartbeat(
+      task.id,
+      'worker-b',
+      30_000,
+      new Date('2026-04-01T10:00:30.000Z'),
+    )).toThrow(`Task ${task.id} is not leased by worker-b`);
 
-    const renewed = manager.renewLease(task.id, 'worker-a', {
-      now: new Date('2026-04-01T10:01:00.000Z'),
-      leaseMs: 30_000,
+    const renewed = manager.heartbeat(
+      task.id,
+      'worker-a',
+      30_000,
+      new Date('2026-04-01T10:00:45.000Z'),
+    );
+    expect(renewed.lease?.expiresAt).toBe('2026-04-01T10:01:15.000Z');
+
+    expect(() => manager.heartbeat(
+      task.id,
+      'worker-a',
+      30_000,
+      new Date('2026-04-01T10:01:16.000Z'),
+    )).toThrow(`Task ${task.id} lease has expired`);
+  });
+
+  it('releaseLease 会把任务释放回 pending 或完成态', () => {
+    const task = manager.create('ship', 'ship release', undefined, undefined, 3);
+    manager.claimNext('worker-a', {
+      now: new Date('2026-04-01T10:00:00.000Z'),
+      leaseMs: 60_000,
     });
-    expect(renewed.lease?.expiresAt).toBe('2026-04-01T10:01:30.000Z');
 
     const released = manager.releaseLease(task.id, 'worker-a');
     expect(released.status).toBe('pending');
     expect(released.owner).toBeUndefined();
     expect(released.lease).toBeUndefined();
-    expect(manager.listAvailable(new Date('2026-04-01T10:01:01.000Z')).map((entry) => entry.id)).toEqual([task.id]);
+    expect(manager.listAvailable(new Date('2026-04-01T10:00:30.000Z')).map((entry) => entry.id)).toEqual([task.id]);
+
+    const claimedAgain = manager.claimNext('worker-b', {
+      now: new Date('2026-04-01T10:01:00.000Z'),
+      leaseMs: 60_000,
+    });
+    expect(claimedAgain?.owner).toBe('worker-b');
+    const completed = manager.releaseLease(task.id, 'worker-b', 'completed');
+    expect(completed.status).toBe('completed');
+    expect(completed.owner).toBe('worker-b');
+    expect(completed.lease).toBeUndefined();
   });
 
-  it('does not claim blocked or deleted tasks', () => {
+  it('不会领取 blocked 或 deleted 任务', () => {
     const blocker = manager.create('blocker', 'finish first', undefined, undefined, 2);
     const blocked = manager.create('blocked', 'depends on blocker', undefined, undefined, 9);
     const deleted = manager.create('deleted', 'removed work item', undefined, undefined, 100);
