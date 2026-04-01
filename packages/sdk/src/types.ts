@@ -449,6 +449,7 @@ export interface TeamRecord {
 }
 
 export interface TeamMessageRecord {
+  messageId?: string;
   teamName: string;
   type: 'message' | 'broadcast' | 'shutdown_request' | 'shutdown_response' | 'plan_approval_response' | 'idle_notification' | 'plan_approval_request';
   from: string;
@@ -456,6 +457,7 @@ export interface TeamMessageRecord {
   content: string;
   summary?: string;
   timestamp: string;
+  readAt?: string;
   requestId?: string;
   approve?: boolean;
   idleReason?: string;
@@ -491,6 +493,16 @@ export interface TeamInboxOptions {
   teamName?: string;
   memberName: string;
   consume?: boolean;
+  acknowledge?: boolean;
+  unreadOnly?: boolean;
+  after?: string;
+  limit?: number;
+}
+
+export interface TeamInboxAcknowledgeInput {
+  teamName?: string;
+  memberName: string;
+  messageIds: string[];
 }
 
 export type SDKOrchestrationEventKind = 'worker_lifecycle' | 'worker_tool';
@@ -528,11 +540,14 @@ export type SDKTimelineItemKind = 'team_message' | SDKOrchestrationEventKind | '
 
 export interface SDKTimelineItem {
   kind: SDKTimelineItemKind;
+  timelineId?: string;
+  cursor?: string;
   sessionId: string;
   timestamp: string;
   teamName?: string;
   workerId?: string;
   parentToolCallId?: string;
+  readAt?: string;
   teamMessage?: TeamMessageRecord;
   orchestrationEvent?: SDKOrchestrationEvent;
   taskNotification?: SDKTaskNotificationRecord;
@@ -544,6 +559,10 @@ export interface TimelineInboxOptions {
   includeTeamMessages?: boolean;
   includeTaskNotifications?: boolean;
   consume?: boolean;
+  acknowledge?: boolean;
+  unreadOnly?: boolean;
+  after?: string;
+  limit?: number;
 }
 
 export interface SubscribeTimelineOptions extends TimelineInboxOptions {
@@ -612,6 +631,8 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   sendTeamMessage(input: TeamMessageInput): Promise<TeamMessageRecord>;
   /** Read or peek a member inbox from the selected or named team. */
   readTeamInbox(options: TeamInboxOptions): Promise<TeamMessageRecord[]>;
+  /** Mark specific inbox messages as read without consuming them. */
+  acknowledgeTeamInbox(input: TeamInboxAcknowledgeInput): Promise<{ acknowledged: number }>;
   /** Return the unread inbox count for a member in the selected or named team. */
   getTeamInboxCount(memberName: string, options?: { teamName?: string }): Promise<number>;
   /** Read the selected team inbox and normalize messages into unified timeline items. */
@@ -771,6 +792,8 @@ export interface Session {
   sendTeamMessage(input: TeamMessageInput): Promise<TeamMessageRecord>;
   /** Read or peek a member inbox from the selected or named team. */
   readTeamInbox(options: TeamInboxOptions): Promise<TeamMessageRecord[]>;
+  /** Mark specific inbox messages as read without consuming them. */
+  acknowledgeTeamInbox(input: TeamInboxAcknowledgeInput): Promise<{ acknowledged: number }>;
   /** Return the unread inbox count for a member in the selected or named team. */
   getTeamInboxCount(memberName: string, options?: { teamName?: string }): Promise<number>;
   /** Read the selected team inbox and normalize messages into unified timeline items. */

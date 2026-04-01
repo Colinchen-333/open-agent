@@ -156,11 +156,31 @@ describe('query() timeline control plane', () => {
       });
 
       expect(timeline.some((item) => item.kind === 'team_message' && item.teamMessage?.content === 'Review the worker result.')).toBe(true);
+      const teamMessage = timeline.find((item) => item.kind === 'team_message');
+      expect(teamMessage?.timelineId).toBeTruthy();
+      expect(teamMessage?.cursor).toBe(teamMessage?.timelineId);
+      expect(teamMessage?.teamMessage?.messageId).toBe(teamMessage?.timelineId);
       const taskNotification = timeline.find((item) =>
         item.kind === 'task_notification' && item.taskNotification?.taskId === workerId,
       );
+      expect(taskNotification?.timelineId).toBeTruthy();
       expect(taskNotification?.taskNotification?.teamName).toBe(teamName);
       expect(taskNotification?.taskNotification?.followUps.some((item) => item.scaffold.kind === 'resume_worker')).toBe(true);
+
+      expect(
+        await q.acknowledgeTeamInbox({
+          teamName,
+          memberName: 'alice',
+          messageIds: [teamMessage!.teamMessage!.messageId!],
+        }),
+      ).toEqual({ acknowledged: 1 });
+      const unreadOnly = await q.readTimelineInbox({
+        teamName,
+        memberName: 'alice',
+        consume: false,
+        unreadOnly: true,
+      });
+      expect(unreadOnly.some((item) => item.kind === 'team_message')).toBe(false);
       q.close();
     } finally {
       if (workerDir) {

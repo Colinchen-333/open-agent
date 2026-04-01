@@ -70,6 +70,12 @@ export interface TeamMessage {
   };
 }
 
+export interface TeamInboxEntry {
+  id: string;
+  message: TeamMessage;
+  readAt?: string;
+}
+
 const EXPLORE_AGENT_PROMPT = `You are a read-only exploration agent.
 
 Your job is to investigate the codebase and return concrete findings, not vague impressions.

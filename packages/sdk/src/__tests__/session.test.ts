@@ -119,6 +119,7 @@ describe('createSession()', () => {
     expect(typeof session.accountInfo).toBe('function');
     expect(typeof session.initializationResult).toBe('function');
     expect(typeof session.sessionInfo).toBe('function');
+    expect(typeof session.acknowledgeTeamInbox).toBe('function');
     expect(typeof session.listBackgroundTasks).toBe('function');
     expect(typeof session.getBackgroundTask).toBe('function');
     expect(typeof session.stopTask).toBe('function');
@@ -197,7 +198,21 @@ describe('createSession()', () => {
     const timelineInbox = await session.readTimelineInbox({ memberName: 'alice', consume: false });
     expect(timelineInbox).toHaveLength(1);
     expect(timelineInbox[0]?.kind).toBe('team_message');
+    expect(timelineInbox[0]?.timelineId).toBeTruthy();
     expect(timelineInbox[0]?.teamMessage?.teamName).toBe(teamName);
+    expect(timelineInbox[0]?.teamMessage?.messageId).toBeTruthy();
+
+    expect(await session.getTeamInboxCount('alice')).toBe(1);
+    expect(
+      await session.acknowledgeTeamInbox({
+        memberName: 'alice',
+        messageIds: [timelineInbox[0]!.teamMessage!.messageId!],
+      }),
+    ).toEqual({ acknowledged: 1 });
+    expect(await session.getTeamInboxCount('alice')).toBe(0);
+
+    const unreadOnly = await session.readTeamInbox({ memberName: 'alice', consume: false, unreadOnly: true });
+    expect(unreadOnly).toHaveLength(0);
 
     const inbox = await session.readTeamInbox({ memberName: 'alice', consume: true });
     expect(inbox).toHaveLength(1);

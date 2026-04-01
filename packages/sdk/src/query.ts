@@ -16,7 +16,7 @@ import { ConversationLoop, SessionManager, buildSystemPrompt, FileCheckpoint, is
 import { createStore, createDefaultAppState } from '@open-agent/state';
 import type { AppState } from '@open-agent/state';
 import { AgentLoader, AgentExecutor, TeamManager, TaskManager } from '@open-agent/agents';
-import type { SubagentStreamEvent, AgentSession, TaskItem, TeamConfig, TeamMember, TeamMessage } from '@open-agent/agents';
+import type { SubagentStreamEvent, AgentSession, TaskItem, TeamConfig, TeamInboxEntry, TeamMember, TeamMessage } from '@open-agent/agents';
 import {
   createDefaultToolRegistry,
   createTaskTool,
@@ -68,6 +68,7 @@ import type {
   TeamCreateInput,
   TeamMessageInput,
   TeamInboxOptions,
+  TeamInboxAcknowledgeInput,
   TimelineInboxOptions,
   SDKOrchestrationEvent,
   SubscribeOrchestrationEventsOptions,
@@ -409,7 +410,8 @@ export function query(
     taskQueuePath: join(cwd, '.open-agent', 'tasks', config.name),
     isActive: activeTeamName === config.name,
   });
-  const toTeamMessageRecord = (teamName: string, message: TeamMessage): TeamMessageRecord => ({
+  const toTeamMessageRecord = (teamName: string, message: TeamMessage, entry?: TeamInboxEntry): TeamMessageRecord => ({
+    ...(entry?.id ? { messageId: entry.id } : {}),
     teamName,
     type: message.type,
     from: message.from,
@@ -417,6 +419,7 @@ export function query(
     content: message.content,
     ...(message.summary ? { summary: message.summary } : {}),
     timestamp: message.timestamp,
+    ...(entry?.readAt ? { readAt: entry.readAt } : {}),
     ...(message.requestId ? { requestId: message.requestId } : {}),
     ...(typeof message.approve === 'boolean' ? { approve: message.approve } : {}),
     ...(message.idleReason ? { idleReason: message.idleReason } : {}),
@@ -424,9 +427,11 @@ export function query(
   });
   const toTimelineTeamMessage = (message: TeamMessageRecord): SDKTimelineItem => ({
     kind: 'team_message',
+    ...(message.messageId ? { timelineId: message.messageId, cursor: message.messageId } : {}),
     sessionId,
     timestamp: message.timestamp,
     teamName: message.teamName,
+    ...(message.readAt ? { readAt: message.readAt } : {}),
     teamMessage: JSON.parse(JSON.stringify(message)),
   });
   const toTimelineOrchestrationItem = (event: SDKOrchestrationEvent): SDKTimelineItem => ({
@@ -440,6 +445,7 @@ export function query(
   });
   const toTimelineTaskNotification = (message: SDKTaskNotificationMessage): SDKTimelineItem => ({
     kind: 'task_notification',
+    ...(buildTaskNotificationFingerprint(message) ? { timelineId: buildTaskNotificationFingerprint(message)!, cursor: buildTaskNotificationFingerprint(message)! } : {}),
     sessionId: message.session_id,
     timestamp: message.completed_at ?? new Date().toISOString(),
     ...(message.team_name ? { teamName: message.team_name } : {}),
@@ -2011,10 +2017,21 @@ export function query(
 
   queryObj.readTeamInbox = async (options: TeamInboxOptions) => {
     const teamName = resolveTeamName(options?.teamName);
-    const messages = options?.consume === false
-      ? sdkTeamManager.readMessages(teamName, options.memberName)
-      : sdkTeamManager.readInbox(teamName, options.memberName);
-    return messages.map((message) => toTeamMessageRecord(teamName, message));
+    const entries = sdkTeamManager.readInboxEntries(teamName, options.memberName, {
+      consume: options?.consume !== false,
+      acknowledge: options?.acknowledge,
+      unreadOnly: options?.unreadOnly,
+      after: options?.after,
+      limit: options?.limit,
+    });
+    return entries.map((entry) => toTeamMessageRecord(teamName, entry.message, entry));
+  };
+
+  queryObj.acknowledgeTeamInbox = async (input: TeamInboxAcknowledgeInput) => {
+    const teamName = resolveTeamName(input?.teamName);
+    return {
+      acknowledged: sdkTeamManager.acknowledgeInboxMessages(teamName, input.memberName, input.messageIds),
+    };
   };
 
   queryObj.getTeamInboxCount = async (memberName: string, options?: { teamName?: string }) => {
@@ -2029,11 +2046,20 @@ export function query(
         teamName: options.teamName,
         memberName: options.memberName,
         consume: options.consume,
+        acknowledge: options.acknowledge,
+        unreadOnly: options.unreadOnly,
+        after: options.after,
+        limit: options.limit,
       });
       items.push(...messages.map((message) => toTimelineTeamMessage(message)));
     }
     if (options.includeTaskNotifications !== false) {
-      items.push(...collectTimelineTaskNotifications(options.teamName).map((message) => toTimelineTaskNotification(message)));
+      items.push(
+        ...collectTimelineTaskNotifications(options.teamName)
+          .map((message) => toTimelineTaskNotification(message))
+          .filter((item) => !options.after || (item.cursor ?? item.timestamp) > options.after)
+          .slice(0, options.limit ?? Number.POSITIVE_INFINITY),
+      );
     }
     return sortTimelineItems(items);
   };
@@ -2148,9 +2174,13 @@ export function query(
           teamName: subscriptionOptions.teamName,
           memberName: subscriptionOptions.memberName,
           consume: subscriptionOptions.consume,
+          acknowledge: subscriptionOptions.acknowledge,
+          unreadOnly: subscriptionOptions.unreadOnly,
+          after: subscriptionOptions.after,
+          limit: subscriptionOptions.limit,
         });
         for (const message of teamMessages) {
-          const fingerprint = buildTimelineTeamMessageFingerprint(message);
+          const fingerprint = message.messageId ?? buildTimelineTeamMessageFingerprint(message);
           if (subscriptionOptions.consume === true || !teamSeen.has(fingerprint)) {
             teamSeen.add(fingerprint);
             push(toTimelineTeamMessage(message));

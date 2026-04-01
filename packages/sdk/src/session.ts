@@ -108,6 +108,7 @@ type SessionControlMethods = Pick<
   | 'setActiveTeam'
   | 'sendTeamMessage'
   | 'readTeamInbox'
+  | 'acknowledgeTeamInbox'
   | 'getTeamInboxCount'
   | 'readTimelineInbox'
   | 'subscribeOrchestrationEvents'
@@ -394,6 +395,7 @@ function _buildSession(
     setActiveTeam: (...args) => q.setActiveTeam(...args),
     sendTeamMessage: (...args) => q.sendTeamMessage(...args),
     readTeamInbox: (...args) => q.readTeamInbox(...args),
+    acknowledgeTeamInbox: (...args) => q.acknowledgeTeamInbox(...args),
     getTeamInboxCount: (...args) => q.getTeamInboxCount(...args),
     readTimelineInbox: (...args) => q.readTimelineInbox(...args),
     subscribeOrchestrationEvents: (...args) => q.subscribeOrchestrationEvents(...args),
@@ -644,6 +646,7 @@ export function unstable_v2_createSession(
     setActiveTeam: (...args) => q.setActiveTeam(...args),
     sendTeamMessage: (...args) => q.sendTeamMessage(...args),
     readTeamInbox: (...args) => q.readTeamInbox(...args),
+    acknowledgeTeamInbox: (...args) => q.acknowledgeTeamInbox(...args),
     getTeamInboxCount: (...args) => q.getTeamInboxCount(...args),
     readTimelineInbox: (...args) => q.readTimelineInbox(...args),
     subscribeOrchestrationEvents: (...args) => q.subscribeOrchestrationEvents(...args),
