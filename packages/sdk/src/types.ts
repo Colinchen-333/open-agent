@@ -17,6 +17,7 @@ import type {
   SessionInfo,
 } from '@open-agent/core';
 import type { SandboxConfig } from '@open-agent/permissions';
+import type { CapabilitySnapshot } from '@open-agent/runtime';
 import type { SkillCatalogEntry } from '@open-agent/skills';
 
 export type PermissionRuleValue = {
@@ -256,6 +257,8 @@ export interface InitializationResult {
   account: AccountInfo;
   /** Fast mode state from the underlying runtime when available. */
   fast_mode_state?: unknown;
+  /** Runtime capability snapshot for routing, planning, and diagnostics. */
+  capability_snapshot?: CapabilitySnapshot;
   /** @deprecated Legacy extension; not part of official SDK contract. */
   tools?: string[];
   /** @deprecated Legacy extension; not part of official SDK contract. */
@@ -300,6 +303,20 @@ export interface BackgroundTaskSummary {
   started_at?: number;
 }
 
+export interface BackgroundTaskInspection {
+  task_id: string;
+  type: 'bash' | 'agent' | 'unknown';
+  status: string;
+  state?: string;
+  summary: string;
+  output_preview?: string;
+  output_file?: string;
+  session_id?: string;
+  command?: string;
+  started_at?: number;
+  duration_ms?: number;
+}
+
 /**
  * Returned by `query()`.  Implements `AsyncGenerator<SDKMessage>` so callers
  * can iterate with `for await … of` as well as calling control methods.
@@ -335,7 +352,7 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   /** Return visible background bash/agent tasks for the current runtime. */
   listBackgroundTasks(): Promise<BackgroundTaskSummary[]>;
   /** Return structured details for a specific background task, if found. */
-  getBackgroundTask(taskId: string, options?: { block?: boolean; timeout?: number }): Promise<Record<string, unknown> | null>;
+  getBackgroundTask(taskId: string, options?: { block?: boolean; timeout?: number }): Promise<BackgroundTaskInspection | null>;
   /**
    * Abort the current task.  For a single `query()` call this is equivalent to
    * `interrupt()`.  The `taskId` parameter is accepted for API symmetry with

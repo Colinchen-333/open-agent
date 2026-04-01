@@ -22,6 +22,7 @@ describe('query().initializationResult()', () => {
     expect(result).toHaveProperty('available_output_styles');
     expect(result).toHaveProperty('models');
     expect(result).toHaveProperty('account');
+    expect(result).toHaveProperty('capability_snapshot');
     if ('fast_mode_state' in result) {
       expect((result as any).fast_mode_state).toBeUndefined();
     }
@@ -41,6 +42,7 @@ describe('query().initializationResult()', () => {
       'account',
       'agents',
       'available_output_styles',
+      'capability_snapshot',
       'commands',
       'models',
       'output_style',
@@ -50,6 +52,7 @@ describe('query().initializationResult()', () => {
       'account',
       'agents',
       'available_output_styles',
+      'capability_snapshot',
       'commands',
       'models',
       'output_style',
@@ -61,6 +64,7 @@ describe('query().initializationResult()', () => {
     expect((result as any).cwd).toBeUndefined();
     expect((result as any).sessionId).toBeUndefined();
     expect((result as any).permissionMode).toBeUndefined();
+    expect((result as any).capability_snapshot?.totalTools).toBeGreaterThan(0);
     q.close();
   });
 
@@ -176,6 +180,7 @@ describe('query() background task inspection', () => {
     const cwd = mkdtempSync(join(tmpdir(), 'open-agent-task-details-'));
     const outputFile = join(cwd, 'bg-detail-sdk.log');
     writeFileSync(outputFile, 'ok\n');
+    const startTime = Date.now() - 5_000;
     savePersistedBackgroundTask({
       taskId: 'bg-detail-sdk',
       kind: 'bash',
@@ -184,7 +189,7 @@ describe('query() background task inspection', () => {
       cwd,
       summary: 'Echo ok',
       status: 'completed',
-      startTime: Date.now(),
+      startTime,
       outputFile,
     });
 
@@ -193,6 +198,13 @@ describe('query() background task inspection', () => {
     expect(task).not.toBeNull();
     expect(task?.task_id).toBe('bg-detail-sdk');
     expect(task?.type).toBe('bash');
+    expect(task?.summary).toBe('Echo ok');
+    expect(task?.session_id).toBe('session-detail');
+    expect(task?.command).toBe('echo ok');
+    expect(task?.output_file).toBe(outputFile);
+    expect(task?.output_preview).toContain('ok');
+    expect(task?.started_at).toBe(startTime);
+    expect(typeof task?.duration_ms).toBe('number');
     q.close();
   });
 });

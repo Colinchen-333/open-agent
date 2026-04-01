@@ -821,7 +821,14 @@ async function main(): Promise<void> {
     // Print mode: one-shot with full tools, streams only text to stdout.
     // Matches Claude Code's `-p` behavior — runs agent loop then exits.
     if (isStreamJson) {
-      emitStreamJsonInit({ tools: toolNames, model, cwd, permissionMode: effectivePermissionMode, sessionId });
+      emitStreamJsonInit({
+        tools: toolNames,
+        capabilitySnapshot: runtime.buildSnapshot().capabilitySnapshot,
+        model,
+        cwd,
+        permissionMode: effectivePermissionMode,
+        sessionId,
+      });
     }
     for await (const message of loop.run(args.prompt)) {
       if (isStreamJson) {
@@ -847,7 +854,14 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------
   if (args.prompt) {
     if (isStreamJson) {
-      emitStreamJsonInit({ tools: toolNames, model, cwd, permissionMode: effectivePermissionMode, sessionId });
+      emitStreamJsonInit({
+        tools: toolNames,
+        capabilitySnapshot: runtime.buildSnapshot().capabilitySnapshot,
+        model,
+        cwd,
+        permissionMode: effectivePermissionMode,
+        sessionId,
+      });
     }
     await executePrompt(loop, args.prompt, renderer, isStreamJson, sessionMgr, cwd, sessionId);
     // Fire SessionEnd before exiting single-prompt mode.
@@ -907,6 +921,7 @@ async function main(): Promise<void> {
         model,
         sessionId,
         tools: toolNames,
+        capabilities: runtime.buildSnapshot().capabilitySnapshot,
         checkpoint,
         sessionMgr,
         permissionMode: effectivePermissionMode,

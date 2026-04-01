@@ -225,6 +225,7 @@ export interface SDKSystemMessage {
   type: 'system';
   subtype: 'init';
   tools: string[];
+  capability_snapshot?: unknown;
   model: string;
   permissionMode: PermissionMode;
   cwd: string;

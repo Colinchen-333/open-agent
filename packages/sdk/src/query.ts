@@ -12,7 +12,7 @@ import type {
   SDKTaskNotificationMessage,
   SDKPromptSuggestionMessage,
 } from '@open-agent/core';
-import { ConversationLoop, SessionManager, buildSystemPrompt, FileCheckpoint, isGitRepository, buildTaskOrchestrationTemplates, loadPromptContext } from '@open-agent/core';
+import { ConversationLoop, SessionManager, buildSystemPrompt, FileCheckpoint, isGitRepository, buildTaskOrchestrationTemplates, loadPromptContext, buildCoordinatorContext } from '@open-agent/core';
 import { createStore, createDefaultAppState } from '@open-agent/state';
 import type { AppState } from '@open-agent/state';
 import { AgentLoader, AgentExecutor, TeamManager } from '@open-agent/agents';
@@ -34,11 +34,17 @@ import {
 } from '@open-agent/tools';
 import { autoDetectProvider, createProvider, calculateCost } from '@open-agent/providers';
 import type { Message } from '@open-agent/providers';
-import { PermissionEngine, SettingsLoader } from '@open-agent/permissions';
-import type { SandboxConfig, SettingsFile } from '@open-agent/permissions';
+import {
+  PermissionEngine,
+  SettingsLoader,
+  BASH_SANDBOX_POLICY_FIELD,
+  BASH_SANDBOX_BYPASS_APPROVED_FIELD,
+  buildBashSandboxPolicy,
+} from '@open-agent/permissions';
+import type { SandboxConfig, SettingsFile, BashSandboxExecutionPolicy } from '@open-agent/permissions';
 import { HookExecutor } from '@open-agent/hooks';
 import { OpenAgentRuntime } from '@open-agent/runtime';
-import type { QueryOptions, Query, RewindFilesResult, AgentInfo } from './types.js';
+import type { QueryOptions, Query, RewindFilesResult, AgentInfo, BackgroundTaskInspection } from './types.js';
 import { applyPermissionUpdates } from './permission-updates.js';
 import { createPermissionPrompterBridge } from './permission-prompter.js';
 
@@ -843,9 +849,10 @@ export function query(
       throw new Error('options.sandbox must be a valid sandbox config with an explicit boolean enabled field.');
     }
   }
+  const effectiveSandboxConfig = optionSandbox ?? settingsSandbox;
   const permissionEngine = new PermissionEngine({
     mode: permMode,
-    ...(optionSandbox ?? settingsSandbox ? { sandbox: optionSandbox ?? settingsSandbox! } : {}),
+    ...(effectiveSandboxConfig ? { sandbox: effectiveSandboxConfig } : {}),
   });
   if (loadedSettings) {
     permissionEngine.loadFromSettings(loadedSettings as Record<string, any>);
@@ -862,92 +869,146 @@ export function query(
     permissionEngine.setPermissionPromptToolName(options.permissionPromptToolName);
   }
 
-  // Wrap permissionEngine.evaluate to apply canUseTool callback first.
-  // canUseTool returning false → deny immediately.
-  // canUseTool returning true → fall through to normal evaluation.
-  if (options.canUseTool) {
-    const originalEvaluate = permissionEngine.evaluate.bind(permissionEngine);
-    effectivePermissionEngine = {
-      evaluate: async (request) => {
-        const baselineDecision = await originalEvaluate(request as any);
-        const normalizedInput = request.input as Record<string, unknown>;
-        const result = await options.canUseTool!(
-          request.toolName,
-          normalizedInput,
-          {
-            signal: internalAbortController.signal,
-            suggestions: undefined,
-            decisionReason: baselineDecision.reason,
-            toolUseID: request.toolUseId ?? randomUUID(),
-            agentID: options.agent,
-          },
-        );
+  const attachBashSandboxPolicy = (
+    request: { toolName: string; input: unknown },
+    permissionBehavior?: 'allow' | 'deny' | 'ask',
+  ): void => {
+    if (request.toolName !== 'Bash') return;
+    if (!request.input || typeof request.input !== 'object' || Array.isArray(request.input)) return;
 
-        if (
-          result &&
-          typeof result === 'object' &&
-          'toolUseID' in result &&
-          typeof result.toolUseID === 'string' &&
-          request.toolUseId &&
-          result.toolUseID !== request.toolUseId
-        ) {
-          return {
-            behavior: 'deny' as const,
-            reason: `Mismatched toolUseID from canUseTool callback: expected ${request.toolUseId}, got ${result.toolUseID}`,
-          };
-        }
+    const input = request.input as Record<string, unknown>;
+    const policy = buildBashSandboxPolicy({
+      sandbox: effectiveSandboxConfig,
+      cwd,
+      dangerouslyDisableSandbox: input.dangerouslyDisableSandbox === true,
+      bypassApproved: input[BASH_SANDBOX_BYPASS_APPROVED_FIELD] === true,
+      permissionBehavior,
+    });
+    input[BASH_SANDBOX_POLICY_FIELD] = policy;
+  };
 
-        if (result && typeof result === 'object' && 'updatedPermissions' in result) {
-          applyPermissionUpdates(permissionEngine, result.updatedPermissions);
-        }
+  const originalEvaluate = permissionEngine.evaluate.bind(permissionEngine);
+  effectivePermissionEngine = {
+    evaluate: async (request) => {
+      const baselineDecision = await originalEvaluate(request as any);
+      attachBashSandboxPolicy(request, baselineDecision.behavior);
 
-        if (result && typeof result === 'object' && 'updatedInput' in result) {
-          applyUpdatedInput(request.input, result.updatedInput);
-        }
-
-        if (result && typeof result === 'object' && 'behavior' in result) {
-          if (result.behavior === 'allow') {
-            return {
-              behavior: 'allow' as const,
-              reason: 'Allowed by canUseTool callback',
-            };
-          }
-          if (result.behavior === 'deny') {
-            if ('interrupt' in result && result.interrupt === true) {
-              internalAbortController.abort();
-            }
-            const denyMessage = 'message' in result && typeof result.message === 'string'
-              ? result.message
-              : ('reason' in result && typeof result.reason === 'string'
-                ? result.reason
-                : 'Denied by canUseTool callback');
-            return { behavior: 'deny' as const, reason: denyMessage };
-          }
-        }
-        if (result === false) {
-          return { behavior: 'deny' as const, reason: 'Denied by canUseTool callback' };
-        }
-        if (
-          typeof result === 'object' &&
-          result !== null &&
-          'behavior' in result &&
-          (result as any).behavior === 'ask'
-        ) {
-          return { behavior: 'ask' as const, reason: (result as any).reason };
-        }
+      if (!options.canUseTool) {
         return baselineDecision;
-      },
-      addRule: permissionEngine.addRule.bind(permissionEngine),
-      setMode: (permissionEngine as any).setMode?.bind(permissionEngine),
-    };
-  }
+      }
 
-  const permissionPrompter = createPermissionPrompterBridge({
+      const normalizedInput = request.input as Record<string, unknown>;
+      const result = await options.canUseTool!(
+        request.toolName,
+        normalizedInput,
+        {
+          signal: internalAbortController.signal,
+          suggestions: undefined,
+          decisionReason: baselineDecision.reason,
+          toolUseID: request.toolUseId ?? randomUUID(),
+          agentID: options.agent,
+        },
+      );
+
+      if (
+        result &&
+        typeof result === 'object' &&
+        'toolUseID' in result &&
+        typeof result.toolUseID === 'string' &&
+        request.toolUseId &&
+        result.toolUseID !== request.toolUseId
+      ) {
+        const decision = {
+          behavior: 'deny' as const,
+          reason: `Mismatched toolUseID from canUseTool callback: expected ${request.toolUseId}, got ${result.toolUseID}`,
+        };
+        attachBashSandboxPolicy(request, decision.behavior);
+        return decision;
+      }
+
+      if (result && typeof result === 'object' && 'updatedPermissions' in result) {
+        applyPermissionUpdates(permissionEngine, result.updatedPermissions);
+      }
+
+      if (result && typeof result === 'object' && 'updatedInput' in result) {
+        applyUpdatedInput(request.input, result.updatedInput);
+        attachBashSandboxPolicy(request, baselineDecision.behavior);
+      }
+
+      if (result && typeof result === 'object' && 'behavior' in result) {
+        if (result.behavior === 'allow') {
+          const decision = {
+            behavior: 'allow' as const,
+            reason: 'Allowed by canUseTool callback',
+          };
+          attachBashSandboxPolicy(request, decision.behavior);
+          return decision;
+        }
+        if (result.behavior === 'deny') {
+          if ('interrupt' in result && result.interrupt === true) {
+            internalAbortController.abort();
+          }
+          const denyMessage = 'message' in result && typeof result.message === 'string'
+            ? result.message
+            : ('reason' in result && typeof result.reason === 'string'
+              ? result.reason
+              : 'Denied by canUseTool callback');
+          const decision = { behavior: 'deny' as const, reason: denyMessage };
+          attachBashSandboxPolicy(request, decision.behavior);
+          return decision;
+        }
+      }
+      if (result === false) {
+        const decision = { behavior: 'deny' as const, reason: 'Denied by canUseTool callback' };
+        attachBashSandboxPolicy(request, decision.behavior);
+        return decision;
+      }
+      if (
+        typeof result === 'object' &&
+        result !== null &&
+        'behavior' in result &&
+        (result as any).behavior === 'ask'
+      ) {
+        const decision = { behavior: 'ask' as const, reason: (result as any).reason };
+        attachBashSandboxPolicy(request, decision.behavior);
+        return decision;
+      }
+      attachBashSandboxPolicy(request, baselineDecision.behavior);
+      return baselineDecision;
+    },
+    addRule: permissionEngine.addRule.bind(permissionEngine),
+    removeRule: (permissionEngine as any).removeRule?.bind(permissionEngine),
+    setMode: (permissionEngine as any).setMode?.bind(permissionEngine),
+  };
+
+  const basePermissionPrompter = createPermissionPrompterBridge({
     permissionPromptToolName: options.permissionPromptToolName,
     permissionPrompter: options.permissionPrompter,
     getMcpClient: () => mcpManager,
     waitForMcpReady: () => mcpReadyPromise,
   });
+  const permissionPrompter = basePermissionPrompter
+    ? {
+      prompt: async (request: { toolName: string; input: any; reason?: string }) => {
+        const userDecision = await basePermissionPrompter.prompt(request);
+        if (userDecision !== 'deny' && request.toolName === 'Bash') {
+          const input = request.input as Record<string, unknown> | undefined;
+          const maybePolicy = input?.[BASH_SANDBOX_POLICY_FIELD];
+          if (
+            maybePolicy &&
+            typeof maybePolicy === 'object' &&
+            (maybePolicy as BashSandboxExecutionPolicy).bypassRequested === true
+          ) {
+            (maybePolicy as BashSandboxExecutionPolicy).bypassAllowed = true;
+            if (input) {
+              input[BASH_SANDBOX_BYPASS_APPROVED_FIELD] = true;
+            }
+          }
+        }
+        return userDecision;
+      },
+    }
+    : undefined;
 
   // ------------------------------------------------------------------
   // System prompt
@@ -968,6 +1029,10 @@ export function query(
     promptContext.sections.some((section) => section.key === key);
 
   let activeModel = model;
+  let coordinatorTaskNotificationsForPrompt: Array<Pick<
+    SDKTaskNotificationMessage,
+    'task_id' | 'status' | 'team_name' | 'description' | 'orchestration_templates'
+  >> = [];
   const presetSystemPrompt = typeof options.systemPrompt === 'object'
     ? options.systemPrompt
     : undefined;
@@ -978,14 +1043,23 @@ export function query(
     } else {
       const runtimeSnapshot = runtime.buildSnapshot();
       const connectedMcpServers = runtimeSnapshot.mcpServers.filter((server) => server.status === 'connected');
+      const availableTools = toolRegistry.list().map((tool) => tool.name);
       const configuredActiveTeam = activeTeamName ?? defaultTeamName;
       const coordinatorScratchpadDir = sdkTeamManager.getTeam(configuredActiveTeam)
         ? sdkTeamManager.getScratchpadDir(configuredActiveTeam)
         : join(cwd, '.open-agent', 'scratchpad');
+      const coordinatorContext = buildCoordinatorContext({
+        workerTools: availableTools.filter((name) => name !== 'Task'),
+        activeTeam: sdkTeamManager.getTeam(configuredActiveTeam) ? configuredActiveTeam : undefined,
+        scratchpadDir: coordinatorScratchpadDir,
+        canUseSkills: Boolean(toolRegistry.get('Skill')) && runtimeSnapshot.skills.length > 0,
+        canUseMcpTools: connectedMcpServers.length > 0,
+        taskNotifications: coordinatorTaskNotificationsForPrompt,
+      });
       nextPrompt = buildSystemPrompt({
         model: activeModel,
         cwd,
-        tools: toolRegistry.list().map((tool) => tool.name),
+        tools: availableTools,
         permissionMode: permMode,
         language: responseLanguage,
         outputStyle,
@@ -1001,13 +1075,7 @@ export function query(
           agents: runtimeSnapshot.agents,
           skills: runtimeSnapshot.skills,
           mcpServers: runtimeSnapshot.mcpServers,
-          coordinator: {
-            workerTools: toolRegistry.list().map((tool) => tool.name).filter((name) => name !== 'Task').sort(),
-            activeTeam: sdkTeamManager.getTeam(configuredActiveTeam) ? configuredActiveTeam : undefined,
-            scratchpadDir: coordinatorScratchpadDir,
-            canUseSkills: Boolean(toolRegistry.get('Skill')) && runtimeSnapshot.skills.length > 0,
-            canUseMcpTools: connectedMcpServers.length > 0,
-          },
+          coordinator: coordinatorContext,
         },
       });
     }
@@ -1022,8 +1090,6 @@ export function query(
 
     return nextPrompt;
   };
-
-  let systemPrompt = buildManagedSystemPrompt();
 
   // ------------------------------------------------------------------
   // Session resume — restore prior history if requested
@@ -1053,9 +1119,12 @@ export function query(
       initialMessages = [];
     }
   }
-  for (const notification of __internal_collectTrailingTaskNotifications(initialMessages)) {
+  const trailingTaskNotifications = __internal_collectTrailingTaskNotifications(initialMessages);
+  coordinatorTaskNotificationsForPrompt = trailingTaskNotifications;
+  for (const notification of trailingTaskNotifications) {
     recordTaskNotificationObservation(currentTurnObservation, notification);
   }
+  let systemPrompt = buildManagedSystemPrompt();
 
   // ------------------------------------------------------------------
   // Conversation loop
@@ -1628,6 +1697,7 @@ export function query(
     if (mcpReadyPromise) {
       await mcpReadyPromise;
     }
+    const runtimeSnapshot = runtime.buildSnapshot();
     const [commands, models, account, agents, skills] = await Promise.all([
       queryObj.supportedCommands(),
       queryObj.supportedModels(),
@@ -1643,6 +1713,7 @@ export function query(
       available_output_styles: ['text', 'stream-json'],
       models,
       account,
+      capability_snapshot: runtimeSnapshot.capabilitySnapshot,
       fast_mode_state: undefined,
     };
   };
@@ -1728,11 +1799,7 @@ export function query(
       return null;
     }
 
-    try {
-      return JSON.parse(raw) as Record<string, unknown>;
-    } catch {
-      return { raw_output: raw };
-    }
+    return buildBackgroundTaskInspectionFromPayload(raw, taskId);
   };
 
   queryObj.stopTask = async (_taskId: string) => {
@@ -2353,6 +2420,89 @@ function normalizeOptionalString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function asUnknownRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function getTaskStringField(record: Record<string, unknown> | undefined, key: string): string | undefined {
+  if (!record) return undefined;
+  return normalizeOptionalString(record[key]);
+}
+
+function getTaskNumberField(record: Record<string, unknown> | undefined, key: string): number | undefined {
+  if (!record) return undefined;
+  const value = record[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function getTaskContentText(content: unknown): string | undefined {
+  if (!Array.isArray(content) || content.length === 0) return undefined;
+  const first = asUnknownRecord(content[0]);
+  return getTaskStringField(first, 'text');
+}
+
+function buildBackgroundTaskInspectionFromPayload(
+  payload: string | Record<string, unknown>,
+  fallbackTaskId: string,
+): BackgroundTaskInspection | null {
+  const payloadRecord = typeof payload === 'string'
+    ? (() => {
+      const raw = payload.trim();
+      if (!raw || raw.startsWith('Error: No task found')) return undefined;
+      try {
+        return JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        return {
+          task_id: fallbackTaskId,
+          type: 'unknown',
+          status: 'unknown',
+          summary: summarizePlainText(raw),
+          output_preview: truncateText(raw, 1200),
+        } as Record<string, unknown>;
+      }
+    })()
+    : payload;
+
+  const record = asUnknownRecord(payloadRecord);
+  if (!record) return null;
+
+  const metadata = asUnknownRecord(record.metadata);
+  const usage = asUnknownRecord(record.usage);
+  const typeValue = getTaskStringField(record, 'type');
+  const output = getTaskStringField(record, 'output')
+    ?? getTaskStringField(record, 'result')
+    ?? getTaskContentText(record.content);
+  const outputPreview = output ? truncateText(output, 1200) : undefined;
+  const summary = getTaskStringField(metadata, 'summary')
+    ?? getTaskStringField(record, 'summary')
+    ?? summarizePlainText(output);
+  const startedAt = getTaskNumberField(metadata, 'start_time')
+    ?? getTaskNumberField(record, 'started_at');
+  const durationMs = getTaskNumberField(record, 'durationMs')
+    ?? getTaskNumberField(record, 'duration_ms')
+    ?? getTaskNumberField(usage, 'duration_ms');
+
+  return {
+    task_id: getTaskStringField(record, 'task_id') ?? fallbackTaskId,
+    type: typeValue === 'bash' || typeValue === 'agent' ? typeValue : 'unknown',
+    status: getTaskStringField(record, 'status') ?? getTaskStringField(record, 'state') ?? 'unknown',
+    ...(getTaskStringField(record, 'state') ? { state: getTaskStringField(record, 'state') } : {}),
+    summary,
+    ...(outputPreview ? { output_preview: outputPreview } : {}),
+    ...(getTaskStringField(record, 'output_file') ? { output_file: getTaskStringField(record, 'output_file') } : {}),
+    ...(getTaskStringField(metadata, 'session_id') ?? getTaskStringField(record, 'session_id')
+      ? { session_id: getTaskStringField(metadata, 'session_id') ?? getTaskStringField(record, 'session_id') }
+      : {}),
+    ...(getTaskStringField(metadata, 'command') ?? getTaskStringField(record, 'command')
+      ? { command: getTaskStringField(metadata, 'command') ?? getTaskStringField(record, 'command') }
+      : {}),
+    ...(typeof startedAt === 'number' ? { started_at: startedAt } : {}),
+    ...(typeof durationMs === 'number' ? { duration_ms: durationMs } : {}),
+  };
 }
 
 function truncateText(text: string, maxLength: number): string {

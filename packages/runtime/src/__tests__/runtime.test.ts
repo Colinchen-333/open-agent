@@ -29,11 +29,61 @@ function createSdkServer(toolName: string, description = 'MCP tool') {
 describe('OpenAgentRuntime MCP wiring', () => {
   it('builds a capability snapshot with layered presets', () => {
     const snapshot = buildCapabilitySnapshot([
-      { name: 'Read', description: 'Read files' },
-      { name: 'Write', description: 'Write files', isReadOnly: false, isConcurrencySafe: false },
-      { name: 'Task', description: 'Spawn agents' },
-      { name: 'mcp__demo__echo', description: 'Echo from MCP' },
-      { name: 'ToolSearch', description: 'Load deferred tools' },
+      {
+        name: 'Read',
+        description: 'Read files',
+        capability: {
+          category: 'filesystem',
+          readOnly: true,
+          concurrencySafe: true,
+          risk: 'low',
+          needsWorkspaceWrite: false,
+        },
+      },
+      {
+        name: 'Write',
+        description: 'Write files',
+        capability: {
+          category: 'filesystem',
+          readOnly: false,
+          concurrencySafe: false,
+          risk: 'medium',
+          needsWorkspaceWrite: true,
+        },
+      },
+      {
+        name: 'Task',
+        description: 'Spawn agents',
+        capability: {
+          category: 'agent',
+          readOnly: false,
+          concurrencySafe: true,
+          risk: 'medium',
+          needsWorkspaceWrite: false,
+        },
+      },
+      {
+        name: 'mcp__demo__echo',
+        description: 'Echo from MCP',
+        capability: {
+          category: 'mcp',
+          readOnly: true,
+          concurrencySafe: true,
+          risk: 'low',
+          needsWorkspaceWrite: false,
+        },
+      },
+      {
+        name: 'ToolSearch',
+        description: 'Load deferred tools',
+        capability: {
+          category: 'utility',
+          readOnly: true,
+          concurrencySafe: true,
+          risk: 'low',
+          needsWorkspaceWrite: false,
+        },
+      },
     ]);
 
     expect(snapshot.totalTools).toBe(5);
@@ -46,6 +96,8 @@ describe('OpenAgentRuntime MCP wiring', () => {
     expect(snapshot.summary.accessCounts.external).toBe(1);
     expect(snapshot.summary.dynamicTools).toBe(1);
     expect(snapshot.summary.mcpTools).toBe(1);
+    expect(snapshot.profiles.find((profile) => profile.toolName === 'Write')?.needsWorkspaceWrite).toBe(true);
+    expect(snapshot.profiles.find((profile) => profile.toolName === 'Write')?.risk).toBe('medium');
     expect(snapshot.presets.map((preset) => preset.name)).toEqual([
       'files',
       'coordination',

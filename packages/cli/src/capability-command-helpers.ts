@@ -13,6 +13,10 @@ export interface CapabilityProfile {
   description: string;
   group: CapabilityGroup;
   access: CapabilityAccess;
+  readOnly?: boolean;
+  concurrencySafe?: boolean;
+  risk?: 'low' | 'medium' | 'high';
+  needsWorkspaceWrite?: boolean;
   source: 'builtin' | 'dynamic' | 'mcp';
   tags: string[];
 }
@@ -157,6 +161,10 @@ export function buildCapabilitySnapshotFromTools(toolNames: string[]): Capabilit
         description: toolName,
         group,
         access,
+        readOnly: access === 'read-only',
+        concurrencySafe: access !== 'mutable',
+        risk: access === 'external' ? 'low' : access === 'mutable' ? 'medium' : 'low',
+        needsWorkspaceWrite: access === 'mutable',
         source,
         tags: [...new Set(tags)],
       };
@@ -220,6 +228,8 @@ function formatList(items: string[], limit = 8): string {
 }
 
 export function formatCapabilitySnapshotForDisplay(snapshot: CapabilitySnapshot): string {
+  const workspaceWriteCount = snapshot.profiles.filter((profile) => profile.needsWorkspaceWrite).length;
+  const highRiskCount = snapshot.profiles.filter((profile) => profile.risk === 'high').length;
   const lines = [
     'Capability snapshot:',
     `  Total tools: ${snapshot.totalTools}`,
@@ -227,6 +237,8 @@ export function formatCapabilitySnapshotForDisplay(snapshot: CapabilitySnapshot)
     `  Mutable:     ${snapshot.summary.accessCounts.mutable}`,
     `  Meta:        ${snapshot.summary.accessCounts.meta}`,
     `  External:    ${snapshot.summary.accessCounts.external}`,
+    `  Workspace write: ${workspaceWriteCount}`,
+    `  High risk:   ${highRiskCount}`,
     `  MCP tools:   ${snapshot.summary.mcpTools}`,
     `  Dynamic:     ${snapshot.summary.dynamicTools}`,
     '',

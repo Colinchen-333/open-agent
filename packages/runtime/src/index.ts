@@ -1,7 +1,12 @@
 import type { AgentDefinition } from '@open-agent/core';
 import type { McpManager, McpServerConfig, McpToolInfo } from '@open-agent/mcp';
 import { McpManager as DefaultMcpManager } from '@open-agent/mcp';
-import type { ToolDefinition, ToolRegistry } from '@open-agent/tools';
+import type {
+  ToolCapabilityCategory,
+  ToolCapabilityExportEntry,
+  ToolDefinition,
+  ToolRegistry,
+} from '@open-agent/tools';
 import {
   createListMcpResourcesTool,
   createReadMcpResourceTool,
@@ -20,13 +25,6 @@ export type CapabilityGroup =
 
 export type CapabilityAccess = 'read-only' | 'mutable' | 'meta' | 'external';
 
-export interface ToolCapabilitySource {
-  name: string;
-  description?: string;
-  isReadOnly?: boolean | ((input: unknown) => boolean);
-  isConcurrencySafe?: boolean | ((input: unknown) => boolean);
-}
-
 export interface ToolCapabilityProfile {
   toolName: string;
   description: string;
@@ -34,6 +32,8 @@ export interface ToolCapabilityProfile {
   access: CapabilityAccess;
   readOnly: boolean;
   concurrencySafe: boolean;
+  risk: 'low' | 'medium' | 'high';
+  needsWorkspaceWrite: boolean;
   source: 'built-in' | 'dynamic' | 'mcp';
   tags: string[];
 }
@@ -236,11 +236,11 @@ export class OpenAgentRuntime {
   }
 
   buildSnapshot(): RuntimeSnapshot {
-    const tools = this.options.toolRegistry.list();
-    const capabilitySnapshot = buildCapabilitySnapshot(tools);
+    const capabilityEntries = this.options.toolRegistry.listCapabilities();
+    const capabilitySnapshot = buildCapabilitySnapshot(capabilityEntries);
 
     return {
-      tools: tools.map((tool) => tool.name),
+      tools: capabilityEntries.map((entry) => entry.name),
       agents: [...(this.options.availableAgents ?? new Map()).entries()].map(([name, definition]) => ({
         name,
         description: definition.description,
@@ -413,66 +413,61 @@ function hasMcpPrefix(name: string): boolean {
   return name.startsWith('mcp__');
 }
 
-function determineCapabilityGroup(name: string): CapabilityGroup {
-  if (FILE_TOOL_NAMES.has(name)) return 'files';
-  if (EXECUTION_TOOL_NAMES.has(name)) return 'execution';
-  if (COORDINATION_TOOL_NAMES.has(name)) return 'coordination';
-  if (INTEGRATION_TOOL_NAMES.has(name) || hasMcpPrefix(name)) return 'integration';
-  if (EXTERNAL_TOOL_NAMES.has(name)) return 'external';
+function determineCapabilityGroup(name: string, category: ToolCapabilityCategory): CapabilityGroup {
+  if (FILE_TOOL_NAMES.has(name) || category === 'filesystem' || category === 'search') return 'files';
+  if (EXECUTION_TOOL_NAMES.has(name) || category === 'shell' || category === 'workspace') return 'execution';
+  if (
+    COORDINATION_TOOL_NAMES.has(name)
+    || category === 'task'
+    || category === 'agent'
+    || category === 'planning'
+  ) {
+    return 'coordination';
+  }
+  if (
+    INTEGRATION_TOOL_NAMES.has(name)
+    || hasMcpPrefix(name)
+    || category === 'skill'
+    || category === 'configuration'
+    || category === 'mcp'
+  ) {
+    return 'integration';
+  }
+  if (EXTERNAL_TOOL_NAMES.has(name) || category === 'web') return 'external';
   return 'utility';
 }
 
-function determineCapabilityAccess(tool: ToolCapabilitySource, group: CapabilityGroup): CapabilityAccess {
-  if (hasMcpPrefix(tool.name) || group === 'external') {
+function determineCapabilityAccess(entry: ToolCapabilityExportEntry, group: CapabilityGroup): CapabilityAccess {
+  if (hasMcpPrefix(entry.name) || group === 'external') {
     return 'external';
   }
-  if (MUTABLE_TOOL_NAMES.has(tool.name)) {
+  if (MUTABLE_TOOL_NAMES.has(entry.name)) {
     return 'mutable';
   }
-  if (tool.name === 'Skill' || tool.name === 'ToolSearch' || tool.name === 'Config' || group === 'integration') {
+  if (entry.name === 'Skill' || entry.name === 'ToolSearch' || entry.name === 'Config' || group === 'integration') {
     return 'meta';
   }
   if (group === 'coordination') {
     return 'meta';
   }
-  if (typeof tool.isReadOnly === 'boolean') {
-    return tool.isReadOnly ? 'read-only' : 'mutable';
-  }
-  return (
-    group === 'files'
-    || group === 'utility'
-  ) ? 'read-only' : 'mutable';
+  return entry.capability.readOnly ? 'read-only' : 'mutable';
 }
 
-function determineCapabilitySource(tool: ToolCapabilitySource): 'built-in' | 'dynamic' | 'mcp' {
-  if (hasMcpPrefix(tool.name) || tool.name === 'ListMcpResourcesTool' || tool.name === 'ReadMcpResourceTool') {
+function determineCapabilitySource(entry: ToolCapabilityExportEntry): 'built-in' | 'dynamic' | 'mcp' {
+  if (hasMcpPrefix(entry.name) || entry.name === 'ListMcpResourcesTool' || entry.name === 'ReadMcpResourceTool') {
     return 'mcp';
   }
-  if (tool.name === 'ToolSearch') {
+  if (entry.name === 'ToolSearch') {
     return 'dynamic';
   }
   return 'built-in';
 }
 
-function resolveReadOnly(tool: ToolCapabilitySource): boolean {
-  if (typeof tool.isReadOnly === 'boolean') {
-    return tool.isReadOnly;
-  }
-  return determineCapabilityAccess(tool, determineCapabilityGroup(tool.name)) === 'read-only';
-}
-
-function resolveConcurrencySafe(tool: ToolCapabilitySource): boolean {
-  if (typeof tool.isConcurrencySafe === 'boolean') {
-    return tool.isConcurrencySafe;
-  }
-  return true;
-}
-
-function buildCapabilityProfile(tool: ToolCapabilitySource): ToolCapabilityProfile {
-  const group = determineCapabilityGroup(tool.name);
-  const readOnly = resolveReadOnly(tool);
-  const concurrencySafe = resolveConcurrencySafe(tool);
-  const access = determineCapabilityAccess(tool, group);
+function buildCapabilityProfile(entry: ToolCapabilityExportEntry): ToolCapabilityProfile {
+  const group = determineCapabilityGroup(entry.name, entry.capability.category);
+  const readOnly = entry.capability.readOnly;
+  const concurrencySafe = entry.capability.concurrencySafe;
+  const access = determineCapabilityAccess(entry, group);
   const tags = [
     group,
     access,
@@ -480,19 +475,23 @@ function buildCapabilityProfile(tool: ToolCapabilitySource): ToolCapabilityProfi
     concurrencySafe ? 'parallel-safe' : 'serialized',
   ];
 
-  if (hasMcpPrefix(tool.name)) tags.push('mcp');
+  if (hasMcpPrefix(entry.name)) tags.push('mcp');
   if (group === 'external') tags.push('network');
   if (group === 'coordination') tags.push('orchestration');
   if (group === 'execution') tags.push('workspace');
+  if (entry.capability.needsWorkspaceWrite) tags.push('workspace-write');
+  if (entry.capability.tags) tags.push(...entry.capability.tags);
 
   return {
-    toolName: tool.name,
-    description: tool.description ?? tool.name,
+    toolName: entry.name,
+    description: entry.description ?? entry.name,
     group,
     access,
     readOnly,
     concurrencySafe,
-    source: determineCapabilitySource(tool),
+    risk: entry.capability.risk,
+    needsWorkspaceWrite: entry.capability.needsWorkspaceWrite,
+    source: determineCapabilitySource(entry),
     tags: [...new Set(tags)],
   };
 }
@@ -511,9 +510,9 @@ function buildCapabilityPreset(group: CapabilityGroup, profiles: ToolCapabilityP
   };
 }
 
-export function buildCapabilitySnapshot(tools: ToolCapabilitySource[]): CapabilitySnapshot {
-  const profiles = tools
-    .map((tool) => buildCapabilityProfile(tool))
+export function buildCapabilitySnapshot(entries: ToolCapabilityExportEntry[]): CapabilitySnapshot {
+  const profiles = entries
+    .map((entry) => buildCapabilityProfile(entry))
     .sort((left, right) =>
       left.group.localeCompare(right.group) || left.toolName.localeCompare(right.toolName));
 
