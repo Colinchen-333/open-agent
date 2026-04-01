@@ -61,7 +61,7 @@ const READ_ONLY_PATTERNS: PatternWithReason[] = [
   [/^\s*(cat|head|tail|less|more|wc|cut|sort|uniq|stat)\b/i, 'read-only file inspection', 'read'],
   [/^\s*(rg|grep|find|fd)\b/i, 'search', 'search'],
   [/^\s*git\s+(status|diff|log|show|branch|rev-parse)\b/i, 'git inspection', 'git-read'],
-  [/^\s*echo\b/i, 'stdout only', 'stdout'],
+  [/^\s*echo\b[^|;&<>]*$/i, 'stdout only', 'stdout'],
   [/^\s*(node|python|python3|ruby|go|cargo|bun|npm)\s+(-v|--version|version)\b/i, 'version check', 'inspect'],
 ];
 
@@ -93,28 +93,49 @@ export function classifyBashCommand(command: string): BashRiskClassification {
     return { level: 'read-only', reason: 'empty command', categories: ['inspect'] };
   }
 
-  const destructive = findMatch(trimmed, DESTRUCTIVE_PATTERNS);
-  if (destructive) {
-    return { level: 'destructive', reason: destructive.reason, categories: destructive.categories };
+  const segments = trimmed
+    .split(/&&|\|\||;|\n/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+
+  for (const segment of segments) {
+    const destructive = findMatch(segment, DESTRUCTIVE_PATTERNS);
+    if (destructive) {
+      return { level: 'destructive', reason: destructive.reason, categories: destructive.categories };
+    }
+
+    const system = findMatch(segment, SYSTEM_PATTERNS);
+    if (system) {
+      return { level: 'system', reason: system.reason, categories: system.categories };
+    }
+
+    if (SYSTEM_PATH_WRITE_HINT.test(segment) && WRITE_VERB_HINT.test(segment)) {
+      return { level: 'system', reason: 'write-like operation targets a system path', categories: ['system-write'] };
+    }
+
+    const networkPipe = findMatch(segment, NETWORK_PIPE_PATTERNS);
+    if (networkPipe) {
+      return { level: 'network-pipe', reason: networkPipe.reason, categories: networkPipe.categories };
+    }
+
+    const network = findMatch(segment, NETWORK_PATTERNS);
+    if (network) {
+      return { level: 'network', reason: network.reason, categories: network.categories };
+    }
   }
 
-  const system = findMatch(trimmed, SYSTEM_PATTERNS);
-  if (system) {
-    return { level: 'system', reason: system.reason, categories: system.categories };
+  if (segments.length > 1 && segments.every((segment) => findMatch(segment, READ_ONLY_PATTERNS))) {
+    return { level: 'read-only', reason: 'read-only command chain', categories: ['inspection', 'chain'] };
   }
 
-  if (SYSTEM_PATH_WRITE_HINT.test(trimmed) && WRITE_VERB_HINT.test(trimmed)) {
-    return { level: 'system', reason: 'write-like operation targets a system path', categories: ['system-write'] };
-  }
-
-  const networkPipe = findMatch(trimmed, NETWORK_PIPE_PATTERNS);
-  if (networkPipe) {
-    return { level: 'network-pipe', reason: networkPipe.reason, categories: networkPipe.categories };
-  }
-
-  const network = findMatch(trimmed, NETWORK_PATTERNS);
-  if (network) {
-    return { level: 'network', reason: network.reason, categories: network.categories };
+  if (
+    segments.length > 1 &&
+    segments.every((segment) =>
+      findMatch(segment, READ_ONLY_PATTERNS)
+      || findMatch(segment, WORKSPACE_WRITE_PATTERNS)
+    )
+  ) {
+    return { level: 'workspace-write', reason: 'workspace mutation command chain', categories: ['workspace-write', 'chain'] };
   }
 
   const readOnly = findMatch(trimmed, READ_ONLY_PATTERNS);

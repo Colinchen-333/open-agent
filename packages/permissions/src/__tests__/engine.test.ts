@@ -139,6 +139,12 @@ describe('PermissionEngine', () => {
       expect(decision.behavior).toBe('ask');
       expect(decision.reason).toContain('unclassified bash command');
     });
+
+    it('allows local mixed command chains', () => {
+      const decision = engine.evaluate(req('Bash', { command: 'git status && mkdir -p tmp/output' }));
+      expect(decision.behavior).toBe('allow');
+      expect(decision.reason).toContain('workspace-write bash');
+    });
   });
 
   // ---------------------------------------------------------------------------
