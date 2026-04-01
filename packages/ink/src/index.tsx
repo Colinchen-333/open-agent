@@ -1,3 +1,11 @@
-// @open-agent/ink — React + Ink terminal UI
+export { App } from './App.js';
+export { renderApp, type RenderOptions } from './render.js';
 export { StoreProvider, useStore } from './hooks/useStore.js';
+export { useStreamEvents } from './hooks/useStreamEvents.js';
+export { MessageList } from './components/MessageList.js';
+export { CostBar } from './components/CostBar.js';
 export { Spinner } from './components/Spinner.js';
+export { ToolProgress } from './components/ToolProgress.js';
+export { PermissionPrompt } from './components/PermissionPrompt.js';
+export { PromptInput } from './components/PromptInput.js';
+export { REPL } from './components/REPL.js';
