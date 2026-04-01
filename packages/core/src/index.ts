@@ -22,6 +22,7 @@ export {
   type TaskNotificationStatus,
   type TaskOrchestrationTemplates,
 } from './task-notification.js';
+export { StreamingToolExecutor, type ToolUseBlock } from './tool-executor.js';
 export {
   exec,
   execSync,
