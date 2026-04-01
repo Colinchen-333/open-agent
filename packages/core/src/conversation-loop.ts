@@ -15,7 +15,23 @@ import { StreamingToolExecutor } from './tool-executor.js';
  */
 export interface PermissionChecker {
   evaluate(
-    request: { toolName: string; input: unknown; toolUseId?: string },
+    request: {
+      toolName: string;
+      input: unknown;
+      toolUseId?: string;
+      metadata?: {
+        readOnly?: boolean;
+        destructive?: boolean;
+        openWorld?: boolean;
+        source?: 'builtin' | 'dynamic' | 'mcp';
+        serverName?: string;
+        capability?: {
+          category?: string;
+          risk?: 'low' | 'medium' | 'high';
+          needsWorkspaceWrite?: boolean;
+        };
+      };
+    },
   ): { behavior: 'allow' | 'deny' | 'ask'; reason?: string } | Promise<{ behavior: 'allow' | 'deny' | 'ask'; reason?: string }>;
   addRule(behavior: 'allow' | 'deny' | 'ask', rule: { toolName: string; ruleContent?: string }): void;
 }
@@ -308,6 +324,38 @@ export class ConversationLoop {
       }
     }
     return typeof raw === 'boolean' ? raw : defaultValue;
+  }
+
+  private permissionMetadata(tool: ToolDefinition, input: unknown) {
+    const readOnly = this.toolFlag(tool, 'isReadOnly', input, false);
+    const capability = tool.capability
+      ? {
+          category: tool.capability.category,
+          risk: tool.capability.risk,
+          needsWorkspaceWrite: tool.capability.needsWorkspaceWrite,
+        }
+      : undefined;
+    const tags = tool.capability?.tags ?? [];
+    const source = tags.includes('mcp')
+      ? 'mcp'
+      : (tool.name === 'ToolSearch' ? 'dynamic' : 'builtin');
+    const openWorld = tags.includes('network') || tags.includes('external');
+    const destructive = tool.capability?.risk === 'high';
+    const serverName = source === 'mcp'
+      ? (() => {
+          const parts = tool.name.split('__');
+          return parts.length >= 3 ? parts[1] : undefined;
+        })()
+      : undefined;
+
+    return {
+      readOnly,
+      destructive,
+      openWorld,
+      source,
+      ...(serverName ? { serverName } : {}),
+      ...(capability ? { capability } : {}),
+    };
   }
 
   private interruptedResult(
@@ -970,6 +1018,7 @@ export class ConversationLoop {
             toolName: toolUse.name,
             input: toolUse.input,
             toolUseId: toolUse.id,
+            metadata: this.permissionMetadata(tool, toolUse.input),
           });
 
           if (decision.behavior === 'deny') {

@@ -20,6 +20,23 @@ const SAFE_TOOLS = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQue
 // File-system tools that operate on paths — subject to allowedPaths/deniedPaths checks
 const FILE_SYSTEM_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit'];
 
+function isMetadataReadOnly(request: PermissionRequest): boolean {
+  return request.metadata?.readOnly === true;
+}
+
+function isMetadataDestructive(request: PermissionRequest): boolean {
+  return request.metadata?.destructive === true || request.metadata?.capability?.risk === 'high';
+}
+
+function isMetadataOpenWorld(request: PermissionRequest): boolean {
+  return request.metadata?.openWorld === true;
+}
+
+function dynamicReadOnlyReason(request: PermissionRequest): string {
+  const source = request.metadata?.source === 'mcp' ? 'read-only MCP tool' : 'read-only tool';
+  return `${source}${request.metadata?.serverName ? ` from ${request.metadata.serverName}` : ''}`;
+}
+
 export class PermissionEngine {
   private mode: PermissionMode;
   private rules: {
@@ -81,6 +98,9 @@ export class PermissionEngine {
       if (READ_ONLY_TOOLS.includes(request.toolName)) {
         return { behavior: 'allow', reason: 'read-only in plan mode' };
       }
+      if (isMetadataReadOnly(request) && !isMetadataOpenWorld(request) && !isMetadataDestructive(request)) {
+        return { behavior: 'allow', reason: `${dynamicReadOnlyReason(request)} in plan mode` };
+      }
       return { behavior: 'deny', reason: 'plan mode: only read-only tools allowed' };
     }
 
@@ -116,6 +136,18 @@ export class PermissionEngine {
       // Always-safe tools need no confirmation
       if (SAFE_TOOLS.includes(request.toolName)) {
         return { behavior: 'allow', reason: 'safe tool' };
+      }
+
+      if (isMetadataDestructive(request)) {
+        return { behavior: 'ask', reason: 'destructive tool requires approval' };
+      }
+
+      if (isMetadataOpenWorld(request)) {
+        return { behavior: 'ask', reason: 'open-world tool requires approval' };
+      }
+
+      if (isMetadataReadOnly(request)) {
+        return { behavior: 'allow', reason: dynamicReadOnlyReason(request) };
       }
 
       // Bash commands are audited for destructive patterns

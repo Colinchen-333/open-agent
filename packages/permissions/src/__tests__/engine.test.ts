@@ -63,6 +63,33 @@ describe('PermissionEngine', () => {
       const decision = engine.evaluate(req('Edit', { file_path: '/tmp/foo.ts', old_string: 'x', new_string: 'y' }));
       expect(decision.behavior).toBe('ask');
     });
+
+    it('allows dynamic read-only tools when metadata marks them safe', () => {
+      const decision = engine.evaluate({
+        ...req('mcp__docs__lookup'),
+        metadata: {
+          readOnly: true,
+          source: 'mcp',
+          serverName: 'docs',
+        },
+      });
+      expect(decision.behavior).toBe('allow');
+      expect(decision.reason).toContain('read-only MCP tool');
+    });
+
+    it('asks for open-world MCP tools even when they are read-only', () => {
+      const decision = engine.evaluate({
+        ...req('mcp__browser__search'),
+        metadata: {
+          readOnly: true,
+          openWorld: true,
+          source: 'mcp',
+          serverName: 'browser',
+        },
+      });
+      expect(decision.behavior).toBe('ask');
+      expect(decision.reason).toContain('open-world');
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -168,6 +195,18 @@ describe('PermissionEngine', () => {
         const decision = engine.evaluate(req(tool));
         expect(decision.behavior).toBe('deny');
       }
+    });
+
+    it('allows read-only MCP tools in plan mode when they are not open-world', () => {
+      const decision = engine.evaluate({
+        ...req('mcp__repo__symbols'),
+        metadata: {
+          readOnly: true,
+          source: 'mcp',
+          serverName: 'repo',
+        },
+      });
+      expect(decision.behavior).toBe('allow');
     });
   });
 

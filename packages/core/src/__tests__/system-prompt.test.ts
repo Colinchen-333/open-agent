@@ -12,11 +12,47 @@ describe('buildSystemPrompt runtime snapshot', () => {
         agents: [{ name: 'explorer', description: 'Read-only codebase research', model: 'claude-haiku-4-5' }],
         skills: [{ name: 'review-pr', description: 'Review a pull request' }],
         mcpServers: [{ name: 'linear', status: 'connected' }],
+        capabilitySnapshot: {
+          summary: {
+            accessCounts: {
+              'read-only': 4,
+              mutable: 2,
+              meta: 1,
+              external: 1,
+            },
+            mcpTools: 1,
+            dynamicTools: 1,
+          },
+          profiles: [
+            {
+              toolName: 'Bash',
+              risk: 'high',
+              needsWorkspaceWrite: true,
+              source: 'built-in',
+              tags: ['workspace'],
+            },
+            {
+              toolName: 'mcp__browser__search',
+              risk: 'medium',
+              needsWorkspaceWrite: false,
+              source: 'mcp',
+              tags: ['external', 'network'],
+            },
+          ],
+        },
         coordinator: {
           workerTools: ['Read', 'Edit', 'Bash'],
           scratchpadDir: '/tmp/demo/.open-agent/scratchpad',
           canUseSkills: true,
           canUseMcpTools: true,
+          recoveryHints: [
+            {
+              taskId: 'worker-42',
+              status: 'failed',
+              description: 'Refactor payment flow',
+              retryPromptTemplate: 'Retry by narrowing scope.',
+            },
+          ],
         },
       },
     });
@@ -26,8 +62,14 @@ describe('buildSystemPrompt runtime snapshot', () => {
     expect(prompt).toContain('**review-pr**');
     expect(prompt).toContain('**linear**');
     expect(prompt).toContain('## Coordination');
+    expect(prompt).toContain('## Tool capability layers');
+    expect(prompt).toContain('High-risk tools: Bash');
+    expect(prompt).toContain('Open-world MCP tools can reach beyond the workspace');
     expect(prompt).toContain('Worker tool pool: Read, Edit, Bash');
     expect(prompt).toContain('Scratchpad directory: /tmp/demo/.open-agent/scratchpad');
+    expect(prompt).toContain('Recent task recovery hints:');
+    expect(prompt).toContain('`worker-42` (failed)');
+    expect(prompt).toContain('templates: retry');
   });
 
   it('includes fallback tool notes for runtime-managed tools', () => {
@@ -87,6 +129,70 @@ describe('buildSystemPrompt runtime snapshot', () => {
     expect(prompt).toContain('Team and worker notifications are internal signals');
     expect(prompt).toContain('Use `SendMessage` with crisp, self-contained instructions');
     expect(prompt).toContain('Use the shared scratchpad at `/tmp/demo/.open-agent/scratchpad`');
+  });
+
+  it('renders dynamic recovery guidance when coordinator hints are present', () => {
+    const prompt = buildSystemPrompt({
+      cwd: '/tmp/demo',
+      model: 'claude-sonnet-4-6',
+      tools: ['Task'],
+      permissionMode: 'default',
+      runtimeSnapshot: {
+        coordinator: {
+          recoveryHints: [
+            {
+              taskId: 'worker-7',
+              status: 'completed',
+              verificationPromptTemplate: 'Verify changed files and assertions.',
+            },
+          ],
+        },
+      },
+    });
+
+    expect(prompt).toContain('Runtime coordination context includes 1 recent recovery hint(s)');
+  });
+
+  it('renders capability-aware session guidance for risky external tools', () => {
+    const prompt = buildSystemPrompt({
+      cwd: '/tmp/demo',
+      model: 'claude-sonnet-4-6',
+      tools: ['Bash', 'Read'],
+      permissionMode: 'default',
+      runtimeSnapshot: {
+        capabilitySnapshot: {
+          summary: {
+            accessCounts: {
+              'read-only': 1,
+              mutable: 1,
+              meta: 0,
+              external: 1,
+            },
+            mcpTools: 1,
+            dynamicTools: 0,
+          },
+          profiles: [
+            {
+              toolName: 'Bash',
+              risk: 'high',
+              needsWorkspaceWrite: true,
+              source: 'built-in',
+              tags: ['workspace'],
+            },
+            {
+              toolName: 'mcp__browser__search',
+              risk: 'medium',
+              needsWorkspaceWrite: false,
+              source: 'mcp',
+              tags: ['external', 'network'],
+            },
+          ],
+        },
+      },
+    });
+
+    expect(prompt).toContain('Some tools in this session are explicitly marked high-risk');
+    expect(prompt).toContain('Some MCP tools are marked open-world/external');
   });
 
   it('renders communication guidance', () => {

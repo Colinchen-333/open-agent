@@ -858,7 +858,23 @@ export function query(
     permissionEngine.loadFromSettings(loadedSettings as Record<string, any>);
   }
   let effectivePermissionEngine: {
-    evaluate: (request: { toolName: string; input: unknown; toolUseId?: string }) => { behavior: 'allow' | 'deny' | 'ask'; reason?: string } | Promise<{ behavior: 'allow' | 'deny' | 'ask'; reason?: string }>;
+    evaluate: (request: {
+      toolName: string;
+      input: unknown;
+      toolUseId?: string;
+      metadata?: {
+        readOnly?: boolean;
+        destructive?: boolean;
+        openWorld?: boolean;
+        source?: 'builtin' | 'dynamic' | 'mcp';
+        serverName?: string;
+        capability?: {
+          category?: string;
+          risk?: 'low' | 'medium' | 'high';
+          needsWorkspaceWrite?: boolean;
+        };
+      };
+    }) => { behavior: 'allow' | 'deny' | 'ask'; reason?: string } | Promise<{ behavior: 'allow' | 'deny' | 'ask'; reason?: string }>;
     addRule: (behavior: 'allow' | 'deny' | 'ask', rule: { toolName: string; ruleContent?: string }) => void;
     removeRule?: (behavior: 'allow' | 'deny' | 'ask', rule: { toolName: string; ruleContent?: string }) => void;
     setMode?: (mode: string) => void;
@@ -870,7 +886,7 @@ export function query(
   }
 
   const attachBashSandboxPolicy = (
-    request: { toolName: string; input: unknown },
+    request: { toolName: string; input: unknown; metadata?: unknown },
     permissionBehavior?: 'allow' | 'deny' | 'ask',
   ): void => {
     if (request.toolName !== 'Bash') return;
@@ -1075,6 +1091,7 @@ export function query(
           agents: runtimeSnapshot.agents,
           skills: runtimeSnapshot.skills,
           mcpServers: runtimeSnapshot.mcpServers,
+          capabilitySnapshot: runtimeSnapshot.capabilitySnapshot,
           coordinator: coordinatorContext,
         },
       });

@@ -19,6 +19,22 @@ export interface PermissionRequest {
   input: Record<string, unknown>;
   toolUseId: string;
   agentId?: string;
+  metadata?: PermissionRequestMetadata;
+}
+
+export interface PermissionRequestCapabilityMetadata {
+  category?: string;
+  risk?: 'low' | 'medium' | 'high';
+  needsWorkspaceWrite?: boolean;
+}
+
+export interface PermissionRequestMetadata {
+  readOnly?: boolean;
+  destructive?: boolean;
+  openWorld?: boolean;
+  source?: 'builtin' | 'dynamic' | 'mcp';
+  serverName?: string;
+  capability?: PermissionRequestCapabilityMetadata;
 }
 
 export interface PermissionDecision {
@@ -36,8 +52,19 @@ export interface SandboxConfig {
     denyRead?: string[];
   };
   network?: {
+    disabled?: boolean;
     allowedDomains?: string[];
     allowLocalBinding?: boolean;
     allowUnixSockets?: string[];
   };
+}
+
+export interface BashSandboxExecutionPolicy {
+  enforce: boolean;
+  allowWritePaths: string[];
+  denyWritePaths: string[];
+  networkDisabled: boolean;
+  bypassRequested: boolean;
+  bypassAllowed: boolean;
+  reason?: string;
 }

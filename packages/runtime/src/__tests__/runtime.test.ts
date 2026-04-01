@@ -2,7 +2,11 @@ import { describe, expect, it } from 'bun:test';
 import { ToolRegistry, type ToolDefinition } from '@open-agent/tools';
 import { OpenAgentRuntime, buildCapabilitySnapshot } from '../index.js';
 
-function createSdkServer(toolName: string, description = 'MCP tool') {
+function createSdkServer(
+  toolName: string,
+  description = 'MCP tool',
+  annotations?: { readOnly?: boolean; destructive?: boolean; openWorld?: boolean },
+) {
   return {
     type: 'sdk' as const,
     name: 'demo',
@@ -17,6 +21,7 @@ function createSdkServer(toolName: string, description = 'MCP tool') {
               value: { type: 'string' },
             },
           },
+          annotations,
           handler: async (args: Record<string, unknown>) => ({
             echoed: args.value ?? null,
           }),
@@ -133,6 +138,37 @@ describe('OpenAgentRuntime MCP wiring', () => {
     const snapshot = runtime.buildSnapshot();
     expect(snapshot.capabilitySnapshot.presets.map((preset) => preset.name)).toContain('integration');
     expect(snapshot.capabilitySnapshot.summary.mcpTools).toBeGreaterThan(0);
+  });
+
+  it('maps MCP annotations into runtime tool capability metadata', async () => {
+    const registry = new ToolRegistry();
+    const runtime = new OpenAgentRuntime({
+      cwd: '/tmp',
+      toolRegistry: registry,
+      mcp: {
+        toolNameStyle: 'namespaced',
+      },
+    });
+
+    await runtime.initialize();
+    await runtime.setMcpServers({
+      demo: createSdkServer('deploy', 'Deploy remotely', {
+        destructive: true,
+        openWorld: true,
+      }),
+    });
+
+    const tool = registry.get('mcp__demo__deploy');
+    expect(tool?.isReadOnly).toBe(false);
+    expect(tool?.capability?.category).toBe('mcp');
+    expect(tool?.capability?.risk).toBe('high');
+    expect(tool?.capability?.tags).toEqual(expect.arrayContaining(['mcp', 'demo', 'external', 'network', 'destructive']));
+
+    const snapshot = runtime.buildSnapshot();
+    const profile = snapshot.capabilitySnapshot.profiles.find((entry) => entry.toolName === 'mcp__demo__deploy');
+    expect(profile?.source).toBe('mcp');
+    expect(profile?.risk).toBe('high');
+    expect(profile?.tags).toEqual(expect.arrayContaining(['external', 'network']));
   });
 
   it('在 raw 命名模式下移除 MCP 工具时恢复基线工具', async () => {

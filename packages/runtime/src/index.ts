@@ -320,10 +320,28 @@ export class OpenAgentRuntime {
   }
 
   private createMcpToolDefinition(tool: McpToolInfo, runtimeName: string): ToolDefinition {
+    const annotations = tool.annotations;
+    const readOnly = annotations?.readOnly === true;
+    const destructive = annotations?.destructive === true;
+    const openWorld = annotations?.openWorld === true;
+    const capabilityTags = ['mcp', tool.serverName];
+    if (openWorld) capabilityTags.push('external', 'network');
+    if (destructive) capabilityTags.push('destructive');
+    if (readOnly) capabilityTags.push('read-only');
+
     return {
       name: runtimeName,
       description: tool.description ?? '',
       inputSchema: tool.inputSchema ?? { type: 'object', properties: {} },
+      isReadOnly: readOnly,
+      capability: {
+        category: 'mcp',
+        tags: capabilityTags,
+        risk: destructive ? 'high' : openWorld ? 'medium' : readOnly ? 'low' : 'medium',
+        needsWorkspaceWrite: false,
+        readOnly,
+        concurrencySafe: readOnly,
+      },
       execute: async (input: Record<string, unknown>) => {
         const result = await this.mcpManager.callTool(tool.serverName, tool.name, input);
         return this.options.mcp?.formatResult?.(result) ?? result;
