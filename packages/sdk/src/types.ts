@@ -14,8 +14,10 @@ import type {
   SlashCommand,
   PermissionPrompter,
   SettingSource,
+  SessionInfo,
 } from '@open-agent/core';
 import type { SandboxConfig } from '@open-agent/permissions';
+import type { SkillCatalogEntry } from '@open-agent/skills';
 
 export type PermissionRuleValue = {
   toolName: string;
@@ -88,6 +90,8 @@ export interface QueryOptions {
   agent?: string;
   agents?: Record<string, AgentDefinition>;
   allowedTools?: string[];
+  skillDirectories?: string[];
+  includePluginSkills?: boolean;
   continue?: boolean;
   cwd?: string;
   disallowedTools?: string[];
@@ -126,6 +130,12 @@ export interface QueryOptions {
   apiKey?: string;
   /** Custom base URL for the provider API (e.g. a proxy or self-hosted endpoint). */
   baseUrl?: string;
+  /** Preferred natural language for assistant replies. */
+  language?: string;
+  /** Session-scoped output style metadata. */
+  outputStyle?: 'text' | 'stream-json';
+  /** Optional user-facing title stored with session metadata. */
+  sessionTitle?: string;
   outputFormat?: { type: 'json_schema'; schema: Record<string, unknown> };
   permissionMode?: PermissionMode;
   allowDangerouslySkipPermissions?: boolean;
@@ -217,6 +227,9 @@ export interface SessionOptions {
   disallowedTools?: string[];
   hooks?: Partial<Record<HookEvent, any[]>>;
   permissionMode?: PermissionMode;
+  language?: string;
+  outputStyle?: 'text' | 'stream-json';
+  sessionTitle?: string;
 }
 
 // --------------------------------------------------------------------------
@@ -231,6 +244,8 @@ export interface InitializationResult {
   commands: SlashCommand[];
   /** Built-in and custom agents available to this session. */
   agents: AgentInfo[];
+  /** Available skills resolved by the runtime. */
+  skills: SkillCatalogEntry[];
   /** Current output style. */
   output_style: string;
   /** Supported output styles. */
@@ -292,6 +307,8 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   supportedModels(): Promise<ModelInfo[]>;
   /** Return available built-in agent profiles. */
   supportedAgents(): Promise<AgentInfo[]>;
+  /** Return the resolved skill catalog for this session. */
+  supportedSkills(): Promise<SkillCatalogEntry[]>;
   /** Return the runtime status of every configured MCP server. */
   mcpServerStatus(): Promise<McpServerStatus[]>;
   /** Return account/billing information for the active API key. */
@@ -301,6 +318,8 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
    * response shape.
    */
   initializationResult(): Promise<InitializationResult>;
+  /** Return persisted metadata for the current session. */
+  sessionInfo(): Promise<SessionInfo | null>;
   /**
    * Abort the current task.  For a single `query()` call this is equivalent to
    * `interrupt()`.  The `taskId` parameter is accepted for API symmetry with

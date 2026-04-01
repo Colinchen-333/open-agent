@@ -12,11 +12,11 @@ import { query } from '../query.js';
 // ---------------------------------------------------------------------------
 
 describe('query().supportedCommands()', () => {
-  it('returns an array of 22 commands', async () => {
+  it('returns an array of 23 commands', async () => {
     const q = query('test', { model: 'claude-sonnet-4-6' });
     const commands = await q.supportedCommands();
     expect(Array.isArray(commands)).toBe(true);
-    expect(commands).toHaveLength(22);
+    expect(commands).toHaveLength(23);
     q.close();
   });
 
@@ -67,6 +67,8 @@ describe('query().supportedAgents()', () => {
     const names = new Set(agents.map((a) => a.name));
     expect(names.has('Explore')).toBe(true);
     expect(names.has('Plan')).toBe(true);
+    expect(names.has('worker')).toBe(true);
+    expect(names.has('verifier')).toBe(true);
     expect(names.has('Bash')).toBe(true);
     q.close();
   });
@@ -84,6 +86,15 @@ describe('query().supportedAgents()', () => {
     });
     const agents = await q.supportedAgents();
     expect(agents.some((a) => a.name === 'custom_main')).toBe(true);
+    q.close();
+  });
+});
+
+describe('query().supportedSkills()', () => {
+  it('returns a skill catalog array', async () => {
+    const q = query('test', { model: 'claude-sonnet-4-6' });
+    const skills = await q.supportedSkills();
+    expect(Array.isArray(skills)).toBe(true);
     q.close();
   });
 });

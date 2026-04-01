@@ -16,6 +16,7 @@ describe('query().initializationResult()', () => {
     const result = await q.initializationResult();
     expect(result).toHaveProperty('commands');
     expect(result).toHaveProperty('agents');
+    expect(result).toHaveProperty('skills');
     expect(result).toHaveProperty('output_style');
     expect(result).toHaveProperty('available_output_styles');
     expect(result).toHaveProperty('models');
@@ -25,6 +26,7 @@ describe('query().initializationResult()', () => {
     }
     expect(Array.isArray(result.commands)).toBe(true);
     expect(Array.isArray(result.agents)).toBe(true);
+    expect(Array.isArray(result.skills)).toBe(true);
     expect(Array.isArray(result.available_output_styles)).toBe(true);
     expect(typeof result.output_style).toBe('string');
     q.close();
@@ -41,6 +43,7 @@ describe('query().initializationResult()', () => {
       'commands',
       'models',
       'output_style',
+      'skills',
     ]));
     const allowedKeys = new Set([
       'account',
@@ -49,6 +52,7 @@ describe('query().initializationResult()', () => {
       'commands',
       'models',
       'output_style',
+      'skills',
       'fast_mode_state',
     ]);
     expect(keys.every((k) => allowedKeys.has(k))).toBe(true);
@@ -65,6 +69,41 @@ describe('query().initializationResult()', () => {
     const b = await q.initializationResult();
     expect(a).not.toBe(b); // different object reference
     expect(a).toEqual(b);  // same values
+    q.close();
+  });
+
+  it('reflects the configured output style', async () => {
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      outputStyle: 'stream-json',
+    });
+    const result = await q.initializationResult();
+    expect(result.output_style).toBe('stream-json');
+    q.close();
+  });
+});
+
+describe('query().sessionInfo()', () => {
+  it('returns persisted session metadata for the current session', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-session-info-'));
+    const q = query('设计一下 harness', {
+      cwd,
+      model: 'claude-sonnet-4-6',
+      permissionMode: 'acceptEdits',
+      outputStyle: 'stream-json',
+      language: 'Chinese',
+      sessionTitle: 'Harness 对齐',
+    });
+
+    const info = await q.sessionInfo();
+    expect(info).not.toBeNull();
+    expect(info?.cwd).toBe(cwd);
+    expect(info?.model).toBe('claude-sonnet-4-6');
+    expect(info?.permissionMode).toBe('acceptEdits');
+    expect(info?.outputStyle).toBe('stream-json');
+    expect(info?.language).toBe('Chinese');
+    expect(info?.title).toBe('Harness 对齐');
+    expect(info?.createdFromPrompt).toContain('设计一下 harness');
     q.close();
   });
 });

@@ -196,7 +196,12 @@ function _buildSession(
   const cwd = options?.cwd ?? process.cwd();
   if (sessionMgr) {
     try {
-      sessionMgr.ensureSession(cwd, sessionId, options?.model ?? 'unknown');
+      sessionMgr.ensureSession(cwd, sessionId, options?.model ?? 'unknown', {
+        ...(options?.permissionMode ? { permissionMode: options.permissionMode } : {}),
+        ...(options?.outputStyle ? { outputStyle: options.outputStyle } : {}),
+        ...(options?.language ? { language: options.language } : {}),
+        ...(options?.sessionTitle ? { title: options.sessionTitle, summary: options.sessionTitle } : {}),
+      });
     } catch {
       // Non-critical: keep session usable even if metadata initialization fails.
     }
@@ -210,6 +215,22 @@ function _buildSession(
     async *send(message: string): AsyncGenerator<SDKMessage, void> {
       if (closed) {
         throw new Error(`Session ${sessionId} is closed.`);
+      }
+
+       if (sessionMgr) {
+        try {
+          const current = sessionMgr.getSession(cwd, sessionId);
+          if (!current?.createdFromPrompt) {
+            sessionMgr.updateSession(
+              cwd,
+              sessionId,
+              buildPromptSessionMetadata(message, options?.sessionTitle),
+              { touch: false },
+            );
+          }
+        } catch {
+          // Non-critical
+        }
       }
 
       // Each send() uses a fresh query() call with accumulated history
@@ -261,6 +282,41 @@ function _buildSession(
     async [Symbol.asyncDispose](): Promise<void> {
       this.close();
     },
+  };
+}
+
+function normalizeOptionalString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function truncateText(text: string, maxLength: number): string {
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function buildPromptSessionMetadata(
+  prompt: string,
+  explicitTitle?: string,
+): { title?: string; summary?: string; createdFromPrompt?: string } {
+  const normalized = normalizeOptionalString(prompt);
+  const normalizedTitle = normalizeOptionalString(explicitTitle);
+  if (!normalized && !normalizedTitle) return {};
+
+  return {
+    ...(normalizedTitle
+      ? { title: normalizedTitle }
+      : normalized
+        ? { title: truncateText(normalized.split('\n')[0].replace(/\s+/g, ' '), 80) }
+        : {}),
+    ...(normalized
+      ? {
+          summary: truncateText(normalized.replace(/\s+/g, ' '), 200),
+          createdFromPrompt: truncateText(normalized, 4000),
+        }
+      : normalizedTitle
+        ? { summary: normalizedTitle }
+        : {}),
   };
 }
 
