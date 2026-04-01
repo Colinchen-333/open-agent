@@ -130,6 +130,7 @@ type SessionControlMethods = Pick<
   | 'listBackgroundTasks'
   | 'getBackgroundTask'
   | 'stopTask'
+  | 'streamInput'
   | 'reconnectMcpServer'
   | 'toggleMcpServer'
   | 'setMcpServers'
@@ -415,6 +416,7 @@ function _buildSession(
     listBackgroundTasks: (...args) => q.listBackgroundTasks(...args),
     getBackgroundTask: (...args) => q.getBackgroundTask(...args),
     stopTask: (...args) => q.stopTask(...args),
+    streamInput: (...args) => q.streamInput(...args),
     reconnectMcpServer: (...args) => q.reconnectMcpServer(...args),
     toggleMcpServer: (...args) => q.toggleMcpServer(...args),
     setMcpServers: (...args) => q.setMcpServers(...args),
@@ -664,6 +666,7 @@ export function unstable_v2_createSession(
     listBackgroundTasks: (...args) => q.listBackgroundTasks(...args),
     getBackgroundTask: (...args) => q.getBackgroundTask(...args),
     stopTask: (...args) => q.stopTask(...args),
+    streamInput: (...args) => q.streamInput(...args),
     reconnectMcpServer: (...args) => q.reconnectMcpServer(...args),
     toggleMcpServer: (...args) => q.toggleMcpServer(...args),
     setMcpServers: (...args) => q.setMcpServers(...args),

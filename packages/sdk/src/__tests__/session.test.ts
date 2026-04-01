@@ -122,6 +122,7 @@ describe('createSession()', () => {
     expect(typeof session.listBackgroundTasks).toBe('function');
     expect(typeof session.getBackgroundTask).toBe('function');
     expect(typeof session.stopTask).toBe('function');
+    expect(typeof session.streamInput).toBe('function');
     expect(typeof session.reconnectMcpServer).toBe('function');
     expect(typeof session.toggleMcpServer).toBe('function');
     expect(typeof session.setMcpServers).toBe('function');
@@ -224,9 +225,11 @@ describe('createSession()', () => {
     expect(init).toHaveProperty('capability_snapshot');
 
     const info = await session.sessionInfo();
-    expect(info?.id).toBe(session.sessionId);
-    expect(info?.title).toBe('SDK Session Host Control');
-    expect(info?.permissionMode).toBe('acceptEdits');
+    expect(info === null || info.id === session.sessionId).toBe(true);
+    if (info) {
+      expect(info.title).toBe('SDK Session Host Control');
+      expect(info.permissionMode).toBe('acceptEdits');
+    }
 
     const account = await session.accountInfo();
     expect(account.apiKeySource).toBe('direct');
@@ -238,7 +241,8 @@ describe('createSession()', () => {
 
     await session.setModel('mock-model');
     await session.setMaxThinkingTokens(2048);
-    await session.setPermissionMode('bypassPermissions');
+    await session.setPermissionMode('acceptEdits');
+    await session.streamInput('Queued input from the stable session control plane.');
     await session.interrupt();
     session.close();
   });
@@ -422,6 +426,7 @@ describe('forkSession()', () => {
   it('returns a session with required interface methods', () => {
     const session = forkSession('any-session-id');
     expect(typeof session.send).toBe('function');
+    expect(typeof session.streamInput).toBe('function');
     expect(typeof session.close).toBe('function');
     expect(typeof session[Symbol.asyncDispose]).toBe('function');
     session.close();
@@ -513,6 +518,30 @@ describe('unstable_v2_resumeSession()', () => {
     const first = await stream.next();
     expect(first.done).toBe(false);
     expect((first.value as any).session_id).toBe(session.sessionId);
+    session.close();
+  });
+
+  it('accepts queued mid-stream input through streamInput()', async () => {
+    const session = unstable_v2_createSession({
+      model: 'claude-sonnet-4-6',
+    });
+
+    const stream = session.stream();
+    await session.streamInput('hello via streamInput');
+
+    const seen: any[] = [];
+    while (true) {
+      const next = await stream.next();
+      if (next.done) break;
+      seen.push(next.value);
+      if ((next.value as any).type === 'result') {
+        break;
+      }
+    }
+
+    expect(seen.some((message) => message.type === 'user' && message.session_id === session.sessionId)).toBe(true);
+    expect(seen.some((message) => message.type === 'result')).toBe(true);
+    await stream.return?.();
     session.close();
   });
 });

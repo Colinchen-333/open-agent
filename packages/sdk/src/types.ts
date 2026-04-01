@@ -815,6 +815,8 @@ export interface Session {
   getBackgroundTask(taskId: string, options?: { block?: boolean; timeout?: number }): Promise<BackgroundTaskInspection | null>;
   /** Abort the current task. */
   stopTask(taskId: string): Promise<void>;
+  /** Push an additional user message into the running session mid-stream. */
+  streamInput(input: AsyncIterable<SDKUserMessage> | string): Promise<void>;
   /** Reconnect a specific MCP server by name (disconnect -> reconnect). */
   reconnectMcpServer(serverName: string): Promise<void>;
   /** Enable or disable a specific MCP server without removing its config. */
