@@ -69,6 +69,10 @@ import type {
   TeamMessageInput,
   TeamInboxOptions,
   TeamInboxAcknowledgeInput,
+  TeamApprovalRecord,
+  TeamApprovalListOptions,
+  TeamApprovalResponseInput,
+  TeamApprovalResponseResult,
   TimelineInboxOptions,
   SDKOrchestrationEvent,
   SubscribeOrchestrationEventsOptions,
@@ -425,6 +429,35 @@ export function query(
     ...(message.idleReason ? { idleReason: message.idleReason } : {}),
     ...(message.routing ? { routing: JSON.parse(JSON.stringify(message.routing)) } : {}),
   });
+  const isTeamApprovalRequestType = (type: TeamMessage['type']): type is TeamApprovalRecord['requestType'] =>
+    type === 'shutdown_request' || type === 'plan_approval_request';
+  const toTeamApprovalRecord = (
+    teamName: string,
+    memberName: string,
+    entry: TeamInboxEntry,
+  ): TeamApprovalRecord | null => {
+    if (!isTeamApprovalRequestType(entry.message.type) || !entry.message.requestId) {
+      return null;
+    }
+    return {
+      ...(entry.id ? { messageId: entry.id } : {}),
+      teamName,
+      memberName,
+      requestType: entry.message.type,
+      requestId: entry.message.requestId,
+      from: entry.message.from,
+      ...(entry.message.to ? { to: entry.message.to } : {}),
+      content: entry.message.content,
+      ...(entry.message.summary ? { summary: entry.message.summary } : {}),
+      timestamp: entry.message.timestamp,
+      ...(entry.readAt ? { readAt: entry.readAt } : {}),
+    };
+  };
+  const getTeamApprovalResponseType = (
+    requestType: TeamApprovalRecord['requestType'],
+  ): TeamMessageRecord['type'] => (
+    requestType === 'shutdown_request' ? 'shutdown_response' : 'plan_approval_response'
+  );
   const toTimelineTeamMessage = (message: TeamMessageRecord): SDKTimelineItem => ({
     kind: 'team_message',
     ...(message.messageId ? { timelineId: message.messageId, cursor: message.messageId } : {}),
@@ -2031,6 +2064,63 @@ export function query(
     const teamName = resolveTeamName(input?.teamName);
     return {
       acknowledged: sdkTeamManager.acknowledgeInboxMessages(teamName, input.memberName, input.messageIds),
+    };
+  };
+
+  queryObj.listPendingTeamApprovals = async (options: TeamApprovalListOptions) => {
+    const teamName = resolveTeamName(options?.teamName);
+    const entries = sdkTeamManager.readInboxEntries(teamName, options.memberName, {
+      consume: false,
+      unreadOnly: options?.unreadOnly,
+      after: options?.after,
+      limit: options?.limit,
+    });
+    return entries
+      .map((entry) => toTeamApprovalRecord(teamName, options.memberName, entry))
+      .filter((entry): entry is TeamApprovalRecord => entry !== null);
+  };
+
+  queryObj.respondToTeamApproval = async (
+    input: TeamApprovalResponseInput,
+  ): Promise<TeamApprovalResponseResult> => {
+    const teamName = resolveTeamName(input?.teamName);
+    const entries = sdkTeamManager.readInboxEntries(teamName, input.memberName, {
+      consume: false,
+    });
+    const matchedEntry = entries.find((entry) => (
+      (input.messageId && entry.id === input.messageId)
+      || (input.requestId && entry.message.requestId === input.requestId)
+    ));
+    if (!matchedEntry) {
+      throw new Error(
+        `Pending team approval not found for member "${input.memberName}" in team "${teamName}".`,
+      );
+    }
+    const request = toTeamApprovalRecord(teamName, input.memberName, matchedEntry);
+    if (!request) {
+      throw new Error(
+        `Inbox entry "${matchedEntry.id}" is not a pending approval request.`,
+      );
+    }
+
+    const responseMessage: TeamMessage = {
+      type: getTeamApprovalResponseType(request.requestType),
+      from: input.from ?? input.memberName,
+      to: request.from,
+      content: input.feedback ?? '',
+      ...(input.feedback ? { summary: summarizePlainText(input.feedback) } : {}),
+      timestamp: new Date().toISOString(),
+      requestId: request.requestId,
+      approve: input.approve,
+    };
+    sdkTeamManager.sendMessage(teamName, responseMessage);
+
+    return {
+      acknowledged: input.acknowledge === false || !matchedEntry.id
+        ? 0
+        : sdkTeamManager.acknowledgeInboxMessages(teamName, input.memberName, [matchedEntry.id]),
+      request,
+      response: toTeamMessageRecord(teamName, responseMessage),
     };
   };
 

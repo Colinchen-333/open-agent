@@ -505,6 +505,49 @@ export interface TeamInboxAcknowledgeInput {
   messageIds: string[];
 }
 
+export type TeamApprovalRequestType = 'shutdown_request' | 'plan_approval_request';
+
+export type TeamApprovalResponseType = 'shutdown_response' | 'plan_approval_response';
+
+export interface TeamApprovalRecord {
+  messageId?: string;
+  teamName: string;
+  memberName: string;
+  requestType: TeamApprovalRequestType;
+  requestId: string;
+  from: string;
+  to?: string;
+  content: string;
+  summary?: string;
+  timestamp: string;
+  readAt?: string;
+}
+
+export interface TeamApprovalListOptions {
+  teamName?: string;
+  memberName: string;
+  unreadOnly?: boolean;
+  after?: string;
+  limit?: number;
+}
+
+export interface TeamApprovalResponseInput {
+  teamName?: string;
+  memberName: string;
+  messageId?: string;
+  requestId?: string;
+  approve: boolean;
+  from?: string;
+  feedback?: string;
+  acknowledge?: boolean;
+}
+
+export interface TeamApprovalResponseResult {
+  acknowledged: number;
+  request: TeamApprovalRecord;
+  response: TeamMessageRecord;
+}
+
 export type SDKOrchestrationEventKind = 'worker_lifecycle' | 'worker_tool';
 
 export interface SDKOrchestrationEvent {
@@ -633,6 +676,10 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   readTeamInbox(options: TeamInboxOptions): Promise<TeamMessageRecord[]>;
   /** Mark specific inbox messages as read without consuming them. */
   acknowledgeTeamInbox(input: TeamInboxAcknowledgeInput): Promise<{ acknowledged: number }>;
+  /** List unresolved team approvals as structured control objects. */
+  listPendingTeamApprovals(options: TeamApprovalListOptions): Promise<TeamApprovalRecord[]>;
+  /** Respond to a pending team approval and optionally acknowledge the request. */
+  respondToTeamApproval(input: TeamApprovalResponseInput): Promise<TeamApprovalResponseResult>;
   /** Return the unread inbox count for a member in the selected or named team. */
   getTeamInboxCount(memberName: string, options?: { teamName?: string }): Promise<number>;
   /** Read the selected team inbox and normalize messages into unified timeline items. */
@@ -794,6 +841,10 @@ export interface Session {
   readTeamInbox(options: TeamInboxOptions): Promise<TeamMessageRecord[]>;
   /** Mark specific inbox messages as read without consuming them. */
   acknowledgeTeamInbox(input: TeamInboxAcknowledgeInput): Promise<{ acknowledged: number }>;
+  /** List unresolved team approvals as structured control objects. */
+  listPendingTeamApprovals(options: TeamApprovalListOptions): Promise<TeamApprovalRecord[]>;
+  /** Respond to a pending team approval and optionally acknowledge the request. */
+  respondToTeamApproval(input: TeamApprovalResponseInput): Promise<TeamApprovalResponseResult>;
   /** Return the unread inbox count for a member in the selected or named team. */
   getTeamInboxCount(memberName: string, options?: { teamName?: string }): Promise<number>;
   /** Read the selected team inbox and normalize messages into unified timeline items. */

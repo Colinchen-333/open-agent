@@ -120,6 +120,8 @@ describe('createSession()', () => {
     expect(typeof session.initializationResult).toBe('function');
     expect(typeof session.sessionInfo).toBe('function');
     expect(typeof session.acknowledgeTeamInbox).toBe('function');
+    expect(typeof session.listPendingTeamApprovals).toBe('function');
+    expect(typeof session.respondToTeamApproval).toBe('function');
     expect(typeof session.listBackgroundTasks).toBe('function');
     expect(typeof session.getBackgroundTask).toBe('function');
     expect(typeof session.stopTask).toBe('function');
@@ -217,6 +219,50 @@ describe('createSession()', () => {
     const inbox = await session.readTeamInbox({ memberName: 'alice', consume: true });
     expect(inbox).toHaveLength(1);
     expect(inbox[0]?.teamName).toBe(teamName);
+    session.close();
+  });
+
+  it('forwards team approval control methods through the stable session handle', async () => {
+    const session = createSession({
+      model: 'mock-model',
+      provider: makeMockProvider([textResponse('unused')]),
+    } as any);
+
+    const teamName = `approval-team-${Date.now()}`;
+    await session.createTeam({ name: teamName });
+
+    const request = await session.sendTeamMessage({
+      teamName,
+      type: 'plan_approval_request',
+      from: 'worker-1',
+      recipient: 'lead',
+      content: 'Approve the plan.',
+      summary: 'approval needed',
+    });
+
+    const pending = await session.listPendingTeamApprovals({
+      teamName,
+      memberName: 'lead',
+      unreadOnly: true,
+    });
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.requestId).toBe(request.requestId);
+
+    const response = await session.respondToTeamApproval({
+      teamName,
+      memberName: 'lead',
+      messageId: pending[0]!.messageId,
+      approve: true,
+      feedback: 'Ship it.',
+    });
+    expect(response.acknowledged).toBe(1);
+    expect(response.response.type).toBe('plan_approval_response');
+    expect(response.response.to).toBe('worker-1');
+
+    const workerInbox = await session.readTeamInbox({ teamName, memberName: 'worker-1', consume: true });
+    expect(workerInbox).toHaveLength(1);
+    expect(workerInbox[0]?.type).toBe('plan_approval_response');
+    expect(workerInbox[0]?.approve).toBe(true);
     session.close();
   });
 
