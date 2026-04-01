@@ -171,6 +171,38 @@ describe('OpenAgentRuntime MCP wiring', () => {
     expect(profile?.tags).toEqual(expect.arrayContaining(['external', 'network']));
   });
 
+  it('maps read-only MCP annotations into runtime access metadata', async () => {
+    const registry = new ToolRegistry();
+    const runtime = new OpenAgentRuntime({
+      cwd: '/tmp',
+      toolRegistry: registry,
+      mcp: {
+        toolNameStyle: 'namespaced',
+      },
+    });
+
+    await runtime.initialize();
+    await runtime.setMcpServers({
+      demo: createSdkServer('inspect', 'Inspect deployment state', {
+        readOnly: true,
+      }),
+    });
+
+    const tool = registry.get('mcp__demo__inspect');
+    expect(tool?.isReadOnly).toBe(true);
+    expect(tool?.capability?.risk).toBe('low');
+    expect(tool?.capability?.readOnly).toBe(true);
+    expect(tool?.capability?.concurrencySafe).toBe(true);
+    expect(tool?.capability?.tags).toEqual(expect.arrayContaining(['mcp', 'demo', 'read-only']));
+
+    const snapshot = runtime.buildSnapshot();
+    const profile = snapshot.capabilitySnapshot.profiles.find((entry) => entry.toolName === 'mcp__demo__inspect');
+    expect(profile?.access).toBe('external');
+    expect(profile?.readOnly).toBe(true);
+    expect(profile?.risk).toBe('low');
+    expect(profile?.tags).toEqual(expect.arrayContaining(['read-only']));
+  });
+
   it('在 raw 命名模式下移除 MCP 工具时恢复基线工具', async () => {
     const registry = new ToolRegistry();
     const baseTool: ToolDefinition = {
