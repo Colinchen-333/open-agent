@@ -36,7 +36,7 @@ import {
   listPersistedBackgroundTasks,
 } from '@open-agent/tools';
 import { autoDetectProvider, createProvider, calculateCost } from '@open-agent/providers';
-import type { Message } from '@open-agent/providers';
+import type { Message, LLMProvider } from '@open-agent/providers';
 import {
   PermissionEngine,
   SettingsLoader,
@@ -64,6 +64,8 @@ import type {
   TeamCreateInput,
   TeamMessageInput,
   TeamInboxOptions,
+  SDKOrchestrationEvent,
+  SubscribeOrchestrationEventsOptions,
 } from './types.js';
 import { applyPermissionUpdates } from './permission-updates.js';
 import { createPermissionPrompterBridge } from './permission-prompter.js';
@@ -280,16 +282,18 @@ export function query(
   // ------------------------------------------------------------------
   // If the caller explicitly specifies a provider, use it directly.
   // Otherwise fall back to model-name heuristics → environment auto-detect.
-  let provider: ReturnType<typeof createProvider>;
+  let provider: LLMProvider;
   try {
-    provider = options.provider
-      ? createProvider({ provider: options.provider, apiKey: options.apiKey, baseURL: options.baseUrl })
-      : (() => {
-          const providerName = guessProviderFromModel(requestedModelHint);
-          return providerName
-            ? createProvider({ provider: providerName, apiKey: options.apiKey, baseURL: options.baseUrl })
-            : autoDetectProvider();
-        })();
+    provider = typeof options.provider === 'object' && options.provider !== null
+      ? options.provider
+      : options.provider
+        ? createProvider({ provider: options.provider, apiKey: options.apiKey, baseURL: options.baseUrl })
+        : (() => {
+            const providerName = guessProviderFromModel(requestedModelHint);
+            return providerName
+              ? createProvider({ provider: providerName, apiKey: options.apiKey, baseURL: options.baseUrl })
+              : autoDetectProvider();
+          })();
   } catch (err) {
     restoreEnv();
     throw err;
@@ -338,6 +342,10 @@ export function query(
   runtime.registerToolSearchTool();
 
   const pendingSubagentMessages: SDKMessage[] = [];
+  const orchestrationSubscribers = new Set<{
+    push: (event: SDKOrchestrationEvent) => void;
+    close: () => void;
+  }>();
   let currentTurnObservation: PromptSuggestionObservation = createPromptSuggestionObservation();
   const enqueueSubagentMessages = (
     parentToolUseId: string,
@@ -350,6 +358,12 @@ export function query(
     currentTurnObservation.sawSubagent = true;
     if (options.onSubagentEvent) {
       options.onSubagentEvent(parentToolUseId, event);
+    }
+    const orchestrationEvent = convertSubagentEventToOrchestrationEvent(parentToolUseId, sessionId, event);
+    if (orchestrationEvent) {
+      for (const subscriber of orchestrationSubscribers) {
+        subscriber.push(orchestrationEvent);
+      }
     }
   };
 
@@ -663,7 +677,9 @@ export function query(
           } : {}),
           ...(parentToolUseId ? {
             onEvent: (event: SubagentStreamEvent) => {
-              enqueueSubagentMessages(parentToolUseId, event);
+              enqueueSubagentMessages(parentToolUseId, teamName && !event.teamName
+                ? { ...event, teamName }
+                : event);
             },
           } : {}),
         };
@@ -1307,6 +1323,9 @@ export function query(
     if (mcpManager) {
       runtime.disconnectMcpServers().catch(() => {});
     }
+    for (const subscriber of [...orchestrationSubscribers]) {
+      subscriber.close();
+    }
     inputClosed = true;
     notifyQueue();
     removeCallerAbortListener();
@@ -1942,6 +1961,77 @@ export function query(
   queryObj.getTeamInboxCount = async (memberName: string, options?: { teamName?: string }) => {
     const teamName = resolveTeamName(options?.teamName);
     return sdkTeamManager.getInboxCount(teamName, memberName);
+  };
+
+  queryObj.subscribeOrchestrationEvents = (
+    subscriptionOptions: SubscribeOrchestrationEventsOptions = {},
+  ): AsyncIterable<SDKOrchestrationEvent> => {
+    const queue: SDKOrchestrationEvent[] = [];
+    const eventTypes = subscriptionOptions.types?.length
+      ? new Set(subscriptionOptions.types)
+      : null;
+    const teamFilter = normalizeOptionalString(subscriptionOptions.teamName);
+    let closed = false;
+    let queueNotifier: (() => void) | null = null;
+
+    const notify = () => {
+      if (queueNotifier) {
+        const resolve = queueNotifier;
+        queueNotifier = null;
+        resolve();
+      }
+    };
+
+    const subscriber = {
+      push(event: SDKOrchestrationEvent) {
+        if (closed) return;
+        if (eventTypes && !eventTypes.has(event.kind)) return;
+        if (teamFilter && event.teamName !== teamFilter) return;
+        queue.push(cloneOrchestrationEvent(event));
+        notify();
+      },
+      close() {
+        if (closed) return;
+        closed = true;
+        orchestrationSubscribers.delete(subscriber);
+        if (subscriptionOptions.signal) {
+          subscriptionOptions.signal.removeEventListener('abort', abortListener);
+        }
+        notify();
+      },
+    };
+
+    const abortListener = () => {
+      subscriber.close();
+    };
+
+    if (subscriptionOptions.signal?.aborted) {
+      subscriber.close();
+    } else {
+      orchestrationSubscribers.add(subscriber);
+      subscriptionOptions.signal?.addEventListener('abort', abortListener, { once: true });
+    }
+
+    return {
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      async next() {
+        while (queue.length === 0) {
+          if (closed) {
+            return { done: true, value: undefined };
+          }
+          await new Promise<void>((resolve) => {
+            queueNotifier = resolve;
+          });
+        }
+        return { done: false, value: queue.shift()! };
+      },
+      async return() {
+        subscriber.close();
+        return { done: true, value: undefined };
+      },
+    };
   };
 
   queryObj.listTasks = async (options?: TaskListOptions) => {
@@ -2969,6 +3059,41 @@ function convertSubagentEventToSdkMessages(
   }
 
   return [];
+}
+
+function convertSubagentEventToOrchestrationEvent(
+  parentToolCallId: string,
+  sessionId: string,
+  event: SubagentStreamEvent,
+): SDKOrchestrationEvent | null {
+  const kind = classifySubagentEvent(event);
+  if (!kind) return null;
+  return {
+    kind,
+    sessionId,
+    parentToolCallId,
+    ...(event.agentId || event.taskId ? { workerId: event.agentId ?? event.taskId } : {}),
+    ...(event.teamName ? { teamName: event.teamName } : {}),
+    raw: cloneSubagentEvent(event),
+  };
+}
+
+function classifySubagentEvent(event: SubagentStreamEvent): SDKOrchestrationEvent['kind'] | null {
+  if (event.type === 'tool_start' || event.type === 'tool_result') {
+    return 'worker_tool';
+  }
+  if (event.type === 'launched' || event.type === 'completed' || event.type === 'failed' || event.type === 'shutdown') {
+    return 'worker_lifecycle';
+  }
+  return null;
+}
+
+function cloneSubagentEvent(event: SubagentStreamEvent): SubagentStreamEvent {
+  return JSON.parse(JSON.stringify(event));
+}
+
+function cloneOrchestrationEvent(event: SDKOrchestrationEvent): SDKOrchestrationEvent {
+  return JSON.parse(JSON.stringify(event));
 }
 
 function buildTaskNotificationFingerprint(input: {

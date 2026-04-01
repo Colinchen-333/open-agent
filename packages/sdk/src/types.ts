@@ -17,6 +17,7 @@ import type {
   SessionInfo,
 } from '@open-agent/core';
 import type { SandboxConfig } from '@open-agent/permissions';
+import type { LLMProvider } from '@open-agent/providers';
 import type { CapabilitySnapshot } from '@open-agent/runtime';
 import type { SkillCatalogEntry } from '@open-agent/skills';
 
@@ -125,8 +126,8 @@ export interface QueryOptions {
   maxBudgetUsd?: number;
   mcpServers?: Record<string, McpServerConfig>;
   model?: string;
-  /** Explicitly specify the LLM provider backend. */
-  provider?: 'anthropic' | 'openai' | 'ollama';
+  /** Explicitly specify the LLM provider backend or inject a ready provider instance. */
+  provider?: 'anthropic' | 'openai' | 'ollama' | LLMProvider;
   /** API key to use with the specified provider. */
   apiKey?: string;
   /** Custom base URL for the provider API (e.g. a proxy or self-hosted endpoint). */
@@ -446,6 +447,23 @@ export interface TeamInboxOptions {
   consume?: boolean;
 }
 
+export type SDKOrchestrationEventKind = 'worker_lifecycle' | 'worker_tool';
+
+export interface SDKOrchestrationEvent {
+  kind: SDKOrchestrationEventKind;
+  sessionId: string;
+  parentToolCallId: string;
+  workerId?: string;
+  teamName?: string;
+  raw: import('@open-agent/agents').SubagentStreamEvent;
+}
+
+export interface SubscribeOrchestrationEventsOptions {
+  types?: SDKOrchestrationEventKind[];
+  teamName?: string;
+  signal?: AbortSignal;
+}
+
 /**
  * Returned by `query()`.  Implements `AsyncGenerator<SDKMessage>` so callers
  * can iterate with `for await … of` as well as calling control methods.
@@ -496,6 +514,8 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   readTeamInbox(options: TeamInboxOptions): Promise<TeamMessageRecord[]>;
   /** Return the unread inbox count for a member in the selected or named team. */
   getTeamInboxCount(memberName: string, options?: { teamName?: string }): Promise<number>;
+  /** Subscribe to live worker orchestration events for this SDK session. */
+  subscribeOrchestrationEvents(options?: SubscribeOrchestrationEventsOptions): AsyncIterable<SDKOrchestrationEvent>;
   /** Return visible background bash/agent tasks for the current runtime. */
   listBackgroundTasks(): Promise<BackgroundTaskSummary[]>;
   /** Return task records from the shared task control plane for the current or specified team. */

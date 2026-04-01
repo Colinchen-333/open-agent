@@ -3,9 +3,12 @@ import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { SessionManager } from '@open-agent/core';
+import type { SDKMessage, ModelInfo } from '@open-agent/core';
+import type { LLMProvider, Message, StreamEvent, ChatOptions } from '@open-agent/providers';
 import { query } from '../query.js';
 import { createSdkMcpServer, tool } from '../mcp-helpers.js';
 import { savePersistedBackgroundTask } from '@open-agent/tools';
+import type { SDKOrchestrationEvent } from '../types.js';
 
 function createTempHome(prefix: string): { cwd: string; originalHome: string | undefined; restore(): void } {
   const cwd = mkdtempSync(join(tmpdir(), prefix));
@@ -26,6 +29,52 @@ function createTempHome(prefix: string): { cwd: string; originalHome: string | u
       rmSync(cwd, { recursive: true, force: true });
     },
   };
+}
+
+function makeMockProvider(responses: StreamEvent[][]): LLMProvider {
+  let callIndex = 0;
+
+  return {
+    name: 'mock-query-provider',
+    async *chat(_messages: Message[], _options: ChatOptions): AsyncGenerator<StreamEvent> {
+      const events = responses[Math.min(callIndex, responses.length - 1)] ?? [];
+      callIndex++;
+      for (const event of events) {
+        yield event;
+      }
+    },
+    async listModels(): Promise<ModelInfo[]> {
+      return [{ value: 'mock-model', displayName: 'Mock Model', description: 'Test model' }];
+    },
+  };
+}
+
+function toolUseResponse(
+  toolId: string,
+  toolName: string,
+  toolInput: Record<string, unknown>,
+): StreamEvent[] {
+  return [
+    { type: 'tool_use_start', id: toolId, name: toolName },
+    { type: 'tool_use_delta', id: toolId, partial_json: JSON.stringify(toolInput) },
+    { type: 'tool_use_end', id: toolId },
+    { type: 'message_end', message: {}, usage: { input_tokens: 10, output_tokens: 20 } },
+  ];
+}
+
+function textResponse(text: string): StreamEvent[] {
+  return [
+    { type: 'text_delta', text },
+    { type: 'message_end', message: {}, usage: { input_tokens: 10, output_tokens: 20 } },
+  ];
+}
+
+async function collectMessages(gen: AsyncGenerator<SDKMessage>): Promise<SDKMessage[]> {
+  const messages: SDKMessage[] = [];
+  for await (const message of gen) {
+    messages.push(message);
+  }
+  return messages;
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +262,136 @@ describe('query() team control plane', () => {
       expect(consumed[0]?.content).toContain('Please stop');
       expect(await q.getTeamInboxCount('alice', { teamName })).toBe(0);
       q.close();
+    } finally {
+      temp.restore();
+    }
+  });
+});
+
+describe('query() orchestration event subscriptions', () => {
+  it('streams live worker lifecycle and tool events through the SDK control plane', async () => {
+    const temp = createTempHome('open-agent-sdk-orchestration-');
+
+    try {
+      const provider = makeMockProvider([
+        toolUseResponse('task-parent', 'Task', {
+          description: 'Delegate worker',
+          prompt: 'Use DummyTool once, then report completion.',
+          subagent_type: 'worker',
+          name: 'alice',
+          team_name: 'alpha-team',
+        }),
+        toolUseResponse('worker-tool-1', 'DummyTool', { value: 'from-worker' }),
+        textResponse('worker finished successfully'),
+        textResponse('parent done'),
+      ]);
+
+      const q = query('delegate the work', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        setupTools(registry) {
+          registry.register({
+            name: 'DummyTool',
+            description: 'Return a stable string for orchestration tests.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                value: { type: 'string' },
+              },
+              required: ['value'],
+            },
+            async execute(input) {
+              return `dummy:${String((input as { value?: string }).value ?? '')}`;
+            },
+          });
+        },
+      });
+
+      const subscription = q.subscribeOrchestrationEvents({ teamName: 'alpha-team' });
+      await collectMessages(q);
+      q.close();
+
+      const events: SDKOrchestrationEvent[] = [];
+      for await (const event of subscription) {
+        events.push(event);
+      }
+
+      expect(events.length).toBeGreaterThanOrEqual(4);
+      expect(events.every((event) => event.sessionId)).toBe(true);
+      expect(events.every((event) => event.parentToolCallId === 'task-parent')).toBe(true);
+      expect(events.every((event) => event.teamName === 'alpha-team')).toBe(true);
+      expect(events.some((event) => event.kind === 'worker_lifecycle' && event.raw.type === 'launched')).toBe(true);
+      expect(events.some((event) => event.kind === 'worker_tool' && event.raw.type === 'tool_start' && event.raw.toolName === 'DummyTool')).toBe(true);
+      expect(events.some((event) =>
+        event.kind === 'worker_tool'
+        && event.raw.type === 'tool_result'
+        && event.raw.toolName === 'DummyTool')).toBe(true);
+      expect(events.some((event) => event.kind === 'worker_lifecycle' && event.raw.type === 'completed')).toBe(true);
+    } finally {
+      temp.restore();
+    }
+  });
+
+  it('supports type filters and abort-driven shutdown', async () => {
+    const temp = createTempHome('open-agent-sdk-orchestration-abort-');
+
+    try {
+      const provider = makeMockProvider([
+        toolUseResponse('task-parent', 'Task', {
+          description: 'Delegate worker',
+          prompt: 'Use DummyTool once, then report completion.',
+          subagent_type: 'worker',
+          name: 'alice',
+          team_name: 'alpha-team',
+        }),
+        toolUseResponse('worker-tool-1', 'DummyTool', { value: 'from-worker' }),
+        textResponse('worker finished successfully'),
+        textResponse('parent done'),
+      ]);
+
+      const q = query('delegate the work', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        setupTools(registry) {
+          registry.register({
+            name: 'DummyTool',
+            description: 'Return a stable string for orchestration tests.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                value: { type: 'string' },
+              },
+              required: ['value'],
+            },
+            async execute(input) {
+              return `dummy:${String((input as { value?: string }).value ?? '')}`;
+            },
+          });
+        },
+      });
+
+      const controller = new AbortController();
+      const lifecycleOnly = q.subscribeOrchestrationEvents({
+        types: ['worker_lifecycle'],
+        signal: controller.signal,
+      })[Symbol.asyncIterator]();
+
+      const runPromise = collectMessages(q);
+      const first = await lifecycleOnly.next();
+      expect(first.done).toBe(false);
+      expect(first.value?.kind).toBe('worker_lifecycle');
+
+      controller.abort();
+      await runPromise;
+      q.close();
+
+      await expect(lifecycleOnly.next()).resolves.toEqual({ done: true, value: undefined });
     } finally {
       temp.restore();
     }
