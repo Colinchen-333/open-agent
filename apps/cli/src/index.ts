@@ -28,7 +28,7 @@ import { AgentLoader, AgentExecutor, TaskManager, TeamManager } from '@open-agen
 import type { AgentSession } from '@open-agent/agents';
 import { PermissionEngine } from '@open-agent/permissions';
 import { HookExecutor } from '@open-agent/hooks';
-import { OpenAgentRuntime } from '@open-agent/runtime';
+import { OpenAgentRuntime, filterCapabilitySnapshot } from '@open-agent/runtime';
 import type { SDKMessage, AgentDefinition, SDKTaskNotificationMessage } from '@open-agent/core';
 import type { PermissionMode } from '@open-agent/core';
 import { existsSync, readFileSync } from 'fs';
@@ -699,6 +699,7 @@ async function main(): Promise<void> {
   const availableTools = isPrintMode ? [] : toolRegistry.list();
   const toolNames = availableTools.map(t => t.name);
   const runtimeSnapshot = runtime.buildSnapshot();
+  const promptCapabilitySnapshot = filterCapabilitySnapshot(runtimeSnapshot.capabilitySnapshot, toolNames);
   const isGitRepo = isGitRepository(cwd);
   const promptContext = loadPromptContext({
     cwd,
@@ -750,6 +751,7 @@ async function main(): Promise<void> {
         agents: runtimeSnapshot.agents,
         skills: runtimeSnapshot.skills,
         mcpServers: runtimeSnapshot.mcpServers,
+        capabilitySnapshot: promptCapabilitySnapshot,
         coordinator: {
           workerTools: toolNames.filter((name) => name !== 'Task').sort(),
           activeTeam: teamManager.getTeam(configuredActiveTeam) ? configuredActiveTeam : undefined,

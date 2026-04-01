@@ -534,6 +534,18 @@ export function buildCapabilitySnapshot(entries: ToolCapabilityExportEntry[]): C
     .sort((left, right) =>
       left.group.localeCompare(right.group) || left.toolName.localeCompare(right.toolName));
 
+  return buildCapabilitySnapshotFromProfiles(profiles);
+}
+
+export function filterCapabilitySnapshot(snapshot: CapabilitySnapshot, toolNames: Iterable<string>): CapabilitySnapshot {
+  const allowed = new Set(
+    [...toolNames].filter((name): name is string => typeof name === 'string' && name.trim().length > 0),
+  );
+  const profiles = snapshot.profiles.filter((profile) => allowed.has(profile.toolName));
+  return buildCapabilitySnapshotFromProfiles(profiles);
+}
+
+function buildCapabilitySnapshotFromProfiles(profiles: ToolCapabilityProfile[]): CapabilitySnapshot {
   const presets = (Object.keys(CAPABILITY_GROUP_DESCRIPTIONS) as CapabilityGroup[])
     .map((group) => buildCapabilityPreset(group, profiles))
     .filter((preset) => preset.toolCount > 0);

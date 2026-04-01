@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { ToolRegistry, type ToolDefinition } from '@open-agent/tools';
-import { OpenAgentRuntime, buildCapabilitySnapshot } from '../index.js';
+import { OpenAgentRuntime, buildCapabilitySnapshot, filterCapabilitySnapshot } from '../index.js';
 
 function createSdkServer(
   toolName: string,
@@ -108,6 +108,64 @@ describe('OpenAgentRuntime MCP wiring', () => {
       'coordination',
       'integration',
     ]);
+  });
+
+  it('filters capability snapshots to the current session toolset', () => {
+    const snapshot = buildCapabilitySnapshot([
+      {
+        name: 'Read',
+        description: 'Read files',
+        capability: {
+          category: 'filesystem',
+          readOnly: true,
+          concurrencySafe: true,
+          risk: 'low',
+          needsWorkspaceWrite: false,
+        },
+      },
+      {
+        name: 'Write',
+        description: 'Write files',
+        capability: {
+          category: 'filesystem',
+          readOnly: false,
+          concurrencySafe: false,
+          risk: 'medium',
+          needsWorkspaceWrite: true,
+        },
+      },
+      {
+        name: 'mcp__demo__deploy',
+        description: 'Deploy from MCP',
+        capability: {
+          category: 'mcp',
+          readOnly: false,
+          concurrencySafe: false,
+          risk: 'high',
+          needsWorkspaceWrite: false,
+          tags: ['mcp', 'demo', 'external', 'network', 'destructive'],
+        },
+      },
+    ]);
+
+    const filtered = filterCapabilitySnapshot(snapshot, ['Read', 'mcp__demo__deploy']);
+
+    expect(filtered.totalTools).toBe(2);
+    expect(filtered.profiles.map((profile) => profile.toolName)).toEqual([
+      'Read',
+      'mcp__demo__deploy',
+    ]);
+    expect(filtered.summary.accessCounts['read-only']).toBe(1);
+    expect(filtered.summary.accessCounts.external).toBe(1);
+    expect(filtered.summary.accessCounts.mutable).toBe(0);
+    expect(filtered.summary.mcpTools).toBe(1);
+    expect(filtered.presets.map((preset) => preset.name)).toEqual([
+      'files',
+      'integration',
+    ]);
+    expect(filtered.profiles.find((profile) => profile.toolName === 'mcp__demo__deploy')?.tags).toEqual(
+      expect.arrayContaining(['external', 'network', 'destructive']),
+    );
   });
 
   it('同步 namespaced MCP 工具并让 ToolSearch 可见', async () => {
