@@ -1,10 +1,29 @@
-import { describe, it, expect } from 'bun:test';
-import { mkdtempSync, mkdirSync, rmSync } from 'fs';
-import { tmpdir } from 'os';
+import { describe, expect, it, mock } from 'bun:test';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import { homedir, tmpdir } from 'os';
 import { join } from 'path';
 import type { ChatOptions, LLMProvider, Message, StreamEvent } from '@open-agent/providers';
-import type { Query } from '../types.js';
-import { query } from '../query.js';
+import type { Query, WorkerRecord, SDKTimelineItem } from '../types.js';
+
+let providerFactory: (() => LLMProvider) | null = null;
+
+mock.module('@open-agent/providers', () => ({
+  autoDetectProvider: () => {
+    if (!providerFactory) {
+      throw new Error('No mock provider configured for timeline test.');
+    }
+    return providerFactory();
+  },
+  createProvider: () => {
+    if (!providerFactory) {
+      throw new Error('No mock provider configured for timeline test.');
+    }
+    return providerFactory();
+  },
+  calculateCost: () => 0,
+}));
+
+const { query } = await import('../query.js');
 
 function makeTempHome(prefix: string): { cwd: string; cleanup(): void } {
   const cwd = mkdtempSync(join(tmpdir(), prefix));
@@ -26,9 +45,22 @@ function makeTempHome(prefix: string): { cwd: string; cleanup(): void } {
   };
 }
 
+function makeStaticProvider(): LLMProvider {
+  return {
+    name: 'mock-timeline-static-provider',
+    async *chat(_messages: Message[], _options: ChatOptions): AsyncGenerator<StreamEvent> {
+      yield { type: 'text_delta', text: 'unused' };
+      yield { type: 'message_end', message: {}, usage: { input_tokens: 10, output_tokens: 20 } };
+    },
+    async listModels() {
+      return [{ value: 'mock-model', displayName: 'Mock Model', description: 'Timeline test model' }];
+    },
+  };
+}
+
 function makeBackgroundProvider(): LLMProvider {
   return {
-    name: 'mock-sdk-timeline-provider',
+    name: 'mock-timeline-background-provider',
     async *chat(_messages: Message[], options: ChatOptions): AsyncGenerator<StreamEvent> {
       await new Promise<void>((resolve) => {
         if (options.signal?.aborted) {
@@ -38,7 +70,7 @@ function makeBackgroundProvider(): LLMProvider {
         options.signal?.addEventListener('abort', () => resolve(), { once: true });
       });
 
-      throw new Error('timeline worker aborted for test');
+      throw new Error('background worker aborted for timeline test');
     },
     async listModels() {
       return [{ value: 'mock-model', displayName: 'Mock Model', description: 'Timeline test model' }];
@@ -46,10 +78,33 @@ function makeBackgroundProvider(): LLMProvider {
   };
 }
 
+function writeWorkerSession(
+  session: {
+    agentId: string;
+    agentType: string;
+    state: WorkerRecord['status'];
+    startedAt: string;
+    model: string;
+    numTurns: number;
+    durationMs: number;
+    parentSessionId: string;
+    name?: string;
+    teamName?: string;
+    completedAt?: string;
+    result?: string;
+    error?: string;
+  },
+): string {
+  const dir = join(homedir(), '.open-agent', 'agent-sessions', session.agentId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'state.json'), JSON.stringify(session, null, 2));
+  return dir;
+}
+
 async function waitForWorkerStatus(
   q: Query,
   workerId: string,
-  expectedStatus: string,
+  expectedStatus: WorkerRecord['status'],
 ): Promise<void> {
   const timeoutAt = Date.now() + 2_000;
   while (Date.now() < timeoutAt) {
@@ -61,48 +116,87 @@ async function waitForWorkerStatus(
   }
 }
 
+async function readTimelineItem(
+  iterator: AsyncIterator<SDKTimelineItem>,
+  predicate: (item: SDKTimelineItem) => boolean,
+): Promise<SDKTimelineItem | undefined> {
+  const timeoutAt = Date.now() + 2_000;
+  while (Date.now() < timeoutAt) {
+    const next = await iterator.next();
+    if (next.done) return undefined;
+    if (predicate(next.value)) {
+      return next.value;
+    }
+  }
+  return undefined;
+}
+
 describe('query() timeline control plane', () => {
-  it('normalizes team inbox messages into timeline items', async () => {
-    const temp = makeTempHome('open-agent-sdk-timeline-read-');
+  it('reads a merged snapshot of team inbox messages and task notifications', async () => {
+    const temp = makeTempHome('open-agent-sdk-timeline-snapshot-');
+    providerFactory = () => makeStaticProvider();
     const teamName = `alpha-team-${Date.now()}`;
+    const workerId = `worker-${Date.now()}`;
+    let workerDir = '';
 
     try {
-      const q = query('timeline inbox', {
+      const q = query('timeline snapshot', {
         cwd: temp.cwd,
         model: 'mock-model',
-        provider: makeBackgroundProvider(),
+        provider: 'anthropic',
       });
 
       await q.createTeam({ name: teamName, setActive: true });
       await q.sendTeamMessage({
         type: 'message',
         recipient: 'alice',
-        content: 'Continue with the delegated task.',
+        content: 'Review the worker result.',
       });
 
-      const items = await q.readTimelineInbox({
+      const sessionInfo = await q.sessionInfo();
+      workerDir = writeWorkerSession({
+        agentId: workerId,
+        agentType: 'worker',
+        state: 'completed',
+        parentSessionId: sessionInfo!.id,
+        teamName,
+        name: 'alice',
+        startedAt: '2026-04-01T10:00:00.000Z',
+        completedAt: '2026-04-01T10:05:00.000Z',
+        model: 'mock-model',
+        numTurns: 3,
+        durationMs: 300_000,
+        result: 'implemented timeline snapshot support',
+      });
+
+      const timeline = await q.readTimelineInbox({
+        teamName,
         memberName: 'alice',
         consume: false,
       });
-      expect(items).toHaveLength(1);
-      expect(items[0]?.kind).toBe('team_message');
-      expect(items[0]?.teamName).toBe(teamName);
-      expect(items[0]?.teamMessage?.content).toBe('Continue with the delegated task.');
+
+      expect(timeline.some((item) => item.kind === 'team_message' && item.teamMessage?.content === 'Review the worker result.')).toBe(true);
+      expect(timeline.some((item) => item.kind === 'task_notification' && item.taskNotification?.task_id === workerId)).toBe(true);
       q.close();
     } finally {
+      if (workerDir) {
+        rmSync(workerDir, { recursive: true, force: true });
+      }
+      providerFactory = null;
       temp.cleanup();
     }
   });
 
-  it('merges team inbox messages and worker orchestration events into one live stream', async () => {
-    const temp = makeTempHome('open-agent-sdk-timeline-subscribe-');
+  it('streams team messages, worker events, and task notifications through subscribeTimeline()', async () => {
+    const temp = makeTempHome('open-agent-sdk-timeline-live-');
+    providerFactory = () => makeBackgroundProvider();
     const teamName = `alpha-team-${Date.now()}`;
 
     try {
-      const q = query('timeline stream', {
+      const q = query('timeline live', {
         cwd: temp.cwd,
         model: 'mock-model',
-        provider: makeBackgroundProvider(),
+        provider: 'anthropic',
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
       });
@@ -111,45 +205,46 @@ describe('query() timeline control plane', () => {
       const iterator = q.subscribeTimeline({
         teamName,
         memberName: 'alice',
-        pollIntervalMs: 20,
+        pollIntervalMs: 25,
       })[Symbol.asyncIterator]();
 
       await q.sendTeamMessage({
         type: 'message',
         recipient: 'alice',
-        content: 'Watch the worker timeline.',
+        content: 'Start the worker and report back.',
       });
+      const teamItem = await readTimelineItem(iterator, (item) =>
+        item.kind === 'team_message'
+        && item.teamMessage?.content === 'Start the worker and report back.',
+      );
+      expect(teamItem?.kind).toBe('team_message');
+
       const worker = await q.launchWorker({
         prompt: 'Wait until stopped.',
-        name: 'alice-worker',
+        name: 'alice',
       });
-
-      const seen: any[] = [];
-      const timeoutAt = Date.now() + 2_000;
-      while (Date.now() < timeoutAt) {
-        const next = await iterator.next();
-        if (next.done) break;
-        seen.push(next.value);
-        if (
-          seen.some((item) => item.kind === 'team_message' && item.teamMessage?.content === 'Watch the worker timeline.')
-          && seen.some((item) => item.kind === 'worker_lifecycle' && item.workerId === worker.workerId)
-        ) {
-          break;
-        }
-      }
-
-      expect(seen.some((item) => item.kind === 'team_message' && item.teamMessage?.content === 'Watch the worker timeline.')).toBe(true);
-      expect(seen.some((item) => (
+      const launchedItem = await readTimelineItem(iterator, (item) =>
         item.kind === 'worker_lifecycle'
         && item.workerId === worker.workerId
-        && item.orchestrationEvent?.raw.type === 'launched'
-      ))).toBe(true);
+        && item.orchestrationEvent?.raw.type === 'launched',
+      );
+      expect(launchedItem?.kind).toBe('worker_lifecycle');
 
       expect(await q.stopWorker(worker.workerId)).toEqual({ success: true });
       await waitForWorkerStatus(q, worker.workerId, 'shutdown');
+
+      const notificationItem = await readTimelineItem(iterator, (item) =>
+        item.kind === 'task_notification'
+        && item.workerId === worker.workerId
+        && item.taskNotification?.status === 'stopped',
+      );
+      expect(notificationItem?.kind).toBe('task_notification');
+      expect(notificationItem?.taskNotification?.team_name).toBe(teamName);
+
       await iterator.return?.();
       q.close();
     } finally {
+      providerFactory = null;
       temp.cleanup();
     }
   });
