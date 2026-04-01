@@ -1,0 +1,291 @@
+import { describe, it, expect, mock } from 'bun:test';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import { homedir, tmpdir } from 'os';
+import { join } from 'path';
+import type { ChatOptions, LLMProvider, Message, StreamEvent } from '@open-agent/providers';
+import type { Query, WorkerRecord } from '../types.js';
+
+let providerFactory: (() => LLMProvider) | null = null;
+
+mock.module('@open-agent/providers', () => ({
+  autoDetectProvider: () => {
+    if (!providerFactory) {
+      throw new Error('No mock provider configured for worker lifecycle test.');
+    }
+    return providerFactory();
+  },
+  createProvider: () => {
+    if (!providerFactory) {
+      throw new Error('No mock provider configured for worker lifecycle test.');
+    }
+    return providerFactory();
+  },
+  calculateCost: () => 0,
+}));
+
+const { query } = await import('../query.js');
+
+function makeTempHome(prefix: string): { cwd: string; cleanup(): void } {
+  const cwd = mkdtempSync(join(tmpdir(), prefix));
+  const home = join(cwd, 'home');
+  mkdirSync(home, { recursive: true });
+  const originalHome = process.env.HOME;
+  process.env.HOME = home;
+
+  return {
+    cwd,
+    cleanup() {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+      rmSync(cwd, { recursive: true, force: true });
+    },
+  };
+}
+
+function writeWorkerSession(
+  session: {
+    agentId: string;
+    agentType: string;
+    state: WorkerRecord['status'];
+    startedAt: string;
+    model: string;
+    numTurns: number;
+    durationMs: number;
+    name?: string;
+    teamName?: string;
+    parentToolUseId?: string;
+    parentSessionId?: string;
+    completedAt?: string;
+    outputFile?: string;
+    totalToolUseCount?: number;
+    totalTokens?: number;
+    result?: string;
+    error?: string;
+  },
+): string {
+  const dir = join(homedir(), '.open-agent', 'agent-sessions', session.agentId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'state.json'), JSON.stringify(session, null, 2));
+  return dir;
+}
+
+function toolUseResponse(
+  toolId: string,
+  toolName: string,
+  toolInput: Record<string, unknown>,
+): StreamEvent[] {
+  return [
+    { type: 'tool_use_start', id: toolId, name: toolName },
+    { type: 'tool_use_delta', id: toolId, partial_json: JSON.stringify(toolInput) },
+    { type: 'tool_use_end', id: toolId },
+    { type: 'message_end', message: {}, usage: { input_tokens: 10, output_tokens: 20 } },
+  ];
+}
+
+function textResponse(text: string): StreamEvent[] {
+  return [
+    { type: 'text_delta', text },
+    { type: 'message_end', message: {}, usage: { input_tokens: 10, output_tokens: 20 } },
+  ];
+}
+
+function makeStaticProvider(responses: StreamEvent[][]): LLMProvider {
+  let callIndex = 0;
+
+  return {
+    name: 'mock-worker-provider',
+    async *chat(_messages: Message[], _options: ChatOptions): AsyncGenerator<StreamEvent> {
+      const events = responses[Math.min(callIndex, responses.length - 1)] ?? [];
+      callIndex += 1;
+      for (const event of events) {
+        yield event;
+      }
+    },
+    async listModels() {
+      return [{ value: 'mock-model', displayName: 'Mock Model', description: 'Worker lifecycle test model' }];
+    },
+  };
+}
+
+function makeBackgroundWorkerProvider(teamName: string): LLMProvider {
+  let parentCallCount = 0;
+
+  return {
+    name: 'mock-background-worker-provider',
+    async *chat(_messages: Message[], options: ChatOptions): AsyncGenerator<StreamEvent> {
+      const isSubagent =
+        typeof options.systemPrompt === 'string'
+        && options.systemPrompt.includes('You are a subagent working on behalf of another OpenAgent agent.');
+
+      if (!isSubagent) {
+        parentCallCount += 1;
+        if (parentCallCount === 1) {
+          yield* toolUseResponse('task-parent-bg', 'Task', {
+            description: 'Launch background worker',
+            prompt: 'Wait until stopped.',
+            subagent_type: 'worker',
+            name: 'alice',
+            team_name: teamName,
+            run_in_background: true,
+          });
+          return;
+        }
+        yield* textResponse('parent complete');
+        return;
+      }
+
+      await new Promise<void>((resolve) => {
+        if (options.signal?.aborted) {
+          resolve();
+          return;
+        }
+        options.signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+
+      throw new Error('background worker aborted for test');
+    },
+    async listModels() {
+      return [{ value: 'mock-model', displayName: 'Mock Model', description: 'Background worker test model' }];
+    },
+  };
+}
+
+async function collectMessages(gen: AsyncGenerator<any>): Promise<any[]> {
+  const messages: any[] = [];
+  for await (const message of gen) {
+    messages.push(message);
+  }
+  return messages;
+}
+
+async function waitForWorkerStatus(
+  q: Query,
+  workerId: string,
+  expectedStatus: WorkerRecord['status'],
+): Promise<WorkerRecord | null> {
+  const timeoutAt = Date.now() + 2_000;
+  while (Date.now() < timeoutAt) {
+    const worker = await q.getWorker(workerId);
+    if (worker?.status === expectedStatus) {
+      return worker;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return q.getWorker(workerId);
+}
+
+describe('query() worker lifecycle control plane', () => {
+  it('lists and retrieves persisted worker sessions', async () => {
+    const temp = makeTempHome('open-agent-sdk-worker-list-');
+    providerFactory = () => makeStaticProvider([textResponse('unused')]);
+    const alphaWorkerId = `worker-alpha-${Date.now()}`;
+    const betaWorkerId = `worker-beta-${Date.now()}`;
+    const alphaTeamName = `alpha-team-${Date.now()}`;
+    const betaTeamName = `beta-team-${Date.now()}`;
+    const cleanupDirs: string[] = [];
+
+    try {
+      cleanupDirs.push(writeWorkerSession({
+        agentId: alphaWorkerId,
+        agentType: 'worker',
+        name: 'alpha',
+        state: 'completed',
+        teamName: alphaTeamName,
+        parentToolUseId: 'task-alpha',
+        parentSessionId: 'session-alpha',
+        startedAt: '2026-04-01T10:00:00.000Z',
+        completedAt: '2026-04-01T10:05:00.000Z',
+        model: 'mock-model',
+        numTurns: 3,
+        durationMs: 300_000,
+        totalToolUseCount: 2,
+        totalTokens: 120,
+        result: 'completed alpha worker',
+      }));
+      cleanupDirs.push(writeWorkerSession({
+        agentId: betaWorkerId,
+        agentType: 'verifier',
+        name: 'beta',
+        state: 'failed',
+        teamName: betaTeamName,
+        parentToolUseId: 'task-beta',
+        parentSessionId: 'session-beta',
+        startedAt: '2026-04-01T11:00:00.000Z',
+        completedAt: '2026-04-01T11:02:00.000Z',
+        model: 'mock-model',
+        numTurns: 2,
+        durationMs: 120_000,
+        error: 'verification failed',
+      }));
+
+      const q = query('inspect workers', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: 'anthropic',
+      });
+
+      const workers = await q.listWorkers();
+      expect(workers.some((worker) => worker.workerId === alphaWorkerId)).toBe(true);
+      expect(workers.some((worker) => worker.workerId === betaWorkerId)).toBe(true);
+
+      const alphaWorkers = await q.listWorkers({ teamName: alphaTeamName });
+      expect(alphaWorkers).toHaveLength(1);
+      expect(alphaWorkers[0]?.workerId).toBe(alphaWorkerId);
+
+      const worker = await q.getWorker(alphaWorkerId);
+      expect(worker?.workerType).toBe('worker');
+      expect(worker?.parentToolCallId).toBe('task-alpha');
+      expect(worker?.parentSessionId).toBe('session-alpha');
+      expect(worker?.summary).toContain('completed alpha worker');
+
+      await expect(q.getWorker('missing-worker')).resolves.toBeNull();
+      q.close();
+    } finally {
+      for (const dir of cleanupDirs) {
+        rmSync(dir, { recursive: true, force: true });
+      }
+      providerFactory = null;
+      temp.cleanup();
+    }
+  });
+
+  it('stops a live background worker in the current runtime', async () => {
+    const temp = makeTempHome('open-agent-sdk-worker-stop-');
+    const teamName = `alpha-team-${Date.now()}`;
+    providerFactory = () => makeBackgroundWorkerProvider(teamName);
+
+    try {
+      const q = query('launch background worker', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: 'anthropic',
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+      });
+
+      const messages = await collectMessages(q);
+      const result = messages.find((message) => message.type === 'result') as { result?: string } | undefined;
+      expect(result?.result).toBe('parent complete');
+
+      const workers = await q.listWorkers({ teamName });
+      expect(workers).toHaveLength(1);
+      expect(['spawning', 'running']).toContain(workers[0]!.status);
+
+      const stopped = await q.stopWorker(workers[0]!.workerId);
+      expect(stopped).toEqual({ success: true });
+
+      const worker = await waitForWorkerStatus(q, workers[0]!.workerId, 'shutdown');
+      expect(worker?.status).toBe('shutdown');
+      expect(worker?.teamName).toBe(teamName);
+
+      await expect(q.stopWorker('missing-worker')).resolves.toEqual({ success: false });
+      q.close();
+    } finally {
+      providerFactory = null;
+      temp.cleanup();
+    }
+  });
+});

@@ -59,6 +59,8 @@ import type {
   TaskClaimOptions,
   TaskReleaseOptions,
   TaskRecord,
+  WorkerListOptions,
+  WorkerRecord,
   TeamRecord,
   TeamMessageRecord,
   TeamCreateInput,
@@ -437,6 +439,29 @@ export function query(
     ...(task.metadata ? { metadata: JSON.parse(JSON.stringify(task.metadata)) } : {}),
     teamName,
   });
+  const toWorkerRecord = (session: AgentSession): WorkerRecord => ({
+    workerId: session.agentId,
+    workerType: session.agentType,
+    ...(session.name ? { name: session.name } : {}),
+    status: session.state,
+    ...(session.parentToolUseId ? { parentToolCallId: session.parentToolUseId } : {}),
+    ...(session.parentSessionId ? { parentSessionId: session.parentSessionId } : {}),
+    ...(session.teamName ? { teamName: session.teamName } : {}),
+    model: session.model,
+    ...(session.mode ? { mode: session.mode } : {}),
+    startedAt: session.startedAt,
+    ...(session.completedAt ? { completedAt: session.completedAt } : {}),
+    ...(session.outputFile ? { outputFile: session.outputFile } : {}),
+    ...(session.worktreePath ? { worktreePath: session.worktreePath } : {}),
+    ...(session.worktreeBranch ? { worktreeBranch: session.worktreeBranch } : {}),
+    numTurns: session.numTurns,
+    durationMs: session.durationMs,
+    ...(typeof session.totalToolUseCount === 'number' ? { totalToolUseCount: session.totalToolUseCount } : {}),
+    ...(typeof session.totalTokens === 'number' ? { totalTokens: session.totalTokens } : {}),
+    summary: summarizePlainText(session.result ?? session.error ?? session.name ?? session.agentType),
+    ...(session.result ? { result: session.result } : {}),
+    ...(session.error ? { error: session.error } : {}),
+  });
 
   const taskToolsDeps = {
     createTask: async (params: {
@@ -655,6 +680,7 @@ export function query(
 
         const executeOptions = {
           definition: agentDef,
+          agentType: subagentType,
           provider,
           tools: new Map(toolRegistry.list().map((t) => [t.name, t])),
           prompt: agentPrompt,
@@ -2033,6 +2059,26 @@ export function query(
       },
     };
   };
+
+  queryObj.listWorkers = async (options?: WorkerListOptions) => {
+    const teamName = normalizeOptionalString(options?.teamName);
+    const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
+    return persistedAgentExecutor
+      .listPersistedAgents()
+      .filter((session) => !teamName || session.teamName === teamName)
+      .sort((left, right) => new Date(right.startedAt).getTime() - new Date(left.startedAt).getTime())
+      .map((session) => toWorkerRecord(session));
+  };
+
+  queryObj.getWorker = async (workerId: string) => {
+    const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
+    const session = persistedAgentExecutor.getAgent(workerId);
+    return session ? toWorkerRecord(session) : null;
+  };
+
+  queryObj.stopWorker = async (workerId: string) => ({
+    success: sdkAgentExecutor?.stopAgent(workerId) ?? false,
+  });
 
   queryObj.listTasks = async (options?: TaskListOptions) => {
     const teamName = resolveTaskTeamName(options?.teamName);

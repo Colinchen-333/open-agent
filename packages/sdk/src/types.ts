@@ -318,6 +318,34 @@ export interface BackgroundTaskInspection {
   duration_ms?: number;
 }
 
+export interface WorkerRecord {
+  workerId: string;
+  workerType: string;
+  name?: string;
+  status: 'spawning' | 'running' | 'idle' | 'completed' | 'failed' | 'shutdown';
+  parentToolCallId?: string;
+  parentSessionId?: string;
+  teamName?: string;
+  model: string;
+  mode?: string;
+  startedAt: string;
+  completedAt?: string;
+  outputFile?: string;
+  worktreePath?: string;
+  worktreeBranch?: string;
+  numTurns: number;
+  durationMs: number;
+  totalToolUseCount?: number;
+  totalTokens?: number;
+  summary: string;
+  result?: string;
+  error?: string;
+}
+
+export interface WorkerListOptions {
+  teamName?: string;
+}
+
 export interface TaskLeaseInfo {
   owner: string;
   claimedAt: string;
@@ -516,6 +544,12 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   getTeamInboxCount(memberName: string, options?: { teamName?: string }): Promise<number>;
   /** Subscribe to live worker orchestration events for this SDK session. */
   subscribeOrchestrationEvents(options?: SubscribeOrchestrationEventsOptions): AsyncIterable<SDKOrchestrationEvent>;
+  /** List known worker sessions visible to this SDK session. */
+  listWorkers(options?: WorkerListOptions): Promise<WorkerRecord[]>;
+  /** Return one worker session by ID, or null if it does not exist. */
+  getWorker(workerId: string): Promise<WorkerRecord | null>;
+  /** Stop a live worker in the current runtime and report whether it was found. */
+  stopWorker(workerId: string): Promise<{ success: boolean }>;
   /** Return visible background bash/agent tasks for the current runtime. */
   listBackgroundTasks(): Promise<BackgroundTaskSummary[]>;
   /** Return task records from the shared task control plane for the current or specified team. */
