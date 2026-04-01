@@ -101,6 +101,9 @@ type SessionControlMethods = Pick<
   | 'listWorkers'
   | 'getWorker'
   | 'getWorkerFollowUps'
+  | 'launchWorker'
+  | 'launchVerifier'
+  | 'resumeWorker'
   | 'stopWorker'
   | 'listTasks'
   | 'getTask'
@@ -361,6 +364,9 @@ function _buildSession(
     listWorkers: (...args) => q.listWorkers(...args),
     getWorker: (...args) => q.getWorker(...args),
     getWorkerFollowUps: (...args) => q.getWorkerFollowUps(...args),
+    launchWorker: (...args) => q.launchWorker(...args),
+    launchVerifier: (...args) => q.launchVerifier(...args),
+    resumeWorker: (...args) => q.resumeWorker(...args),
     stopWorker: (...args) => q.stopWorker(...args),
     listTasks: (...args) => q.listTasks(...args),
     getTask: (...args) => q.getTask(...args),
@@ -585,6 +591,9 @@ export function unstable_v2_createSession(
     listWorkers: (...args) => q.listWorkers(...args),
     getWorker: (...args) => q.getWorker(...args),
     getWorkerFollowUps: (...args) => q.getWorkerFollowUps(...args),
+    launchWorker: (...args) => q.launchWorker(...args),
+    launchVerifier: (...args) => q.launchVerifier(...args),
+    resumeWorker: (...args) => q.resumeWorker(...args),
     stopWorker: (...args) => q.stopWorker(...args),
     listTasks: (...args) => q.listTasks(...args),
     getTask: (...args) => q.getTask(...args),

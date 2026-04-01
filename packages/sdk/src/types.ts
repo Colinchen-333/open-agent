@@ -696,6 +696,12 @@ export interface Session {
   getWorker(workerId: string): Promise<WorkerRecord | null>;
   /** Build Claude Code style follow-up suggestions for a finished worker. */
   getWorkerFollowUps(workerId: string): Promise<WorkerFollowUpSuggestion[]>;
+  /** Launch a background worker directly through the SDK control plane. */
+  launchWorker(input: WorkerLaunchInput): Promise<WorkerRecord>;
+  /** Launch a fresh background verifier directly through the SDK control plane. */
+  launchVerifier(input: WorkerLaunchInput): Promise<WorkerRecord>;
+  /** Resume an existing worker directly through the SDK control plane. */
+  resumeWorker(workerId: string, input: WorkerLaunchInput): Promise<WorkerRecord>;
   /** Stop a live worker in the current runtime and report whether it was found. */
   stopWorker(workerId: string): Promise<{ success: boolean }>;
   /** Return task records from the shared task control plane for the current or specified team. */

@@ -153,6 +153,26 @@ function makeBackgroundWorkerProvider(teamName: string): LLMProvider {
   };
 }
 
+function makeDirectLaunchProvider(): LLMProvider {
+  return {
+    name: 'mock-direct-launch-provider',
+    async *chat(_messages: Message[], options: ChatOptions): AsyncGenerator<StreamEvent> {
+      await new Promise<void>((resolve) => {
+        if (options.signal?.aborted) {
+          resolve();
+          return;
+        }
+        options.signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+
+      throw new Error('direct worker aborted for test');
+    },
+    async listModels() {
+      return [{ value: 'mock-model', displayName: 'Mock Model', description: 'Direct worker control test model' }];
+    },
+  };
+}
+
 async function collectMessages(gen: AsyncGenerator<any>): Promise<any[]> {
   const messages: any[] = [];
   for await (const message of gen) {
@@ -175,6 +195,21 @@ async function waitForWorkerStatus(
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   return q.getWorker(workerId);
+}
+
+async function readEventOfType(
+  iterator: AsyncIterator<any>,
+  expectedType: string,
+): Promise<any> {
+  const timeoutAt = Date.now() + 2_000;
+  while (Date.now() < timeoutAt) {
+    const next = await iterator.next();
+    if (next.done) return undefined;
+    if (next.value?.raw?.type === expectedType) {
+      return next.value;
+    }
+  }
+  return undefined;
 }
 
 describe('query() worker lifecycle control plane', () => {
@@ -379,6 +414,82 @@ describe('query() worker lifecycle control plane', () => {
         rmSync(dir, { recursive: true, force: true });
       }
       providerFactory = null;
+      temp.cleanup();
+    }
+  });
+
+  it('launches, resumes, and verifies workers directly through the SDK control plane', async () => {
+    const temp = makeTempHome('open-agent-sdk-worker-launch-');
+    const teamName = `alpha-team-${Date.now()}`;
+
+    try {
+      const q = query('direct worker control plane', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeDirectLaunchProvider(),
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+      });
+
+      await q.createTeam({ name: teamName, setActive: true });
+      const eventIterator = q.subscribeOrchestrationEvents({ teamName })[Symbol.asyncIterator]();
+
+      const launchedWorker = await q.launchWorker({
+        prompt: 'Wait until stopped.',
+        name: 'alice',
+      });
+      expect(launchedWorker.workerType).toBe('worker');
+      expect(launchedWorker.teamName).toBe(teamName);
+
+      const launchedEvent = await readEventOfType(eventIterator, 'launched');
+      expect(launchedEvent?.kind).toBe('worker_lifecycle');
+      expect(launchedEvent?.raw.type).toBe('launched');
+      expect(launchedEvent?.workerId).toBe(launchedWorker.workerId);
+
+      const verifier = await q.launchVerifier({
+        prompt: 'Verify the previous worker output.',
+        name: 'vera',
+        teamName,
+      });
+      expect(verifier.workerType).toBe('verifier');
+      expect(verifier.teamName).toBe(teamName);
+
+      const verifierLaunchEvent = await readEventOfType(eventIterator, 'launched');
+      expect(verifierLaunchEvent?.workerId).toBe(verifier.workerId);
+      expect(verifierLaunchEvent?.raw.type).toBe('launched');
+
+      expect(await q.stopWorker(launchedWorker.workerId)).toEqual({ success: true });
+      await waitForWorkerStatus(q, launchedWorker.workerId, 'shutdown');
+      const shutdownEvent = await readEventOfType(eventIterator, 'shutdown');
+      expect(shutdownEvent?.workerId).toBe(launchedWorker.workerId);
+
+      const resumedWorker = await q.resumeWorker(launchedWorker.workerId, {
+        prompt: 'Continue after being stopped.',
+        teamName,
+      });
+      expect(resumedWorker.workerId).toBe(launchedWorker.workerId);
+      expect(resumedWorker.workerType).toBe('worker');
+
+      const resumedEvent = await readEventOfType(eventIterator, 'launched');
+      expect(resumedEvent?.workerId).toBe(launchedWorker.workerId);
+      expect(resumedEvent?.raw.type).toBe('launched');
+
+      const followUps = await q.getWorkerFollowUps(launchedWorker.workerId);
+      expect(followUps).toEqual([]);
+
+      expect(await q.stopWorker(resumedWorker.workerId)).toEqual({ success: true });
+      expect(await q.stopWorker(verifier.workerId)).toEqual({ success: true });
+      await waitForWorkerStatus(q, resumedWorker.workerId, 'shutdown');
+      await waitForWorkerStatus(q, verifier.workerId, 'shutdown');
+
+      const workers = await q.listWorkers({ teamName });
+      expect(workers.map((worker) => worker.workerId).sort()).toEqual(
+        [launchedWorker.workerId, verifier.workerId].sort(),
+      );
+
+      await eventIterator.return?.();
+      q.close();
+    } finally {
       temp.cleanup();
     }
   });

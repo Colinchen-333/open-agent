@@ -50,6 +50,56 @@ function textResponse(text: string): StreamEvent[] {
   ];
 }
 
+function makeBackgroundControlProvider(): LLMProvider {
+  return {
+    name: 'mock-session-background-provider',
+    async *chat(_messages: Message[], options: ChatOptions): AsyncGenerator<StreamEvent> {
+      await new Promise<void>((resolve) => {
+        if (options.signal?.aborted) {
+          resolve();
+          return;
+        }
+        options.signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+
+      throw new Error('background session worker aborted for test');
+    },
+    async listModels(): Promise<ModelInfo[]> {
+      return [{ value: 'mock-model', displayName: 'Mock Model', description: 'Background session test model' }];
+    },
+  };
+}
+
+async function waitForWorkerStatus(
+  getWorker: (workerId: string) => Promise<{ status?: string } | null>,
+  workerId: string,
+  expectedStatus: string,
+): Promise<void> {
+  const timeoutAt = Date.now() + 2_000;
+  while (Date.now() < timeoutAt) {
+    const worker = await getWorker(workerId);
+    if (worker?.status === expectedStatus) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+async function readEventOfType(
+  iterator: AsyncIterator<any>,
+  expectedType: string,
+): Promise<any> {
+  const timeoutAt = Date.now() + 2_000;
+  while (Date.now() < timeoutAt) {
+    const next = await iterator.next();
+    if (next.done) return undefined;
+    if (next.value?.raw?.type === expectedType) {
+      return next.value;
+    }
+  }
+  return undefined;
+}
+
 describe('createSession()', () => {
   it('returns a session with required interface methods', () => {
     const session = createSession({ model: 'claude-sonnet-4-6' });
@@ -190,6 +240,51 @@ describe('createSession()', () => {
     expect(followUps.some((item) => item.scaffold.kind === 'resume_worker')).toBe(true);
     expect(followUps.some((item) => item.scaffold.kind === 'launch_verifier')).toBe(true);
     expect(turnMessages.some((message) => message.type === 'result' && message.result === 'session parent done')).toBe(true);
+    session.close();
+  });
+
+  it('forwards direct worker actuation through the stable session handle', async () => {
+    const teamName = `alpha-team-${Date.now()}`;
+    const session = createSession({
+      model: 'mock-model',
+      provider: makeBackgroundControlProvider(),
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
+    } as any);
+
+    await session.createTeam({ name: teamName, setActive: true });
+    const eventIterator = session.subscribeOrchestrationEvents({ teamName })[Symbol.asyncIterator]();
+
+    const worker = await session.launchWorker({
+      prompt: 'Wait until stopped.',
+      name: 'alice',
+    });
+    expect(worker.workerType).toBe('worker');
+    expect(worker.teamName).toBe(teamName);
+
+    const launchedEvent = await readEventOfType(eventIterator, 'launched');
+    expect(launchedEvent?.kind).toBe('worker_lifecycle');
+    expect(launchedEvent?.raw.type).toBe('launched');
+    expect(launchedEvent?.workerId).toBe(worker.workerId);
+
+    expect(await session.stopWorker(worker.workerId)).toEqual({ success: true });
+    await waitForWorkerStatus((workerId) => session.getWorker(workerId), worker.workerId, 'shutdown');
+    const shutdownEvent = await readEventOfType(eventIterator, 'shutdown');
+    expect(shutdownEvent?.workerId).toBe(worker.workerId);
+
+    const resumed = await session.resumeWorker(worker.workerId, {
+      prompt: 'Continue after stop.',
+      teamName,
+    });
+    expect(resumed.workerId).toBe(worker.workerId);
+
+    const resumedEvent = await readEventOfType(eventIterator, 'launched');
+    expect(resumedEvent?.raw.type).toBe('launched');
+    expect(resumedEvent?.workerId).toBe(worker.workerId);
+
+    expect(await session.stopWorker(resumed.workerId)).toEqual({ success: true });
+    await waitForWorkerStatus((workerId) => session.getWorker(workerId), resumed.workerId, 'shutdown');
+    await eventIterator.return?.();
     session.close();
   });
 });

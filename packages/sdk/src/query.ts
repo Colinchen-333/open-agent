@@ -62,6 +62,7 @@ import type {
   WorkerListOptions,
   WorkerRecord,
   WorkerFollowUpSuggestion,
+  WorkerLaunchInput,
   TeamRecord,
   TeamMessageRecord,
   TeamCreateInput,
@@ -380,6 +381,7 @@ export function query(
   const sdkTeamManager = new TeamManager();
   let activeTeamName: string | null = null;
   const resolveTaskTeamName = (teamName?: string) => teamName ?? activeTeamName ?? defaultTeamName;
+  const resolveWorkerTeamName = (teamName?: string) => normalizeOptionalString(teamName) ?? activeTeamName ?? undefined;
   const getTaskManager = (teamName?: string) => new TaskManager(resolveTaskTeamName(teamName), {
     rootDir: join(cwd, '.open-agent', 'tasks'),
   });
@@ -2061,6 +2063,114 @@ export function query(
     };
   };
 
+  const emitStandaloneOrchestrationEvent = (event: SubagentStreamEvent): void => {
+    const orchestrationEvent = convertSubagentEventToOrchestrationEvent(undefined, sessionId, event);
+    if (!orchestrationEvent) return;
+    for (const subscriber of orchestrationSubscribers) {
+      subscriber.push(orchestrationEvent);
+    }
+  };
+
+  const launchWorkerRecord = async (
+    input: WorkerLaunchInput,
+    subagentType: 'worker' | 'verifier',
+    resume?: string,
+  ): Promise<WorkerRecord> => {
+    await runtimeReadyPromise;
+    if (setupToolsReady) {
+      await setupToolsReady;
+      refreshManagedSystemPrompt();
+      syncLoopToolsFromRegistry();
+    }
+    if (mcpReadyPromise) {
+      await mcpReadyPromise;
+      refreshManagedSystemPrompt();
+      syncLoopToolsFromRegistry();
+    }
+
+    const promptText = normalizeOptionalString(input.prompt);
+    if (!promptText) {
+      throw new Error('Worker prompt must be a non-empty string.');
+    }
+
+    const agentDef = availableAgents.get(subagentType);
+    if (!agentDef) {
+      throw new Error(
+        `Unknown agent type: ${subagentType}. Available: ${[...availableAgents.keys()].join(', ')}`,
+      );
+    }
+
+    if (!sdkAgentExecutor) {
+      sdkAgentExecutor = new AgentExecutor(effectiveHookExecutor as any);
+    }
+
+    const resumedSession = resume ? sdkAgentExecutor.getAgent(resume) : null;
+    const teamName = resolveWorkerTeamName(input.teamName) ?? resumedSession?.teamName;
+    const effectiveAgentCwd = input.cwd ?? cwd;
+    let worktreePath: string | undefined = resumedSession?.worktreePath;
+    let worktreeBranch: string | undefined = resumedSession?.worktreeBranch;
+
+    if (!worktreePath && input.isolation === 'worktree') {
+      const wt = await createWorktree(
+        effectiveAgentCwd,
+        input.name ?? `${subagentType}-${resume ?? Date.now()}`,
+      );
+      worktreePath = wt.path;
+      worktreeBranch = wt.branch;
+    }
+
+    try {
+      const { agentId } = await sdkAgentExecutor.executeInBackground({
+        definition: agentDef,
+        agentType: subagentType,
+        provider,
+        tools: new Map(toolRegistry.list().map((tool) => [tool.name, tool])),
+        prompt: promptText,
+        cwd: effectiveAgentCwd,
+        name: input.name ?? resumedSession?.name,
+        model: input.model ?? resumedSession?.model ?? resolveAgentModel(agentDef.model) ?? model,
+        maxTurns: input.maxTurns,
+        mode: input.mode ?? resumedSession?.mode ?? agentDef.mode,
+        teamName,
+        isolation: input.isolation,
+        runInBackground: true,
+        resume,
+        parentSessionId: sessionId,
+        ...(worktreePath ? { worktreePath } : {}),
+        ...(worktreePath ? {
+          onWorktreeCleanup: async (wtPath: string, hasChanges: boolean) => {
+            if (!hasChanges) await cleanupWorktree(wtPath);
+          },
+        } : {}),
+        onEvent: (event: SubagentStreamEvent) => {
+          emitStandaloneOrchestrationEvent(teamName && !event.teamName
+            ? { ...event, teamName }
+            : event);
+        },
+      });
+      const session = sdkAgentExecutor.getAgent(agentId);
+      if (!session) {
+        throw new Error(`Worker ${agentId} was launched but its session could not be loaded.`);
+      }
+      const record = toWorkerRecord(session);
+      return worktreePath && worktreeBranch && !record.worktreeBranch
+        ? { ...record, worktreePath, worktreeBranch }
+        : record;
+    } catch (error) {
+      if (worktreePath) {
+        try {
+          const hasChanges = await hasWorktreeChanges(worktreePath);
+          if (!hasChanges) {
+            await cleanupWorktree(worktreePath);
+          }
+        } catch {
+          // Non-fatal cleanup failure.
+        }
+      }
+      throw error;
+    }
+  };
+
   queryObj.listWorkers = async (options?: WorkerListOptions) => {
     const teamName = normalizeOptionalString(options?.teamName);
     const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
@@ -2134,6 +2244,24 @@ export function query(
         suggestion: item.suggestion,
         scaffold: item.scaffold!,
       }));
+  };
+
+  queryObj.launchWorker = async (input: WorkerLaunchInput) => launchWorkerRecord(input, 'worker');
+
+  queryObj.launchVerifier = async (input: WorkerLaunchInput) => launchWorkerRecord(input, 'verifier');
+
+  queryObj.resumeWorker = async (workerId: string, input: WorkerLaunchInput) => {
+    const normalizedWorkerId = normalizeOptionalString(workerId);
+    if (!normalizedWorkerId) {
+      throw new Error('workerId is required to resume a worker.');
+    }
+    const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
+    const session = persistedAgentExecutor.getAgent(normalizedWorkerId);
+    if (!session) {
+      throw new Error(`Worker not found: ${normalizedWorkerId}`);
+    }
+    const subagentType = session.agentType === 'verifier' ? 'verifier' : 'worker';
+    return launchWorkerRecord(input, subagentType, normalizedWorkerId);
   };
 
   queryObj.stopWorker = async (workerId: string) => ({
@@ -3168,7 +3296,7 @@ function convertSubagentEventToSdkMessages(
 }
 
 function convertSubagentEventToOrchestrationEvent(
-  parentToolCallId: string,
+  parentToolCallId: string | null | undefined,
   sessionId: string,
   event: SubagentStreamEvent,
 ): SDKOrchestrationEvent | null {
@@ -3177,7 +3305,7 @@ function convertSubagentEventToOrchestrationEvent(
   return {
     kind,
     sessionId,
-    parentToolCallId,
+    parentToolCallId: parentToolCallId ?? event.agentId ?? event.taskId ?? 'sdk-control-plane',
     ...(event.agentId || event.taskId ? { workerId: event.agentId ?? event.taskId } : {}),
     ...(event.teamName ? { teamName: event.teamName } : {}),
     raw: cloneSubagentEvent(event),
