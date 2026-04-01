@@ -38,6 +38,11 @@ export interface SystemPromptOptions {
       canUseMcpTools?: boolean;
     };
   };
+  contextSections?: {
+    key: string;
+    title: string;
+    content: string;
+  }[];
 }
 
 export function buildSystemPrompt(options: SystemPromptOptions): string {
@@ -283,6 +288,12 @@ When the user asks you to create a pull request:
   const sessionSpecificGuidance = buildSessionSpecificGuidanceSection(options);
   if (sessionSpecificGuidance) {
     parts.push(sessionSpecificGuidance);
+  }
+
+  if (options.contextSections && options.contextSections.length > 0) {
+    for (const section of options.contextSections) {
+      parts.push(`# ${section.title}\n${section.content}`);
+    }
   }
 
   // ── Auto memory ──────────────────────────────────────────────────────

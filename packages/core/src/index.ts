@@ -14,6 +14,12 @@ export {
 } from './session-manager.js';
 export { AutoMemory } from './auto-memory.js';
 export { ConfigLoader, type Settings, type PermissionRuleConfig, type HookConfig } from './config-loader.js';
+export {
+  loadPromptContext,
+  type PromptContextOptions,
+  type PromptContextSection,
+  type PromptContextSnapshot,
+} from './context-providers.js';
 export { FileCheckpoint } from './checkpoint.js';
 export { buildGitContextSnapshot } from './git-context.js';
 export { buildSystemPrompt, isGitRepository, type SystemPromptOptions } from './system-prompt.js';

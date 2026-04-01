@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { parseArgs, TerminalRenderer, REPL, emitStreamJson, emitStreamJsonInit, TerminalPermissionPrompter, handleSlashCommand } from '@open-agent/cli';
-import { ConversationLoop, SessionManager, ConfigLoader, AutoMemory, buildSystemPrompt, isGitRepository, buildGitContextSnapshot, FileCheckpoint, buildTaskOrchestrationTemplates } from '@open-agent/core';
+import { ConversationLoop, SessionManager, ConfigLoader, buildSystemPrompt, isGitRepository, FileCheckpoint, buildTaskOrchestrationTemplates, loadPromptContext } from '@open-agent/core';
 import { createStore, createDefaultAppState } from '@open-agent/state';
 import type { AppState } from '@open-agent/state';
 import { renderApp } from '@open-agent/ink';
@@ -562,9 +562,6 @@ async function main(): Promise<void> {
   // AGENT.md config and Auto-Memory
   // ------------------------------------------------------------------
   const agentInstructions = configLoader.loadAgentMd(cwd);
-  const autoMemory = new AutoMemory(cwd);
-  const memoryContent = autoMemory.readMemory();
-
   // ------------------------------------------------------------------
   // File checkpoint — records file states before Write/Edit operations
   // so the user can /rewind to any prior state.
@@ -703,7 +700,13 @@ async function main(): Promise<void> {
   const toolNames = availableTools.map(t => t.name);
   const runtimeSnapshot = runtime.buildSnapshot();
   const isGitRepo = isGitRepository(cwd);
-  const gitContext = isGitRepo ? buildGitContextSnapshot(cwd) : undefined;
+  const promptContext = loadPromptContext({
+    cwd,
+    includeGit: isGitRepo,
+    includeMemory: true,
+    includeAgentInstructions: true,
+    additionalDirectories,
+  });
   const connectedMcpServers = runtimeSnapshot.mcpServers.filter((server) => server.status === 'connected');
   const configuredActiveTeam = activeTeamName ?? (settings.activeTeam as string | undefined) ?? defaultTeamName;
   const coordinatorScratchpadDir = teamManager.getTeam(configuredActiveTeam)
@@ -734,16 +737,14 @@ async function main(): Promise<void> {
       tools: toolNames,
       permissionMode: effectivePermissionMode,
       agentInstructions: [
-        ...agentInstructions,
+        ...promptContext.agentInstructions,
         ...customInstructionsList,
-        ...(additionalDirectories.length > 0
-          ? [`Additional working directories:\n${additionalDirectories.map((d: string) => `  - ${d}`).join('\n')}\nYou may read, search, and edit files in these directories in addition to the primary working directory.`]
-          : []),
       ],
-      memoryContent,
-      memoryDir: autoMemory.getDir(),
+      memoryContent: promptContext.memoryContent,
+      memoryDir: promptContext.memoryDir,
       isGitRepo,
-      gitContext,
+      gitContext: promptContext.gitContext,
+      contextSections: promptContext.sections,
       toolDescriptions: getToolPromptDescriptions(),
       runtimeSnapshot: {
         agents: runtimeSnapshot.agents,

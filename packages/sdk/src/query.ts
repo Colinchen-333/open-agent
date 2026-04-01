@@ -12,7 +12,7 @@ import type {
   SDKTaskNotificationMessage,
   SDKPromptSuggestionMessage,
 } from '@open-agent/core';
-import { ConversationLoop, SessionManager, buildSystemPrompt, ConfigLoader, AutoMemory, FileCheckpoint, isGitRepository, buildGitContextSnapshot, buildTaskOrchestrationTemplates } from '@open-agent/core';
+import { ConversationLoop, SessionManager, buildSystemPrompt, FileCheckpoint, isGitRepository, buildTaskOrchestrationTemplates, loadPromptContext } from '@open-agent/core';
 import { createStore, createDefaultAppState } from '@open-agent/state';
 import type { AppState } from '@open-agent/state';
 import { AgentLoader, AgentExecutor, TeamManager } from '@open-agent/agents';
@@ -952,31 +952,18 @@ export function query(
   // ------------------------------------------------------------------
   // System prompt
   // ------------------------------------------------------------------
-  const configLoader = new ConfigLoader();
-  let agentMdInstructions: string[] = [];
   const sources = new Set(settingSources);
-  if (sources.size > 0) {
-    agentMdInstructions = configLoader.loadAgentMd(cwd);
-  }
-
-  if (sources.size > 0) {
-    const userHome = homedir();
-    const hasUserAgentMd =
-      existsSync(join(userHome, '.open-agent', 'AGENT.md')) ||
-      existsSync(join(userHome, '.claude', 'AGENT.md')) ||
-      existsSync(join(userHome, '.claude', 'CLAUDE.md'));
-    const userCount = hasUserAgentMd ? 1 : 0;
-    agentMdInstructions = agentMdInstructions.filter((_instruction, idx) => {
-      if (idx < userCount) return sources.has('user');
-      return sources.has('project');
-    });
-  }
-
-  const memory = new AutoMemory(cwd);
-  const memoryContent =
-    sources.has('project')
-      ? memory.readMemory()
-      : undefined;
+  const promptContext = loadPromptContext({
+    cwd,
+    includeGit: isGitRepo,
+    includeMemory: sources.has('project'),
+    includeAgentInstructions: sources.size > 0,
+    instructionSources: [
+      ...(sources.has('user') ? ['user' as const] : []),
+      ...(sources.has('project') ? ['project' as const] : []),
+    ],
+    additionalDirectories: options.additionalDirectories,
+  });
 
   let activeModel = model;
   const presetSystemPrompt = typeof options.systemPrompt === 'object'
@@ -1001,11 +988,12 @@ export function query(
         language: responseLanguage,
         outputStyle,
         knowledgeCutoff: 'August 2025',
-        agentInstructions: agentMdInstructions,
-        memoryDir: memory.getDir(),
-        memoryContent: memoryContent ?? undefined,
+        agentInstructions: promptContext.agentInstructions,
+        memoryDir: promptContext.memoryDir,
+        memoryContent: promptContext.memoryContent,
         isGitRepo,
-        gitContext,
+        gitContext: promptContext.gitContext,
+        contextSections: promptContext.sections,
         toolDescriptions: getToolPromptDescriptions(),
         runtimeSnapshot: {
           agents: runtimeSnapshot.agents,
@@ -1028,12 +1016,6 @@ export function query(
 
     if (presetSystemPrompt?.type === 'preset' && presetSystemPrompt.append) {
       nextPrompt += '\n\n' + presetSystemPrompt.append;
-    }
-
-    if (options.additionalDirectories && options.additionalDirectories.length > 0) {
-      nextPrompt += '\n\nAdditional working directories:\n' +
-        options.additionalDirectories.map(d => `  - ${d}`).join('\n') +
-        '\nYou may read, search, and edit files in these directories in addition to the primary working directory.';
     }
 
     return nextPrompt;

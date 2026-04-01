@@ -115,4 +115,24 @@ describe('buildSystemPrompt runtime snapshot', () => {
     expect(prompt).toContain('Current branch: main');
     expect(prompt).toContain('M src/index.ts');
   });
+
+  it('renders provider-supplied context sections', () => {
+    const prompt = buildSystemPrompt({
+      cwd: '/tmp/demo',
+      model: 'claude-sonnet-4-6',
+      tools: ['Read'],
+      permissionMode: 'default',
+      contextSections: [
+        {
+          key: 'additional-working-directories',
+          title: 'Additional Working Directories',
+          content: '- /tmp/one\n- /tmp/two',
+        },
+      ],
+    });
+
+    expect(prompt).toContain('# Additional Working Directories');
+    expect(prompt).toContain('/tmp/one');
+    expect(prompt).toContain('/tmp/two');
+  });
 });
