@@ -30,6 +30,7 @@ import {
   cleanupWorktree,
   hasWorktreeChanges,
   getToolPromptDescriptions,
+  listPersistedBackgroundTasks,
 } from '@open-agent/tools';
 import { autoDetectProvider, createProvider, calculateCost } from '@open-agent/providers';
 import type { Message } from '@open-agent/providers';
@@ -1652,10 +1653,125 @@ export function query(
     return info ? JSON.parse(JSON.stringify(info)) : null;
   };
 
+  queryObj.listBackgroundTasks = async () => {
+    const bashTasks = listPersistedBackgroundTasks().map((task) => ({
+      task_id: task.taskId,
+      type: 'bash' as const,
+      status: task.status,
+      summary: task.summary ?? task.error ?? task.status,
+      session_id: task.sessionId,
+      cwd: task.cwd,
+      output_file: task.outputFile,
+      command: task.command,
+      started_at: task.startTime,
+    }));
+
+    const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
+    const agentTasks = persistedAgentExecutor.listPersistedAgents().map((session) => ({
+      task_id: session.agentId,
+      type: 'agent' as const,
+      status: session.state === 'running'
+        ? 'running'
+        : session.state === 'completed'
+          ? 'completed'
+          : session.state === 'shutdown'
+            ? 'stopped'
+            : 'failed',
+      summary: summarizePlainText(session.result ?? session.error),
+      session_id: session.parentSessionId,
+      cwd: session.cwd,
+      output_file: session.outputFile,
+      command: session.name ?? session.agentType,
+      started_at: session.startedAt ? new Date(session.startedAt).getTime() : undefined,
+    }));
+
+    return [...bashTasks, ...agentTasks]
+      .sort((left, right) => (right.started_at ?? 0) - (left.started_at ?? 0));
+  };
+
+  queryObj.getBackgroundTask = async (taskId: string, options?: { block?: boolean; timeout?: number }) => {
+    const taskOutputTool = createTaskOutputTool({
+      getBackgroundAgent: (agentId) => {
+        if (!sdkAgentExecutor) return null;
+        const session = sdkAgentExecutor.getAgent(agentId);
+        if (!session) return null;
+        return {
+          status: session.state === 'running'
+            ? 'running'
+            : session.state === 'completed'
+              ? 'completed'
+              : session.state === 'shutdown'
+                ? 'stopped'
+                : 'failed',
+          output_file: session.outputFile ?? '',
+          result: session.result,
+          summary: summarizePlainText(session.result ?? session.error),
+          team_name: session.teamName,
+          description: session.name ?? session.agentType,
+          usage: {
+            total_tokens: session.totalTokens ?? 0,
+            tool_uses: session.totalToolUseCount ?? 0,
+            duration_ms: session.durationMs,
+          },
+        };
+      },
+      stopBackgroundAgent: (agentId) => sdkAgentExecutor?.stopAgent(agentId) ?? false,
+    });
+
+    const raw = await taskOutputTool.execute({
+      task_id: taskId,
+      block: options?.block ?? false,
+      timeout: options?.timeout ?? 1000,
+    }, { cwd, sessionId });
+
+    if (typeof raw === 'string' && raw.startsWith('Error: No task found')) {
+      return null;
+    }
+
+    try {
+      return JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      return { raw_output: raw };
+    }
+  };
+
   queryObj.stopTask = async (_taskId: string) => {
-    abortQuery(false);
-    cleanupQueryResources();
-    finalizeGenerator();
+    const taskId = _taskId;
+    const taskStopTool = createTaskStopTool({
+      getBackgroundAgent: (agentId) => {
+        if (!sdkAgentExecutor) return null;
+        const session = sdkAgentExecutor.getAgent(agentId);
+        if (!session) return null;
+        return {
+          status: session.state === 'running'
+            ? 'running'
+            : session.state === 'completed'
+              ? 'completed'
+              : session.state === 'shutdown'
+                ? 'stopped'
+                : 'failed',
+          output_file: session.outputFile ?? '',
+          result: session.result,
+          summary: summarizePlainText(session.result ?? session.error),
+          team_name: session.teamName,
+          description: session.name ?? session.agentType,
+          usage: {
+            total_tokens: session.totalTokens ?? 0,
+            tool_uses: session.totalToolUseCount ?? 0,
+            duration_ms: session.durationMs,
+          },
+        };
+      },
+      stopBackgroundAgent: (agentId) => sdkAgentExecutor?.stopAgent(agentId) ?? false,
+    });
+
+    const raw = await taskStopTool.execute({ task_id: taskId }, { cwd, sessionId });
+    if (typeof raw === 'string' && raw.startsWith('Error: No task found')) {
+      abortQuery(false);
+      cleanupQueryResources();
+      finalizeGenerator();
+      return;
+    }
   };
 
   queryObj.close = () => {

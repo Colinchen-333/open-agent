@@ -926,6 +926,31 @@ async function main(): Promise<void> {
           status: s.status,
         })),
         permissionEngine,
+        listBackgroundAgents: () =>
+          agentExecutor.listPersistedAgents().map((session) => ({
+            task_id: session.agentId,
+            info: {
+              status: session.state === 'running'
+                ? 'running'
+                : session.state === 'completed'
+                  ? 'completed'
+                  : session.state === 'shutdown'
+                    ? 'stopped'
+                    : 'failed',
+              output_file: session.outputFile ?? '',
+              result: session.result,
+              summary: summarizePlainText(session.result ?? session.error),
+              team_name: session.teamName,
+              description: session.name ?? session.agentType,
+              usage: {
+                total_tokens: session.totalTokens ?? 0,
+                tool_uses: session.totalToolUseCount ?? 0,
+                duration_ms: session.durationMs,
+              },
+            },
+          })),
+        getBackgroundAgent: agentManagementDeps.getBackgroundAgent,
+        stopBackgroundAgent: agentManagementDeps.stopBackgroundAgent,
       });
       if (result) {
         if (result.shouldExit) break;

@@ -1,6 +1,16 @@
 import { existsSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import type { ConversationLoop, FileCheckpoint, SessionManager } from '@open-agent/core';
+import {
+  createTaskOutputTool,
+  createTaskStopTool,
+  listPersistedBackgroundTasks,
+  type BackgroundAgentInfo,
+} from '@open-agent/tools';
+import {
+  buildBackgroundAgentListEntries,
+  listBackgroundTasksForDisplay,
+} from './task-command-helpers.js';
 
 export interface SlashCommandContext {
   loop: ConversationLoop;
@@ -37,6 +47,9 @@ export interface SlashCommandContext {
     };
     setMode(mode: string): void;
   };
+  listBackgroundAgents?: () => Array<{ task_id: string; info: BackgroundAgentInfo }>;
+  getBackgroundAgent?: (taskId: string) => BackgroundAgentInfo | null;
+  stopBackgroundAgent?: (taskId: string) => boolean;
 }
 
 export interface SlashCommandResult {
@@ -94,6 +107,9 @@ const SLASH_COMMANDS: Record<
         '    /cost            Show session cost',
         '    /compact         Compact conversation history',
         '    /rewind [n]      Rewind file changes',
+        '    /tasks           List background tasks',
+        '    /tasks <id>      Inspect a background task',
+        '    /tasks stop <id> Stop a background task',
         '',
         '  Tools & Config',
         '    /tools           List registered tools',
@@ -145,6 +161,62 @@ const SLASH_COMMANDS: Record<
         handled: true,
         output: `Recent sessions:\n${lines.join('\n')}\n\nUse --resume <id> to resume.`,
       };
+    },
+  },
+  '/tasks': {
+    description: 'List, inspect, or stop background tasks',
+    handler: async (args, ctx) => {
+      const trimmed = args.trim();
+      const persistedBashTasks = listPersistedBackgroundTasks().map((task) => ({
+        task_id: task.taskId,
+        type: 'bash' as const,
+        status: task.status,
+        summary: task.summary ?? task.error ?? task.status,
+        session_id: task.sessionId,
+        cwd: task.cwd,
+        output_file: task.outputFile,
+        command: task.command,
+        started_at: task.startTime,
+      }));
+      const agentTasks = buildBackgroundAgentListEntries(ctx.listBackgroundAgents?.() ?? []);
+
+      if (!trimmed) {
+        const result = listBackgroundTasksForDisplay({
+          tasks: [...persistedBashTasks, ...agentTasks].sort(
+            (left, right) => (right.started_at ?? 0) - (left.started_at ?? 0),
+          ),
+          sessionId: ctx.sessionId,
+        });
+        return { handled: true, output: result.output };
+      }
+
+      const [verb, maybeTaskId] = trimmed.split(/\s+/, 2);
+      const taskId = verb === 'stop' ? maybeTaskId : verb;
+      if (!taskId) {
+        return { handled: true, output: 'Usage: /tasks | /tasks <task-id> | /tasks stop <task-id>' };
+      }
+
+      if (verb === 'stop') {
+        const stopTool = createTaskStopTool({
+          getBackgroundAgent: ctx.getBackgroundAgent,
+          stopBackgroundAgent: ctx.stopBackgroundAgent,
+        });
+        const raw = await stopTool.execute({ task_id: taskId }, {
+          cwd: ctx.cwd,
+          sessionId: ctx.sessionId,
+        });
+        return { handled: true, output: raw };
+      }
+
+      const outputTool = createTaskOutputTool({
+        getBackgroundAgent: ctx.getBackgroundAgent,
+        stopBackgroundAgent: ctx.stopBackgroundAgent,
+      });
+      const raw = await outputTool.execute({ task_id: taskId, block: false }, {
+        cwd: ctx.cwd,
+        sessionId: ctx.sessionId,
+      });
+      return { handled: true, output: raw };
     },
   },
   '/config': {

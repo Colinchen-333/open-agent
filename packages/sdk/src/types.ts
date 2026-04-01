@@ -288,6 +288,18 @@ export interface AgentInfo {
   model?: string;
 }
 
+export interface BackgroundTaskSummary {
+  task_id: string;
+  type: 'bash' | 'agent';
+  status: string;
+  summary: string;
+  session_id?: string;
+  cwd?: string;
+  output_file?: string;
+  command?: string;
+  started_at?: number;
+}
+
 /**
  * Returned by `query()`.  Implements `AsyncGenerator<SDKMessage>` so callers
  * can iterate with `for await … of` as well as calling control methods.
@@ -320,6 +332,10 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   initializationResult(): Promise<InitializationResult>;
   /** Return persisted metadata for the current session. */
   sessionInfo(): Promise<SessionInfo | null>;
+  /** Return visible background bash/agent tasks for the current runtime. */
+  listBackgroundTasks(): Promise<BackgroundTaskSummary[]>;
+  /** Return structured details for a specific background task, if found. */
+  getBackgroundTask(taskId: string, options?: { block?: boolean; timeout?: number }): Promise<Record<string, unknown> | null>;
   /**
    * Abort the current task.  For a single `query()` call this is equivalent to
    * `interrupt()`.  The `taskId` parameter is accepted for API symmetry with

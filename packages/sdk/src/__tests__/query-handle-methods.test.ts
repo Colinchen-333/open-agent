@@ -5,6 +5,7 @@ import { join } from 'path';
 import { SessionManager } from '@open-agent/core';
 import { query } from '../query.js';
 import { createSdkMcpServer, tool } from '../mcp-helpers.js';
+import { savePersistedBackgroundTask } from '@open-agent/tools';
 
 // ---------------------------------------------------------------------------
 // initializationResult()
@@ -127,6 +128,71 @@ describe('query().stopTask()', () => {
     // Should not throw with taskId
     await q.stopTask('task-1');
     await q.stopTask('some-task-id');
+    q.close();
+  });
+
+  it('stops a persisted bash background task without aborting the query', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-stop-task-'));
+    savePersistedBackgroundTask({
+      taskId: 'bg-stop-sdk',
+      kind: 'bash',
+      sessionId: 'session-sdk',
+      command: 'npm test',
+      cwd,
+      summary: 'Run tests',
+      status: 'stopped',
+      startTime: Date.now(),
+      outputFile: join(cwd, 'bg-stop-sdk.log'),
+    });
+
+    const q = query('test', { cwd, model: 'claude-sonnet-4-6' });
+    await expect(q.stopTask('bg-stop-sdk')).resolves.toBeUndefined();
+    q.close();
+  });
+});
+
+describe('query() background task inspection', () => {
+  it('lists persisted bash background tasks', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-list-tasks-'));
+    savePersistedBackgroundTask({
+      taskId: 'bg-list-sdk',
+      kind: 'bash',
+      sessionId: 'session-list',
+      command: 'bun test',
+      cwd,
+      summary: 'Run test suite',
+      status: 'running',
+      startTime: Date.now(),
+      outputFile: join(cwd, 'bg-list-sdk.log'),
+    });
+
+    const q = query('test', { cwd, model: 'claude-sonnet-4-6' });
+    const tasks = await q.listBackgroundTasks();
+    expect(tasks.some((task) => task.task_id === 'bg-list-sdk' && task.type === 'bash')).toBe(true);
+    q.close();
+  });
+
+  it('returns structured background task details for persisted bash tasks', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-task-details-'));
+    const outputFile = join(cwd, 'bg-detail-sdk.log');
+    writeFileSync(outputFile, 'ok\n');
+    savePersistedBackgroundTask({
+      taskId: 'bg-detail-sdk',
+      kind: 'bash',
+      sessionId: 'session-detail',
+      command: 'echo ok',
+      cwd,
+      summary: 'Echo ok',
+      status: 'completed',
+      startTime: Date.now(),
+      outputFile,
+    });
+
+    const q = query('test', { cwd, model: 'claude-sonnet-4-6' });
+    const task = await q.getBackgroundTask('bg-detail-sdk');
+    expect(task).not.toBeNull();
+    expect(task?.task_id).toBe('bg-detail-sdk');
+    expect(task?.type).toBe('bash');
     q.close();
   });
 });
