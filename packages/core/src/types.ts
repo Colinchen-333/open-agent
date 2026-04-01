@@ -442,6 +442,59 @@ export interface SDKPromptSuggestionMessage {
   session_id: string;
 }
 
+export interface SDKSystemInformationalMessage {
+  type: 'system';
+  subtype: 'informational';
+  message: string;
+  uuid: string;
+  session_id: string;
+}
+
+export interface SDKSystemApiErrorMessage {
+  type: 'system';
+  subtype: 'api_error';
+  message: string;
+  error: { status: number; message: string };
+  uuid: string;
+  session_id: string;
+}
+
+export interface SDKSystemThinkingMessage {
+  type: 'system';
+  subtype: 'thinking';
+  message: string;
+  uuid: string;
+  session_id: string;
+}
+
+export interface SDKSystemTurnDurationMessage {
+  type: 'system';
+  subtype: 'turn_duration';
+  message: string;
+  durationMs: number;
+  uuid: string;
+  session_id: string;
+}
+
+/** Streaming tool progress (Bash stdout chunks, MCP call progress, etc.) */
+export interface SDKProgressMessage {
+  type: 'progress';
+  toolUseId: string;
+  toolName: string;
+  data: unknown;
+  uuid: string;
+  session_id: string;
+}
+
+/** Placeholder for deleted/redacted/compacted messages */
+export interface SDKTombstoneMessage {
+  type: 'tombstone';
+  originalMessageId: string;
+  reason: 'deleted' | 'redacted' | 'compacted';
+  uuid: string;
+  session_id: string;
+}
+
 export type SDKMessage =
   | SDKAssistantMessage
   | SDKUserMessage
@@ -463,7 +516,13 @@ export type SDKMessage =
   | SDKFilesPersistedEvent
   | SDKToolUseSummaryMessage
   | SDKRateLimitEvent
-  | SDKPromptSuggestionMessage;
+  | SDKPromptSuggestionMessage
+  | SDKSystemInformationalMessage
+  | SDKSystemApiErrorMessage
+  | SDKSystemThinkingMessage
+  | SDKSystemTurnDurationMessage
+  | SDKProgressMessage
+  | SDKTombstoneMessage;
 
 // Slash command definition
 export interface SlashCommand {
