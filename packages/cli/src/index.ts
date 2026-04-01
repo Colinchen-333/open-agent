@@ -10,6 +10,11 @@ export { REPL } from './repl.js';
 export { emitStreamJson, emitStreamJsonInit } from './stream-json.js';
 
 export { TerminalPermissionPrompter } from './permission-prompter.js';
+export {
+  buildCapabilitySnapshotFromTools,
+  formatCapabilitySnapshotForDisplay,
+  serializeCapabilitySnapshot,
+} from './capability-command-helpers.js';
 
 export {
   handleSlashCommand,

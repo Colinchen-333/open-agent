@@ -1,5 +1,5 @@
-import { existsSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { dirname, join } from 'path';
 import type { ConversationLoop, FileCheckpoint, SessionManager } from '@open-agent/core';
 import {
   createTaskOutputTool,
@@ -9,8 +9,16 @@ import {
 } from '@open-agent/tools';
 import {
   buildBackgroundAgentListEntries,
+  buildTaskInspection,
+  formatTaskInspectionForDisplay,
   listBackgroundTasksForDisplay,
 } from './task-command-helpers.js';
+import {
+  buildCapabilitySnapshotFromTools,
+  formatCapabilitySnapshotForDisplay,
+  serializeCapabilitySnapshot,
+  type CapabilitySnapshot,
+} from './capability-command-helpers.js';
 
 export interface SlashCommandContext {
   loop: ConversationLoop;
@@ -35,6 +43,8 @@ export interface SlashCommandContext {
   skills?: { name: string; description: string; source?: string }[];
   /** MCP server status. */
   mcpStatus?: { name: string; status: string }[];
+  /** Tool capability snapshot, when provided by the caller. */
+  capabilities?: CapabilitySnapshot;
   /** Permission engine instance for detailed rule display. */
   permissionEngine?: {
     getSummary(): {
@@ -107,9 +117,12 @@ const SLASH_COMMANDS: Record<
         '    /cost            Show session cost',
         '    /compact         Compact conversation history',
         '    /rewind [n]      Rewind file changes',
-        '    /tasks           List background tasks',
-        '    /tasks <id>      Inspect a background task',
-        '    /tasks stop <id> Stop a background task',
+        '    /tasks [all]             List background tasks',
+        '    /tasks session <id>      List tasks for one session',
+        '    /tasks <id>              Inspect a background task',
+        '    /tasks logs <id>         Show logs view with log path',
+        '    /tasks attach <id> [ms]  Wait and inspect task output',
+        '    /tasks stop <id>         Stop a background task',
         '',
         '  Tools & Config',
         '    /tools           List registered tools',
@@ -121,6 +134,7 @@ const SLASH_COMMANDS: Record<
         '    /memory          Show auto-memory status',
         '    /agents          List available agent types',
         '    /skills          List available skills',
+        '    /capabilities    Show tool capability layers and presets',
         '    /mcp             Show MCP server status',
         '',
         '  Git',
@@ -179,24 +193,42 @@ const SLASH_COMMANDS: Record<
         started_at: task.startTime,
       }));
       const agentTasks = buildBackgroundAgentListEntries(ctx.listBackgroundAgents?.() ?? []);
+      const allTasks = [...persistedBashTasks, ...agentTasks].sort(
+        (left, right) => (right.started_at ?? 0) - (left.started_at ?? 0),
+      );
 
       if (!trimmed) {
         const result = listBackgroundTasksForDisplay({
-          tasks: [...persistedBashTasks, ...agentTasks].sort(
-            (left, right) => (right.started_at ?? 0) - (left.started_at ?? 0),
-          ),
+          tasks: allTasks,
           sessionId: ctx.sessionId,
         });
         return { handled: true, output: result.output };
       }
 
-      const [verb, maybeTaskId] = trimmed.split(/\s+/, 2);
-      const taskId = verb === 'stop' ? maybeTaskId : verb;
-      if (!taskId) {
-        return { handled: true, output: 'Usage: /tasks | /tasks <task-id> | /tasks stop <task-id>' };
+      const [verb, maybeTaskId, maybeTimeout] = trimmed.split(/\s+/, 3);
+      if (verb === 'all') {
+        const result = listBackgroundTasksForDisplay({
+          tasks: allTasks,
+          sessionFilter: 'all',
+        });
+        return { handled: true, output: result.output };
+      }
+      if (verb === 'session') {
+        if (!maybeTaskId) {
+          return { handled: true, output: 'Usage: /tasks session <session-id>' };
+        }
+        const result = listBackgroundTasksForDisplay({
+          tasks: allTasks,
+          sessionFilter: maybeTaskId,
+        });
+        return { handled: true, output: result.output };
       }
 
       if (verb === 'stop') {
+        const taskId = maybeTaskId;
+        if (!taskId) {
+          return { handled: true, output: 'Usage: /tasks stop <task-id>' };
+        }
         const stopTool = createTaskStopTool({
           getBackgroundAgent: ctx.getBackgroundAgent,
           stopBackgroundAgent: ctx.stopBackgroundAgent,
@@ -208,15 +240,43 @@ const SLASH_COMMANDS: Record<
         return { handled: true, output: raw };
       }
 
+      const mode = verb === 'logs' || verb === 'attach' ? verb : 'inspect';
+      const taskId = mode === 'inspect' ? verb : maybeTaskId;
+      if (!taskId) {
+        return {
+          handled: true,
+          output: 'Usage: /tasks | /tasks all | /tasks session <id> | /tasks <task-id> | /tasks logs <task-id> | /tasks attach <task-id> [timeoutMs] | /tasks stop <task-id>',
+        };
+      }
+
+      const parsedTimeout = Number.parseInt(mode === 'attach' ? (maybeTimeout ?? '') : '', 10);
+      const timeoutMs = mode === 'attach'
+        ? (Number.isFinite(parsedTimeout) && parsedTimeout > 0 ? Math.min(parsedTimeout, 600000) : 30000)
+        : 1000;
+
       const outputTool = createTaskOutputTool({
         getBackgroundAgent: ctx.getBackgroundAgent,
         stopBackgroundAgent: ctx.stopBackgroundAgent,
       });
-      const raw = await outputTool.execute({ task_id: taskId, block: false }, {
+      const raw = await outputTool.execute({ task_id: taskId, block: mode === 'attach', timeout: timeoutMs }, {
         cwd: ctx.cwd,
         sessionId: ctx.sessionId,
       });
-      return { handled: true, output: raw };
+      if (typeof raw === 'string' && raw.startsWith('Error: No task found')) {
+        return { handled: true, output: raw };
+      }
+
+      const inspection = buildTaskInspection(raw, taskId);
+      if (!inspection) {
+        return { handled: true, output: raw };
+      }
+      return {
+        handled: true,
+        output: formatTaskInspectionForDisplay(
+          inspection,
+          { view: mode === 'inspect' ? 'inspect' : mode },
+        ),
+      };
     },
   },
   '/config': {
@@ -424,7 +484,40 @@ const SLASH_COMMANDS: Record<
       const lines = tools.map((name, i) => `  ${String(i + 1).padStart(2)}. ${name}`);
       return {
         handled: true,
-        output: `Registered tools (${tools.length}):\n${lines.join('\n')}`,
+        output: `Registered tools (${tools.length}):\n${lines.join('\n')}\n\nUse /capabilities to view layered presets.`,
+      };
+    },
+  },
+  '/capabilities': {
+    description: 'Show tool capability layers and presets',
+    handler: async (args, ctx) => {
+      const trimmed = args.trim();
+      const snapshot = ctx.capabilities ?? buildCapabilitySnapshotFromTools(ctx.tools ?? []);
+
+      if (trimmed.length === 0) {
+        return { handled: true, output: formatCapabilitySnapshotForDisplay(snapshot) };
+      }
+
+      const [mode, maybePath] = trimmed.split(/\s+/, 2);
+      if (mode === 'json') {
+        return { handled: true, output: serializeCapabilitySnapshot(snapshot) };
+      }
+      if (mode === 'export') {
+        if (!maybePath) {
+          return { handled: true, output: 'Usage: /capabilities export <path>' };
+        }
+        mkdirSync(dirname(maybePath), { recursive: true });
+        writeFileSync(maybePath, serializeCapabilitySnapshot(snapshot), 'utf-8');
+        return { handled: true, output: `Wrote capability snapshot to ${maybePath}` };
+      }
+
+      return {
+        handled: true,
+        output: [
+          'Usage: /capabilities',
+          '  /capabilities json',
+          '  /capabilities export <path>',
+        ].join('\n'),
       };
     },
   },
@@ -507,6 +600,10 @@ const SLASH_COMMANDS: Record<
       checks.push(`  ✓ CWD: ${ctx.cwd}`);
       checks.push(`  ✓ Model: ${ctx.model}`);
       checks.push(`  ✓ Permission mode: ${ctx.permissionMode ?? 'default'}`);
+      if (ctx.tools?.length) {
+        const snapshot = ctx.capabilities ?? buildCapabilitySnapshotFromTools(ctx.tools);
+        checks.push(`  ✓ Tool capability presets: ${snapshot.presets.map((preset) => `${preset.name}(${preset.toolCount})`).join(', ')}`);
+      }
       return { handled: true, output: `Environment check:\n${checks.join('\n')}` };
     },
   },
