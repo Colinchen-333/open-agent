@@ -1,13 +1,17 @@
 import { ConversationLoop } from '@open-agent/core';
 import type { AgentDefinition } from '@open-agent/core';
+import { createStore, createDefaultAppState } from '@open-agent/state';
+import type { AppState } from '@open-agent/state';
 import type { LLMProvider } from '@open-agent/providers';
 import type { ToolDefinition } from '@open-agent/tools';
 import { randomUUID } from 'crypto';
+import { join } from 'path';
 import { TeamManager } from './team-manager.js';
 
 /** Lightweight event emitted by subagent for parent visibility. */
 export interface SubagentStreamEvent {
   type: 'tool_start' | 'tool_result' | 'launched' | 'completed' | 'failed' | 'shutdown';
+  protocol?: 'task_notification_v1';
   toolName?: string;
   toolUseId?: string;
   input?: Record<string, unknown>;
@@ -16,12 +20,31 @@ export interface SubagentStreamEvent {
   error?: string;
   /** Agent ID for lifecycle events (launched/completed/failed/shutdown) */
   agentId?: string;
+  /** Stable task ID used by SDK task protocol messages. */
+  taskId?: string;
   /** Task description for lifecycle events */
   description?: string;
   /** Duration in milliseconds (completed/failed/shutdown events) */
   durationMs?: number;
+  /** Completion timestamp for lifecycle notifications. */
+  completedAt?: string;
+  teamName?: string;
   /** Total tool use count (completed events) */
   totalToolUseCount?: number;
+  /** High-level notification status for lifecycle events. */
+  status?: 'completed' | 'failed' | 'stopped';
+  /** Background output file when available. */
+  outputFile?: string;
+  /** Concise lifecycle summary for upstream renderers. */
+  summary?: string;
+  /** Usage snapshot for task progress / completion surfaces. */
+  usage?: {
+    total_tokens: number;
+    tool_uses: number;
+    duration_ms: number;
+  };
+  /** Last tool used, when applicable. */
+  lastToolName?: string;
 }
 
 export interface AgentRunnerOptions {
@@ -29,6 +52,7 @@ export interface AgentRunnerOptions {
   provider: LLMProvider;
   tools: Map<string, ToolDefinition>;
   cwd: string;
+  agentId?: string;
   parentSessionId?: string;
   maxTurns?: number;
   mode?: string;
@@ -74,12 +98,62 @@ export interface AgentResult {
   hasWorktreeChanges?: boolean;
 }
 
+const SUBAGENT_SYSTEM_CONTRACT = `You are a subagent working on behalf of another OpenAgent agent.
+
+Important operating rules:
+- The user cannot see your raw tool calls or intermediate reasoning. Only your final result is relayed upstream.
+- You cannot ask the user follow-up questions directly. Use the prompt you were given and make the best grounded decision you can from the available context.
+- Do not mention missing conversation context unless it materially blocks the task. Infer the most practical path from the files, tools, and instructions you have.
+- Be concrete in your final report: cite files, checks, and decisions. Avoid vague summaries.
+- If you were asked to research, return findings and next steps. If you were asked to implement, report what changed and how you verified it.
+- Treat every prompt from the parent agent as authoritative and self-contained. Do not assume the user can clarify missing context later.
+- If you are part of a multi-worker effort, leave high-signal handoff notes in the shared scratchpad instead of relying on the user-facing chat for coordination.
+- Verification means proving the result works, not merely confirming that code exists.`;
+
+interface SubagentSystemPromptOptions {
+  teamName?: string;
+  scratchpadDir?: string;
+  availableTools?: string[];
+}
+
+export function buildSubagentSystemPrompt(
+  definitionPrompt: string | undefined,
+  cwd: string,
+  options: SubagentSystemPromptOptions = {},
+): string {
+  const toolList = (options.availableTools ?? []).slice().sort();
+  const coordinationLines: string[] = [];
+
+  if (toolList.length > 0) {
+    coordinationLines.push(`Available tools for this run: ${toolList.join(', ')}`);
+    coordinationLines.push('Different agent types may expose only a subset of the full tool pool. Do not assume unavailable tools exist.');
+  }
+
+  if (options.teamName) {
+    coordinationLines.push(`Team context: ${options.teamName}`);
+  }
+
+  if (options.scratchpadDir) {
+    coordinationLines.push(`Scratchpad directory: ${options.scratchpadDir}`);
+    coordinationLines.push('Use the scratchpad for durable notes, synthesized findings, and worker handoffs. Keep it concise and high-signal.');
+  }
+
+  const coordinationSection = coordinationLines.length > 0
+    ? `\n\nCoordination context:\n${coordinationLines.map((line) => `- ${line}`).join('\n')}`
+    : '';
+
+  if (definitionPrompt) {
+    return `${SUBAGENT_SYSTEM_CONTRACT}\n\n${definitionPrompt}${coordinationSection}\n\nCurrent working directory: ${cwd}`;
+  }
+  return `${SUBAGENT_SYSTEM_CONTRACT}\n\nYou are a specialized agent. Complete the given task.${coordinationSection}\n\nCurrent working directory: ${cwd}`;
+}
+
 export class AgentRunner {
   private agentId: string;
   private options: AgentRunnerOptions;
 
   constructor(options: AgentRunnerOptions) {
-    this.agentId = randomUUID();
+    this.agentId = options.agentId ?? randomUUID();
     this.options = options;
   }
 
@@ -114,22 +188,45 @@ export class AgentRunner {
     // (Bash, Read, Write, etc.) operate on the isolated branch.
     const effectiveCwd = this.options.worktreePath ?? this.options.cwd;
 
-    const systemPrompt = def.prompt
-      ? `${def.prompt}\n\nCurrent working directory: ${effectiveCwd}`
-      : `You are a specialized agent. Complete the given task. Working directory: ${effectiveCwd}`;
+    const teamManager = (this.options.teamName && this.options.agentName)
+      ? new TeamManager()
+      : null;
+    const scratchpadDir = this.options.teamName
+      ? (teamManager ?? new TeamManager()).getScratchpadDir(this.options.teamName)
+      : join(effectiveCwd, '.open-agent', 'scratchpad');
+    const systemPrompt = buildSubagentSystemPrompt(def.prompt, effectiveCwd, {
+      teamName: this.options.teamName,
+      scratchpadDir,
+      availableTools: [...tools.keys()],
+    });
+
+    const resolvedModel = this.resolveModel(this.options.model ?? def.model);
+    const subagentSessionId = `subagent-${this.agentId}`;
+
+    const appStore = createStore<AppState>(createDefaultAppState({
+      sessionId: subagentSessionId,
+      cwd: effectiveCwd,
+      model: resolvedModel,
+      permissionMode: 'default',
+      tools,
+      thinkingConfig: { type: 'adaptive' },
+      verbose: false,
+    }));
 
     const loop = new ConversationLoop({
       provider: this.options.provider,
       tools,
-      model: this.resolveModel(this.options.model ?? def.model),
+      model: resolvedModel,
       systemPrompt,
       maxTurns: this.options.maxTurns ?? def.maxTurns ?? 30,
       thinking: { type: 'adaptive' },
       effort: 'high',
       cwd: effectiveCwd,
-      sessionId: `subagent-${this.agentId}`,
+      sessionId: subagentSessionId,
       initialMessages: this.options.initialMessages,
       abortSignal: this.options.abortSignal,
+      getAppState: () => appStore.getState(),
+      setAppState: (updater) => appStore.setState(updater),
     });
 
     let resultText = '';
@@ -137,10 +234,6 @@ export class AgentRunner {
     let numTurns = 0;
     let toolUseCount = 0;
     let resultUsage: any = {};
-
-    const teamManager = (this.options.teamName && this.options.agentName)
-      ? new TeamManager()
-      : null;
 
     // Outer loop: allows re-entering the conversation after receiving inbox messages.
     let currentPrompt: string = prompt;
@@ -165,6 +258,9 @@ export class AgentRunner {
                   if (block.type === 'tool_use') {
                     this.options.onEvent({
                       type: 'tool_start',
+                      protocol: 'task_notification_v1',
+                      agentId: this.agentId,
+                      taskId: this.agentId,
                       toolName: block.name,
                       toolUseId: block.id,
                       input: typeof block.input === 'object' && block.input ? block.input : undefined,
@@ -176,11 +272,20 @@ export class AgentRunner {
             if (msg.type === 'tool_result') {
               this.options.onEvent({
                 type: 'tool_result',
+                protocol: 'task_notification_v1',
+                agentId: this.agentId,
+                taskId: this.agentId,
                 toolName: (msg as any).tool_name,
                 toolUseId: (msg as any).tool_use_id,
                 ok: !(msg as any).is_error,
                 output: typeof (msg as any).result === 'string' ? (msg as any).result : undefined,
                 error: (msg as any).is_error ? (msg as any).result : undefined,
+                lastToolName: (msg as any).tool_name,
+                usage: {
+                  total_tokens: 0,
+                  tool_uses: toolUseCount + 1,
+                  duration_ms: Date.now() - startTime,
+                },
               });
             }
           } catch { /* onEvent callback error must not interrupt subagent execution */ }

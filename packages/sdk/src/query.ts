@@ -9,25 +9,34 @@ import type {
   AccountInfo,
   McpServerStatusConfig,
   AgentDefinition,
+  SDKTaskNotificationMessage,
+  SDKPromptSuggestionMessage,
 } from '@open-agent/core';
-import { ConversationLoop, SessionManager, buildSystemPrompt, ConfigLoader, AutoMemory, FileCheckpoint } from '@open-agent/core';
-import { AgentLoader, AgentExecutor } from '@open-agent/agents';
+import { ConversationLoop, SessionManager, buildSystemPrompt, ConfigLoader, AutoMemory, FileCheckpoint, isGitRepository, buildGitContextSnapshot, buildTaskOrchestrationTemplates } from '@open-agent/core';
+import { createStore, createDefaultAppState } from '@open-agent/state';
+import type { AppState } from '@open-agent/state';
+import { AgentLoader, AgentExecutor, TeamManager } from '@open-agent/agents';
+import type { SubagentStreamEvent } from '@open-agent/agents';
+import type { AgentSession } from '@open-agent/agents';
 import {
   createDefaultToolRegistry,
-  createToolSearchTool,
   createTaskTool,
   createTaskOutputTool,
   createTaskStopTool,
+  createTeamCreateTool,
+  createTeamDeleteTool,
+  createSendMessageTool,
   createWorktree,
   cleanupWorktree,
   hasWorktreeChanges,
+  getToolPromptDescriptions,
 } from '@open-agent/tools';
 import { autoDetectProvider, createProvider, calculateCost } from '@open-agent/providers';
 import type { Message } from '@open-agent/providers';
 import { PermissionEngine, SettingsLoader } from '@open-agent/permissions';
 import type { SandboxConfig, SettingsFile } from '@open-agent/permissions';
 import { HookExecutor } from '@open-agent/hooks';
-import { McpManager } from '@open-agent/mcp';
+import { OpenAgentRuntime } from '@open-agent/runtime';
 import type { QueryOptions, Query, RewindFilesResult, AgentInfo } from './types.js';
 import { applyPermissionUpdates } from './permission-updates.js';
 import { createPermissionPrompterBridge } from './permission-prompter.js';
@@ -130,6 +139,13 @@ export function query(
   const supportedAgentInfos = buildAgentInfoList(availableAgents);
   const selectedAgentModel = resolveAgentModel(selectedAgent?.model);
   const requestedModelHint = options.model ?? selectedAgentModel;
+  const outputStyle = options.outputStyle ?? 'text';
+  const responseLanguage = normalizeOptionalString(options.language);
+  const isGitRepo = isGitRepository(cwd);
+  const gitContext = isGitRepo ? buildGitContextSnapshot(cwd) : undefined;
+  const sessionExistedBeforeQuery = shouldPersist
+    ? resumeManager.getSession(cwd, sessionId) !== null
+    : false;
 
   // Queue for best-effort streamInput support in async-iterable prompt mode.
   const queuedInputs: SDKUserMessage[] = [];
@@ -265,6 +281,22 @@ export function query(
   // Tool registry — use public unregister() API, never touch internals.
   // ------------------------------------------------------------------
   const toolRegistry = createDefaultToolRegistry(cwd);
+  let baseTools = new Map(toolRegistry.list().map((tool) => [tool.name, tool]));
+  const runtime = new OpenAgentRuntime({
+    cwd,
+    toolRegistry,
+    availableAgents,
+    skillDirectories: options.skillDirectories,
+    includePluginSkills: options.includePluginSkills,
+    mcp: {
+      shouldRegisterTool: (toolName) => isToolAllowedByPolicy(toolName),
+      restoreTool: (toolName) => baseTools.get(toolName),
+    },
+  });
+  const runtimeReadyPromise = runtime.initialize();
+  void runtimeReadyPromise.catch(() => {});
+  runtime.registerSkillTool();
+  runtime.registerMcpResourceTools();
 
   // Allow caller to inject additional tools (e.g. Task, Team, Skill)
   // before any filtering is applied.
@@ -277,19 +309,144 @@ export function query(
     }
   }
 
-  if (!toolRegistry.get('ToolSearch')) {
-    toolRegistry.register(createToolSearchTool({
-      searchTools: async (searchQuery: string) => {
-        const q = searchQuery.toLowerCase().trim();
-        return toolRegistry
-          .list()
-          .map((tool) => ({ name: tool.name, description: tool.description }))
-          .filter((tool) => tool.name !== 'ToolSearch')
-          .filter((tool) => q.length === 0 || tool.name.toLowerCase().includes(q) || tool.description.toLowerCase().includes(q));
+  runtime.registerToolSearchTool();
+
+  const pendingSubagentMessages: SDKMessage[] = [];
+  let currentTurnObservation: PromptSuggestionObservation = createPromptSuggestionObservation();
+  const enqueueSubagentMessages = (
+    parentToolUseId: string,
+    event: SubagentStreamEvent,
+  ): void => {
+    pendingSubagentMessages.push(
+      ...convertSubagentEventToSdkMessages(parentToolUseId, sessionId, event),
+    );
+    currentTurnObservation.sawTask = true;
+    currentTurnObservation.sawSubagent = true;
+    if (options.onSubagentEvent) {
+      options.onSubagentEvent(parentToolUseId, event);
+    }
+  };
+
+  async function* flushPendingSubagentMessages(): AsyncGenerator<SDKMessage, void> {
+    while (pendingSubagentMessages.length > 0) {
+      yield pendingSubagentMessages.shift()!;
+    }
+  }
+
+  const sdkTeamManager = new TeamManager();
+  const defaultTeamName = 'default';
+  let activeTeamName: string | null = null;
+
+  if (!toolRegistry.get('TeamCreate')) {
+    toolRegistry.register(createTeamCreateTool({
+      createTeam: async (name: string, description?: string) => {
+        sdkTeamManager.createTeam(name, description);
+        activeTeamName = name;
+        return {
+          teamName: name,
+          configPath: join(homedir(), '.open-agent', 'teams', name, 'config.json'),
+          scratchpadPath: sdkTeamManager.getScratchpadDir(name),
+        };
       },
-      selectTool: async (name: string) => {
-        const hit = toolRegistry.get(name);
-        return hit ?? null;
+      deleteTeam: async (name: string) => {
+        sdkTeamManager.deleteTeam(name);
+        if (activeTeamName === name) {
+          activeTeamName = null;
+        }
+        return { success: true };
+      },
+      getActiveTeam: () => activeTeamName ?? defaultTeamName,
+      sendMessage: async ({ type, recipient, content, summary, approve, request_id }) => {
+        const activeTeam = activeTeamName ?? defaultTeamName;
+        sdkTeamManager.sendMessage(activeTeam, {
+          type,
+          from: 'sdk',
+          to: recipient,
+          content: content ?? '',
+          summary,
+          timestamp: new Date().toISOString(),
+          requestId: request_id,
+          approve,
+        });
+
+        return {
+          success: true,
+          message: 'Message sent',
+          routing: {
+            sender: 'sdk',
+            target: type === 'broadcast' ? '@all' : (recipient ?? 'unknown'),
+            summary: summary ?? content?.slice(0, 60),
+            content,
+          },
+        };
+      },
+    }));
+  }
+
+  if (!toolRegistry.get('TeamDelete')) {
+    toolRegistry.register(createTeamDeleteTool({
+      createTeam: async (name: string, description?: string) => {
+        sdkTeamManager.createTeam(name, description);
+        return {
+          teamName: name,
+          configPath: join(homedir(), '.open-agent', 'teams', name, 'config.json'),
+          scratchpadPath: sdkTeamManager.getScratchpadDir(name),
+        };
+      },
+      deleteTeam: async (name: string) => {
+        sdkTeamManager.deleteTeam(name);
+        if (activeTeamName === name) {
+          activeTeamName = null;
+        }
+        return { success: true };
+      },
+      getActiveTeam: () => activeTeamName ?? defaultTeamName,
+      sendMessage: async () => ({ success: true, message: 'Message sent' }),
+    }));
+  }
+
+  if (!toolRegistry.get('SendMessage')) {
+    toolRegistry.register(createSendMessageTool({
+      createTeam: async (name: string, description?: string) => {
+        sdkTeamManager.createTeam(name, description);
+        activeTeamName = name;
+        return {
+          teamName: name,
+          configPath: join(homedir(), '.open-agent', 'teams', name, 'config.json'),
+          scratchpadPath: sdkTeamManager.getScratchpadDir(name),
+        };
+      },
+      deleteTeam: async (name: string) => {
+        sdkTeamManager.deleteTeam(name);
+        if (activeTeamName === name) {
+          activeTeamName = null;
+        }
+        return { success: true };
+      },
+      getActiveTeam: () => activeTeamName ?? defaultTeamName,
+      sendMessage: async ({ type, recipient, content, summary, approve, request_id }) => {
+        const activeTeam = activeTeamName ?? defaultTeamName;
+        sdkTeamManager.sendMessage(activeTeam, {
+          type,
+          from: 'sdk',
+          to: recipient,
+          content: content ?? '',
+          summary,
+          timestamp: new Date().toISOString(),
+          requestId: request_id,
+          approve,
+        });
+
+        return {
+          success: true,
+          message: 'Message sent',
+          routing: {
+            sender: 'sdk',
+            target: type === 'broadcast' ? '@all' : (recipient ?? 'unknown'),
+            summary: summary ?? content?.slice(0, 60),
+            content,
+          },
+        };
       },
     }));
   }
@@ -307,9 +464,24 @@ export function query(
       const s = sdkAgentExecutor.getAgent(agentId);
       if (!s) return null;
       return {
-        status: (s.state === 'running' ? 'running' : s.state === 'completed' ? 'completed' : 'failed') as 'running' | 'completed' | 'failed',
+        status: (
+          s.state === 'running'
+            ? 'running'
+            : s.state === 'completed'
+              ? 'completed'
+              : s.state === 'shutdown'
+                ? 'stopped'
+                : 'failed'
+        ) as 'running' | 'completed' | 'failed' | 'stopped',
         output_file: s.outputFile ?? '',
         result: s.result,
+        summary: summarizePlainText(s.result ?? s.error),
+        description: s.name ?? s.agentType,
+        usage: {
+          total_tokens: s.totalTokens ?? 0,
+          tool_uses: s.totalToolUseCount ?? 0,
+          duration_ms: s.durationMs,
+        },
       };
     };
 
@@ -353,16 +525,17 @@ export function query(
           isolation,
           runInBackground,
           resume,
+          parentToolUseId,
+          parentSessionId: sessionId,
           worktreePath,
           ...(worktreePath ? {
             onWorktreeCleanup: async (wtPath: string, hasChanges: boolean) => {
               if (!hasChanges) await cleanupWorktree(wtPath);
             },
           } : {}),
-          // Forward subagent tool events to the parent for real-time visibility
-          ...(parentToolUseId && options.onSubagentEvent ? {
-            onEvent: (event: import('@open-agent/agents').SubagentStreamEvent) => {
-              options.onSubagentEvent!(parentToolUseId, event);
+          ...(parentToolUseId ? {
+            onEvent: (event: SubagentStreamEvent) => {
+              enqueueSubagentMessages(parentToolUseId, event);
             },
           } : {}),
         };
@@ -376,6 +549,14 @@ export function query(
             prompt: agentPrompt,
             outputFile: bg.outputFile,
             canReadOutputFile: true,
+            task_event: {
+              type: 'system',
+              subtype: 'task_started',
+              task_id: bg.agentId,
+              ...(parentToolUseId ? { tool_use_id: parentToolUseId } : {}),
+              description: name ?? subagentType,
+              task_type: 'agent',
+            },
             ...(worktreePath ? { worktree_path: worktreePath, worktree_branch: worktreeBranch } : {}),
           });
         }
@@ -392,6 +573,13 @@ export function query(
         }
 
         const defaultUsage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: null, cache_read_input_tokens: null, server_tool_use: null, service_tier: null, cache_creation: null };
+        const orchestrationTemplates = buildTaskOrchestrationTemplates({
+          taskId: agentId,
+          status: 'completed',
+          description: name ?? subagentType,
+          summary: summarizePlainText(agentResult),
+          result: agentResult,
+        });
         return JSON.stringify({
           status: 'completed',
           agentId,
@@ -401,6 +589,24 @@ export function query(
           totalTokens: agentSession.totalTokens ?? 0,
           usage: agentSession.usage ?? defaultUsage,
           prompt: agentPrompt,
+          orchestration_templates: orchestrationTemplates,
+          task_event: {
+            type: 'system',
+            subtype: 'task_notification',
+            task_id: agentId,
+            ...(parentToolUseId ? { tool_use_id: parentToolUseId } : {}),
+            status: 'completed',
+            ...(teamName ? { team_name: teamName } : {}),
+            ...(name ? { description: name } : {}),
+            output_file: agentSession.outputFile ?? '',
+            summary: summarizePlainText(agentResult),
+            orchestration_templates: orchestrationTemplates,
+            usage: {
+              total_tokens: agentSession.totalTokens ?? 0,
+              tool_uses: agentSession.totalToolUseCount ?? 0,
+              duration_ms: agentSession.durationMs,
+            },
+          },
           ...(worktreePath ? { worktree_path: worktreePath, worktree_branch: worktreeBranch, worktree_cleaned_up: worktreeCleanedUp } : {}),
         });
       },
@@ -486,8 +692,7 @@ export function query(
 
   // Base non-MCP tool set after all static filtering. Used to restore any
   // built-in tool shadowed by an MCP tool when that MCP tool disappears.
-  const baseTools = new Map(toolRegistry.list().map((t) => [t.name, t]));
-  const registeredMcpToolNames = new Set<string>();
+  baseTools = new Map(toolRegistry.list().map((t) => [t.name, t]));
 
   // ------------------------------------------------------------------
   // Hooks — wire from QueryOptions
@@ -538,64 +743,12 @@ export function query(
   // ------------------------------------------------------------------
   // MCP servers — connect and discover tools
   // ------------------------------------------------------------------
-  let mcpManager: McpManager | undefined;
-  const syncMcpToolsIntoRegistry = () => {
-    if (!mcpManager) return;
-    const nextMcpTools = mcpManager.getAllTools();
-    const discoveredMcpNames = new Set(nextMcpTools.map((tool) => tool.name));
-    const nextRegisteredMcpNames = new Set<string>();
-
-    for (const staleName of registeredMcpToolNames) {
-      if (discoveredMcpNames.has(staleName) && isToolAllowedByPolicy(staleName)) continue;
-      const baseTool = baseTools.get(staleName);
-      if (baseTool) {
-        toolRegistry.register(baseTool);
-      } else {
-        toolRegistry.unregister(staleName);
-      }
-    }
-
-    for (const mcpTool of nextMcpTools) {
-      if (!isToolAllowedByPolicy(mcpTool.name)) {
-        const baseTool = baseTools.get(mcpTool.name);
-        if (baseTool) {
-          toolRegistry.register(baseTool);
-        } else {
-          toolRegistry.unregister(mcpTool.name);
-        }
-        continue;
-      }
-      toolRegistry.register({
-        name: mcpTool.name,
-        description: mcpTool.description ?? '',
-        inputSchema: mcpTool.inputSchema,
-        execute: (input: Record<string, unknown>) =>
-          mcpManager!.callTool(mcpTool.serverName, mcpTool.name, input),
-      });
-      nextRegisteredMcpNames.add(mcpTool.name);
-    }
-
-    registeredMcpToolNames.clear();
-    for (const name of nextRegisteredMcpNames) {
-      registeredMcpToolNames.add(name);
-    }
-  };
-  // Stored as a promise so the async work completes inside the generator
-  // without blocking the synchronous query() call.
-  let mcpReadyPromise: Promise<void> | undefined;
-  const trackMcpSetup = <T>(operation: Promise<T>): Promise<T> => {
-    const setup = operation.then((result) => {
-      syncMcpToolsIntoRegistry();
-      return result;
-    });
-    mcpReadyPromise = setup.then(() => undefined);
-    // Prevent unhandled-rejection warnings when callers don't await setup.
-    void mcpReadyPromise.catch(() => {});
-    return setup;
-  };
+  const mcpManager = runtime.getMcpManager();
+  let hasConfiguredMcpServers = Boolean(options.mcpServers && Object.keys(options.mcpServers).length > 0);
+  let mcpReadyPromise = runtime.waitForMcpReady();
   if (options.mcpServers && Object.keys(options.mcpServers).length > 0) {
-    mcpManager = new McpManager();
-    trackMcpSetup(mcpManager.setServers(options.mcpServers));
+    void runtime.setMcpServers(options.mcpServers);
+    mcpReadyPromise = runtime.waitForMcpReady();
   }
 
   // (env and debug overrides already applied above, before provider resolution)
@@ -636,6 +789,49 @@ export function query(
     );
   }
   const permMode = requestedPermissionMode;
+  if (sessionMgr) {
+    try {
+      sessionMgr.updateSession(
+        cwd,
+        sessionId,
+        {
+          permissionMode: permMode,
+          outputStyle,
+          ...(responseLanguage ? { language: responseLanguage } : {}),
+          ...(options.agent ? { agent: options.agent } : {}),
+          ...(options.resumeSessionAt ? { resumeSessionAt: options.resumeSessionAt } : {}),
+          ...buildResumeMetadata(options, effectiveResumeSessionId),
+          ...(
+            (!sessionExistedBeforeQuery || options.forkSession)
+              ? buildPromptSessionMetadata(
+                typeof prompt === 'string' ? prompt : undefined,
+                options.sessionTitle,
+              )
+              : (options.sessionTitle ? { title: options.sessionTitle } : {})
+          ),
+        },
+        { touch: false },
+      );
+    } catch {
+      // Non-fatal: metadata enrichment is best-effort.
+    }
+  }
+  const transcriptCwd = sessionMgr?.getSession(cwd, sessionId)?.cwd ?? cwd;
+  if (sessionMgr) {
+    try {
+      const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
+      const pendingTaskNotifications = __internal_collectPendingTaskNotifications({
+        sessionId,
+        transcriptEntries: sessionMgr.readTranscript(transcriptCwd, sessionId),
+        childSessions: persistedAgentExecutor.listPersistedAgents(),
+      });
+      for (const message of pendingTaskNotifications) {
+        sessionMgr.appendToTranscript(transcriptCwd, sessionId, message);
+      }
+    } catch {
+      // Non-fatal: background task notification sync is best-effort.
+    }
+  }
   const settingsSandbox = parseSandboxConfig(loadedSettings?.sandbox);
   if (loadedSettings && loadedSettings.sandbox !== undefined && !settingsSandbox) {
     throw new Error('Loaded settings sandbox config is invalid; expected explicit boolean enabled field.');
@@ -756,72 +952,94 @@ export function query(
   // ------------------------------------------------------------------
   // System prompt
   // ------------------------------------------------------------------
-  let systemPrompt: string;
-  if (typeof options.systemPrompt === 'string') {
-    systemPrompt = options.systemPrompt;
-    if (selectedAgent?.prompt) {
-      systemPrompt += '\n\n' + selectedAgent.prompt;
-    }
-  } else {
-    // Build the full system prompt (matching CLI behavior): includes tool
-    // descriptions, safety guidelines, AGENT.md, auto-memory, etc.
-    const toolNames = toolRegistry.list().map(t => t.name);
-    const configLoader = new ConfigLoader();
-    let agentMdInstructions: string[] = [];
-    const sources = new Set(settingSources);
-    if (sources.size > 0) {
-      agentMdInstructions = configLoader.loadAgentMd(cwd);
-    }
+  const configLoader = new ConfigLoader();
+  let agentMdInstructions: string[] = [];
+  const sources = new Set(settingSources);
+  if (sources.size > 0) {
+    agentMdInstructions = configLoader.loadAgentMd(cwd);
+  }
 
-    // Filter AGENT.md sources when settingSources is provided.
-    // The ConfigLoader returns instructions in order:
-    //   index 0            — user-level (~/.open-agent/AGENT.md or ~/.claude/AGENT.md)
-    //   index 1..N         — project/local level (walked from cwd upward)
-    if (sources.size > 0) {
-      const userHome = homedir();
-      const hasUserAgentMd =
-        existsSync(join(userHome, '.open-agent', 'AGENT.md')) ||
-        existsSync(join(userHome, '.claude', 'AGENT.md')) ||
-        existsSync(join(userHome, '.claude', 'CLAUDE.md'));
-      const userCount = hasUserAgentMd ? 1 : 0;
-      agentMdInstructions = agentMdInstructions.filter((_instruction, idx) => {
-        if (idx < userCount) return sources.has('user');
-        // Project-level source gates CLAUDE/AGENT instructions discovered in cwd ancestry.
-        return sources.has('project');
+  if (sources.size > 0) {
+    const userHome = homedir();
+    const hasUserAgentMd =
+      existsSync(join(userHome, '.open-agent', 'AGENT.md')) ||
+      existsSync(join(userHome, '.claude', 'AGENT.md')) ||
+      existsSync(join(userHome, '.claude', 'CLAUDE.md'));
+    const userCount = hasUserAgentMd ? 1 : 0;
+    agentMdInstructions = agentMdInstructions.filter((_instruction, idx) => {
+      if (idx < userCount) return sources.has('user');
+      return sources.has('project');
+    });
+  }
+
+  const memory = new AutoMemory(cwd);
+  const memoryContent =
+    sources.has('project')
+      ? memory.readMemory()
+      : undefined;
+
+  let activeModel = model;
+  const presetSystemPrompt = typeof options.systemPrompt === 'object'
+    ? options.systemPrompt
+    : undefined;
+  const buildManagedSystemPrompt = (): string => {
+    let nextPrompt: string;
+    if (typeof options.systemPrompt === 'string') {
+      nextPrompt = options.systemPrompt;
+    } else {
+      const runtimeSnapshot = runtime.buildSnapshot();
+      const connectedMcpServers = runtimeSnapshot.mcpServers.filter((server) => server.status === 'connected');
+      const configuredActiveTeam = activeTeamName ?? defaultTeamName;
+      const coordinatorScratchpadDir = sdkTeamManager.getTeam(configuredActiveTeam)
+        ? sdkTeamManager.getScratchpadDir(configuredActiveTeam)
+        : join(cwd, '.open-agent', 'scratchpad');
+      nextPrompt = buildSystemPrompt({
+        model: activeModel,
+        cwd,
+        tools: toolRegistry.list().map((tool) => tool.name),
+        permissionMode: permMode,
+        language: responseLanguage,
+        outputStyle,
+        knowledgeCutoff: 'August 2025',
+        agentInstructions: agentMdInstructions,
+        memoryDir: memory.getDir(),
+        memoryContent: memoryContent ?? undefined,
+        isGitRepo,
+        gitContext,
+        toolDescriptions: getToolPromptDescriptions(),
+        runtimeSnapshot: {
+          agents: runtimeSnapshot.agents,
+          skills: runtimeSnapshot.skills,
+          mcpServers: runtimeSnapshot.mcpServers,
+          coordinator: {
+            workerTools: toolRegistry.list().map((tool) => tool.name).filter((name) => name !== 'Task').sort(),
+            activeTeam: sdkTeamManager.getTeam(configuredActiveTeam) ? configuredActiveTeam : undefined,
+            scratchpadDir: coordinatorScratchpadDir,
+            canUseSkills: Boolean(toolRegistry.get('Skill')) && runtimeSnapshot.skills.length > 0,
+            canUseMcpTools: connectedMcpServers.length > 0,
+          },
+        },
       });
     }
-    const memory = new AutoMemory(cwd);
-    const memoryContent =
-      sources.has('project')
-        ? memory.readMemory()
-        : undefined;
-
-    systemPrompt = buildSystemPrompt({
-      model,
-      cwd,
-      tools: toolNames,
-      permissionMode: permMode,
-      knowledgeCutoff: 'August 2025',
-      agentInstructions: agentMdInstructions,
-      memoryDir: memory.getDir(),
-      memoryContent: memoryContent ?? undefined,
-    });
 
     if (selectedAgent?.prompt) {
-      systemPrompt += '\n\n' + selectedAgent.prompt;
+      nextPrompt += '\n\n' + selectedAgent.prompt;
     }
 
-    if (options.systemPrompt?.type === 'preset' && options.systemPrompt.append) {
-      systemPrompt += '\n\n' + options.systemPrompt.append;
+    if (presetSystemPrompt?.type === 'preset' && presetSystemPrompt.append) {
+      nextPrompt += '\n\n' + presetSystemPrompt.append;
     }
-  }
 
-  // Wire additionalDirectories into system prompt (applies regardless of prompt type)
-  if (options.additionalDirectories && options.additionalDirectories.length > 0) {
-    systemPrompt += '\n\nAdditional working directories:\n' +
-      options.additionalDirectories.map(d => `  - ${d}`).join('\n') +
-      '\nYou may read, search, and edit files in these directories in addition to the primary working directory.';
-  }
+    if (options.additionalDirectories && options.additionalDirectories.length > 0) {
+      nextPrompt += '\n\nAdditional working directories:\n' +
+        options.additionalDirectories.map(d => `  - ${d}`).join('\n') +
+        '\nYou may read, search, and edit files in these directories in addition to the primary working directory.';
+    }
+
+    return nextPrompt;
+  };
+
+  let systemPrompt = buildManagedSystemPrompt();
 
   // ------------------------------------------------------------------
   // Session resume — restore prior history if requested
@@ -850,6 +1068,9 @@ export function query(
       // If transcript is corrupted or missing, start fresh.
       initialMessages = [];
     }
+  }
+  for (const notification of __internal_collectTrailingTaskNotifications(initialMessages)) {
+    recordTaskNotificationObservation(currentTurnObservation, notification);
   }
 
   // ------------------------------------------------------------------
@@ -892,14 +1113,7 @@ export function query(
     if (cleanedUp) return;
     cleanedUp = true;
     if (mcpManager) {
-      mcpManager.disconnectAll().catch(() => {});
-    }
-    if (sdkAgentExecutor) {
-      for (const agent of sdkAgentExecutor.listAgents()) {
-        if (agent.state === 'running') {
-          sdkAgentExecutor.stopAgent(agent.agentId);
-        }
-      }
+      runtime.disconnectMcpServers().catch(() => {});
     }
     inputClosed = true;
     notifyQueue();
@@ -911,10 +1125,20 @@ export function query(
   // enforce maxBudgetUsd.
   const maxBudgetUsd = options.maxBudgetUsd;
 
+  const appStore = createStore<AppState>(createDefaultAppState({
+    sessionId,
+    cwd,
+    model: activeModel,
+    permissionMode: permMode,
+    tools: new Map(toolRegistry.list().map((t) => [t.name, t])),
+    thinkingConfig: options.thinking ?? (options.maxThinkingTokens ? { type: 'enabled', budgetTokens: options.maxThinkingTokens } : { type: 'adaptive' }),
+    verbose: options.debug ?? false,
+  }));
+
   const loop = new ConversationLoop({
     provider,
     tools: new Map(toolRegistry.list().map((t) => [t.name, t])),
-    model,
+    model: activeModel,
     systemPrompt,
     maxTurns: options.maxTurns ?? selectedAgent?.maxTurns,
     thinking: options.thinking ?? (options.maxThinkingTokens ? { type: 'enabled', budgetTokens: options.maxThinkingTokens } : { type: 'adaptive' }),
@@ -930,10 +1154,19 @@ export function query(
       calculateCost(m, inTok, outTok, cacheCreate, cacheRead),
     responseFormat: options.outputFormat ? { type: options.outputFormat.type, schema: options.outputFormat.schema } : undefined,
     serverTools: options.serverTools,
+    getAppState: () => appStore.getState(),
+    setAppState: (updater) => appStore.setState(updater),
   });
 
   const syncLoopToolsFromRegistry = () => {
     loop.setTools(new Map(toolRegistry.list().map((t) => [t.name, t])));
+  };
+  const refreshManagedSystemPrompt = () => {
+    if (typeof options.systemPrompt === 'string') {
+      return;
+    }
+    systemPrompt = buildManagedSystemPrompt();
+    loop.setSystemPrompt(systemPrompt);
   };
 
   // ------------------------------------------------------------------
@@ -960,15 +1193,18 @@ export function query(
       };
     };
     try {
+      await runtimeReadyPromise;
       // Wait for async setupTools to complete before the first LLM call.
       if (setupToolsReady) {
         await setupToolsReady;
+        refreshManagedSystemPrompt();
         syncLoopToolsFromRegistry();
       }
       // Wait for MCP servers to connect and register their tools into the loop
       // before the first LLM call. This runs once when iteration starts.
       if (mcpReadyPromise) {
         await mcpReadyPromise;
+        refreshManagedSystemPrompt();
         syncLoopToolsFromRegistry();
       }
       if (typeof prompt === 'string') {
@@ -982,6 +1218,7 @@ export function query(
           let modelError: Error | undefined;
           try {
             for await (const msg of loop.run(prompt)) {
+              yield* flushPendingSubagentMessages();
               // Default behavior matches official SDK: partials are off unless explicitly enabled.
               if (options.includePartialMessages !== true && msg.type === 'stream_event') {
                 continue;
@@ -1020,6 +1257,7 @@ export function query(
           } catch (err) {
             modelError = err instanceof Error ? err : new Error(String(err));
           }
+          yield* flushPendingSubagentMessages();
 
           // Check if the result message signals a model error that warrants
           // a fallback retry.  ConversationLoop yields result messages instead
@@ -1040,7 +1278,9 @@ export function query(
             // Switch to fallbackModel and retry once if this looks like a model error.
             if (options.fallbackModel && !usedFallback && isModelError(modelError)) {
               usedFallback = true;
+              activeModel = options.fallbackModel;
               loop.setModel(options.fallbackModel);
+              refreshManagedSystemPrompt();
               // Reset conversation history so that the user prompt is not
               // duplicated when loop.run(prompt) is called again below.
               loop.resetMessages(initialMessages.length > 0 ? initialMessages : undefined);
@@ -1050,11 +1290,13 @@ export function query(
             // Not retrying — yield the buffered result if we have one, then surface error.
             if (resultMessage) {
               if (!resultEmittedForTurn) {
+                yield* flushPendingSubagentMessages();
                 yield resultMessage;
                 resultEmittedForTurn = true;
               }
             } else {
               if (!resultEmittedForTurn) {
+                yield* flushPendingSubagentMessages();
                 yield executionErrorResult(modelError);
                 resultEmittedForTurn = true;
               }
@@ -1062,6 +1304,7 @@ export function query(
           } else {
             // Normal completion — yield the buffered result message.
             if (resultMessage && !resultEmittedForTurn) {
+              yield* flushPendingSubagentMessages();
               yield resultMessage;
               resultEmittedForTurn = true;
             }
@@ -1091,6 +1334,7 @@ export function query(
           let resultMessage: SDKMessage | undefined;
           try {
             for await (const msg of loop.run(userPrompt)) {
+              yield* flushPendingSubagentMessages();
               if (options.includePartialMessages !== true && msg.type === 'stream_event') {
                 continue;
               }
@@ -1127,6 +1371,7 @@ export function query(
           } catch (err) {
             modelError = err instanceof Error ? err : new Error(String(err));
           }
+          yield* flushPendingSubagentMessages();
 
           // Check result for model error (same logic as single-turn).
           if (
@@ -1144,13 +1389,16 @@ export function query(
           if (modelError) {
             if (options.fallbackModel && !multiturnUsedFallback && isModelError(modelError)) {
               multiturnUsedFallback = true;
+              activeModel = options.fallbackModel;
               loop.setModel(options.fallbackModel);
+              refreshManagedSystemPrompt();
               // Retry the same user message with the fallback model while
               // preserving conversation context accumulated before this turn.
               loop.resetMessages(preTurnMessages.length > 0 ? preTurnMessages : undefined);
               resultMessage = undefined;
               try {
                 for await (const msg of loop.run(userPrompt)) {
+                  yield* flushPendingSubagentMessages();
                   if (options.includePartialMessages !== true && msg.type === 'stream_event') continue;
                   if (msg.type === 'result') { resultMessage = msg; continue; }
                   yield msg;
@@ -1158,9 +1406,11 @@ export function query(
               } catch (retryErr) {
                 modelError = retryErr instanceof Error ? retryErr : new Error(String(retryErr));
               }
+              yield* flushPendingSubagentMessages();
             } else {
               if (resultMessage) {
                 if (!resultEmittedForTurn) {
+                  yield* flushPendingSubagentMessages();
                   yield resultMessage;
                   resultEmittedForTurn = true;
                 }
@@ -1174,10 +1424,12 @@ export function query(
             }
           }
           if (modelError && !resultMessage && !resultEmittedForTurn) {
+            yield* flushPendingSubagentMessages();
             yield executionErrorResult(modelError);
             resultEmittedForTurn = true;
           }
           if (resultMessage && !resultEmittedForTurn) {
+            yield* flushPendingSubagentMessages();
             yield resultMessage;
           }
         }
@@ -1191,16 +1443,76 @@ export function query(
   }
 
   const rawGen = generateMessages();
+  let sessionPromptMetadataCaptured =
+    typeof prompt === 'string' ||
+    !sessionMgr ||
+    (sessionExistedBeforeQuery && !options.forkSession);
   const gen = sessionMgr
     ? (async function* persistAndYield(): AsyncGenerator<SDKMessage, void> {
         try {
           for await (const msg of rawGen) {
+            recordPromptSuggestionObservation(currentTurnObservation, msg);
+            if (!sessionPromptMetadataCaptured && msg.type === 'user') {
+              const promptText = extractUserPromptText(msg);
+              if (promptText) {
+                try {
+                  sessionMgr.updateSession(
+                    cwd,
+                    sessionId,
+                    buildPromptSessionMetadata(promptText, options.sessionTitle),
+                    { touch: false },
+                  );
+                } catch {
+                  // Non-fatal
+                }
+                sessionPromptMetadataCaptured = true;
+              }
+            }
             try {
               sessionMgr.appendToTranscript(cwd, sessionId, msg);
             } catch {
               // Non-fatal: never fail the request on transcript write errors.
             }
             yield msg;
+
+            if (msg.type === 'result') {
+              try {
+                sessionMgr.updateSession(
+                  cwd,
+                  sessionId,
+                  buildResultSessionMetadata(
+                    sessionMgr.getSession(cwd, sessionId),
+                    msg,
+                  ),
+                  { touch: false },
+                );
+              } catch {
+                // Non-fatal
+              }
+
+              if (options.promptSuggestions === true) {
+                const suggestions = __internal_buildPromptSuggestions({
+                  result: msg,
+                  observation: currentTurnObservation,
+                  language: responseLanguage,
+                });
+                for (const suggestion of suggestions) {
+                  const suggestionMessage: SDKMessage = {
+                    ...suggestion,
+                    uuid: randomUUID(),
+                    session_id: sessionId,
+                  };
+                  try {
+                    sessionMgr.appendToTranscript(cwd, sessionId, suggestionMessage);
+                  } catch {
+                    // Non-fatal
+                  }
+                  yield suggestionMessage;
+                }
+              }
+
+              currentTurnObservation = createPromptSuggestionObservation();
+            }
           }
         } finally {
           try {
@@ -1210,7 +1522,29 @@ export function query(
           }
         }
       })()
-    : rawGen;
+    : (async function* withSuggestions(): AsyncGenerator<SDKMessage, void> {
+        for await (const msg of rawGen) {
+          recordPromptSuggestionObservation(currentTurnObservation, msg);
+          yield msg;
+          if (msg.type === 'result') {
+            if (options.promptSuggestions === true) {
+              const suggestions = __internal_buildPromptSuggestions({
+                result: msg,
+                observation: currentTurnObservation,
+                language: responseLanguage,
+              });
+              for (const suggestion of suggestions) {
+                yield {
+                  ...suggestion,
+                  uuid: randomUUID(),
+                  session_id: sessionId,
+                };
+              }
+            }
+            currentTurnObservation = createPromptSuggestionObservation();
+          }
+        }
+      })();
 
   // ------------------------------------------------------------------
   // Attach control methods to make the generator satisfy Query
@@ -1237,6 +1571,11 @@ export function query(
         );
       }
       loop.setPermissionMode(mode);
+      try {
+        sessionMgr?.updateSession(cwd, sessionId, { permissionMode: mode }, { touch: false });
+      } catch {
+        // Non-fatal
+      }
     }
   };
 
@@ -1245,7 +1584,14 @@ export function query(
       if (typeof newModel !== 'string' || newModel.trim().length === 0) {
         throw new Error('setModel(model) requires a non-empty model string.');
       }
+      activeModel = newModel;
       loop.setModel(newModel);
+      refreshManagedSystemPrompt();
+      try {
+        sessionMgr?.updateSession(cwd, sessionId, { model: newModel }, { touch: false });
+      } catch {
+        // Non-fatal
+      }
     }
   };
 
@@ -1264,11 +1610,15 @@ export function query(
 
   queryObj.supportedAgents = async () => supportedAgentInfos.map((agent) => ({ ...agent }));
 
+  queryObj.supportedSkills = async () => {
+    await runtimeReadyPromise;
+    return runtime.listSkills();
+  };
+
   queryObj.supportedModels = async () => provider.listModels();
 
   queryObj.mcpServerStatus = async () => {
-    if (!mcpManager) return [];
-    return mcpManager.getStatus().map((conn) => ({
+    return runtime.listMcpServerStatus().map((conn) => ({
       name: conn.name,
       status: mapMcpStatus(conn.status),
       ...(conn.serverInfo ? { serverInfo: { ...conn.serverInfo } } : {}),
@@ -1289,25 +1639,34 @@ export function query(
   });
 
   queryObj.initializationResult = async () => {
+    await runtimeReadyPromise;
     // If MCP tools are still loading, wait for them so the snapshot is complete.
     if (mcpReadyPromise) {
       await mcpReadyPromise;
     }
-    const [commands, models, account, agents] = await Promise.all([
+    const [commands, models, account, agents, skills] = await Promise.all([
       queryObj.supportedCommands(),
       queryObj.supportedModels(),
       queryObj.accountInfo(),
       queryObj.supportedAgents(),
+      queryObj.supportedSkills(),
     ]);
     return {
       commands,
       agents,
-      output_style: 'text',
+      skills,
+      output_style: outputStyle,
       available_output_styles: ['text', 'stream-json'],
       models,
       account,
       fast_mode_state: undefined,
     };
+  };
+
+  queryObj.sessionInfo = async () => {
+    if (!sessionMgr) return null;
+    const info = sessionMgr.getSession(cwd, sessionId);
+    return info ? JSON.parse(JSON.stringify(info)) : null;
   };
 
   queryObj.stopTask = async (_taskId: string) => {
@@ -1325,12 +1684,14 @@ export function query(
   // ── MCP dynamic management ────────────────────────────────────────────────
 
   queryObj.reconnectMcpServer = async (serverName: string) => {
-    if (!mcpManager) {
+    if (!hasConfiguredMcpServers) {
       throw new Error('No MCP manager configured for this query. Pass mcpServers in QueryOptions.');
     }
-    await trackMcpSetup(mcpManager.reconnect(serverName));
+    await runtime.reconnectMcpServer(serverName);
+    mcpReadyPromise = runtime.waitForMcpReady();
+    refreshManagedSystemPrompt();
     syncLoopToolsFromRegistry();
-    const status = mcpManager.getStatus().find((conn) => conn.name === serverName);
+    const status = runtime.listMcpServerStatus().find((conn) => conn.name === serverName);
     if (!status) {
       throw new Error(`MCP server '${serverName}' not found after reconnect.`);
     }
@@ -1341,13 +1702,15 @@ export function query(
   };
 
   queryObj.toggleMcpServer = async (serverName: string, enabled: boolean) => {
-    if (!mcpManager) {
+    if (!hasConfiguredMcpServers) {
       throw new Error('No MCP manager configured for this query. Pass mcpServers in QueryOptions.');
     }
-    await trackMcpSetup(mcpManager.toggle(serverName, enabled));
+    await runtime.toggleMcpServer(serverName, enabled);
+    mcpReadyPromise = runtime.waitForMcpReady();
+    refreshManagedSystemPrompt();
     syncLoopToolsFromRegistry();
     if (enabled) {
-      const status = mcpManager.getStatus().find((conn) => conn.name === serverName);
+      const status = runtime.listMcpServerStatus().find((conn) => conn.name === serverName);
       if (!status) {
         throw new Error(`MCP server '${serverName}' not found after toggle.`);
       }
@@ -1359,11 +1722,10 @@ export function query(
   };
 
   queryObj.setMcpServers = async (servers) => {
-    // Create an MCP manager on the fly if one does not exist yet.
-    if (!mcpManager) {
-      mcpManager = new McpManager();
-    }
-    const result = await trackMcpSetup(mcpManager.setServers(servers));
+    hasConfiguredMcpServers = true;
+    const result = await runtime.setMcpServers(servers);
+    mcpReadyPromise = runtime.waitForMcpReady();
+    refreshManagedSystemPrompt();
     syncLoopToolsFromRegistry();
     return result;
   };
@@ -1657,6 +2019,529 @@ function resolveRewindCheckpointId(
   return userMessageId;
 }
 
+interface PromptSuggestionObservation {
+  toolNames: Set<string>;
+  sawTask: boolean;
+  sawSubagent: boolean;
+  sawTaskCompletion: boolean;
+  sawTaskFailure: boolean;
+  sawTaskStopped: boolean;
+  sawEdit: boolean;
+  sawWrite: boolean;
+  sawBash: boolean;
+  sawGit: boolean;
+  sawTesting: boolean;
+  sawResearch: boolean;
+  sawFailure: boolean;
+  sawResultError: boolean;
+  lastTaskId?: string;
+  lastTaskStatus?: SDKTaskNotificationMessage['status'];
+  lastTaskTeamName?: string;
+  lastTaskDescription?: string;
+  lastTaskTemplates?: SDKTaskNotificationMessage['orchestration_templates'];
+}
+
+function createPromptSuggestionObservation(): PromptSuggestionObservation {
+  return {
+    toolNames: new Set<string>(),
+    sawTask: false,
+    sawSubagent: false,
+    sawTaskCompletion: false,
+    sawTaskFailure: false,
+    sawTaskStopped: false,
+    sawEdit: false,
+    sawWrite: false,
+    sawBash: false,
+    sawGit: false,
+    sawTesting: false,
+    sawResearch: false,
+    sawFailure: false,
+    sawResultError: false,
+  };
+}
+
+function recordTaskNotificationObservation(
+  observation: PromptSuggestionObservation,
+  message: Pick<SDKTaskNotificationMessage, 'task_id' | 'status' | 'team_name' | 'description' | 'orchestration_templates'>,
+): void {
+  observation.sawTask = true;
+  observation.sawSubagent = true;
+  observation.lastTaskId = normalizeOptionalString(message.task_id) ?? observation.lastTaskId;
+  observation.lastTaskStatus = message.status;
+  observation.lastTaskTeamName = normalizeOptionalString(message.team_name) ?? observation.lastTaskTeamName;
+  observation.lastTaskDescription = normalizeOptionalString(message.description) ?? observation.lastTaskDescription;
+  observation.lastTaskTemplates = message.orchestration_templates ?? observation.lastTaskTemplates;
+
+  if (message.status === 'completed') {
+    observation.sawTaskCompletion = true;
+    return;
+  }
+  if (message.status === 'failed') {
+    observation.sawTaskFailure = true;
+    return;
+  }
+  observation.sawTaskStopped = true;
+}
+
+function decodeTaskNotificationXml(value: string): string {
+  return value
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+function extractTaskNotificationTag(block: string, tag: string): string | undefined {
+  const match = block.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, 'i'));
+  if (!match) return undefined;
+  return normalizeOptionalString(decodeTaskNotificationXml(match[1] ?? ''));
+}
+
+function extractTaskNotificationsFromText(
+  text: string,
+): Array<Pick<SDKTaskNotificationMessage, 'task_id' | 'status' | 'team_name' | 'description' | 'orchestration_templates'>> {
+  const notifications: Array<Pick<SDKTaskNotificationMessage, 'task_id' | 'status' | 'team_name' | 'description' | 'orchestration_templates'>> = [];
+  const matches = text.matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/gi);
+
+  for (const match of matches) {
+    const block = match[1] ?? '';
+    const taskId = extractTaskNotificationTag(block, 'task-id');
+    const status = extractTaskNotificationTag(block, 'status');
+    const teamName = extractTaskNotificationTag(block, 'team-name');
+    const description = extractTaskNotificationTag(block, 'description');
+    if (!taskId || !status) continue;
+    if (status !== 'completed' && status !== 'failed' && status !== 'stopped') continue;
+    const orchestrationBlockMatch = block.match(/<orchestration-templates>([\s\S]*?)<\/orchestration-templates>/i);
+    const orchestrationBlock = orchestrationBlockMatch?.[1] ?? '';
+    const resumePromptTemplate = orchestrationBlock
+      ? extractTaskNotificationTag(orchestrationBlock, 'resume-prompt-template')
+      : undefined;
+    const verificationPromptTemplate = orchestrationBlock
+      ? extractTaskNotificationTag(orchestrationBlock, 'verification-prompt-template')
+      : undefined;
+    const retryPromptTemplate = orchestrationBlock
+      ? extractTaskNotificationTag(orchestrationBlock, 'retry-prompt-template')
+      : undefined;
+    notifications.push({
+      task_id: taskId,
+      status,
+      ...(teamName ? { team_name: teamName } : {}),
+      ...(description ? { description } : {}),
+      ...(
+        resumePromptTemplate || verificationPromptTemplate || retryPromptTemplate
+          ? {
+              orchestration_templates: {
+                ...(resumePromptTemplate ? { resume_prompt_template: resumePromptTemplate } : {}),
+                ...(verificationPromptTemplate ? { verification_prompt_template: verificationPromptTemplate } : {}),
+                ...(retryPromptTemplate ? { retry_prompt_template: retryPromptTemplate } : {}),
+              },
+            }
+          : {}
+      ),
+    });
+  }
+
+  return notifications;
+}
+
+function extractTaskNotificationsFromConversationMessage(
+  message: Message,
+): Array<Pick<SDKTaskNotificationMessage, 'task_id' | 'status' | 'team_name' | 'description' | 'orchestration_templates'>> {
+  const content = (message as any)?.content;
+  if (typeof content === 'string') {
+    return extractTaskNotificationsFromText(content);
+  }
+  if (!Array.isArray(content)) {
+    return [];
+  }
+
+  const notifications: Array<Pick<SDKTaskNotificationMessage, 'task_id' | 'status' | 'team_name' | 'description' | 'orchestration_templates'>> = [];
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue;
+    if (block.type !== 'text' || typeof block.text !== 'string') continue;
+    notifications.push(...extractTaskNotificationsFromText(block.text));
+  }
+  return notifications;
+}
+
+export function __internal_collectTrailingTaskNotifications(
+  messages: Message[],
+): Array<Pick<SDKTaskNotificationMessage, 'task_id' | 'status' | 'team_name' | 'description' | 'orchestration_templates'>> {
+  const trailing: Array<Pick<SDKTaskNotificationMessage, 'task_id' | 'status' | 'team_name' | 'description' | 'orchestration_templates'>> = [];
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const notifications = extractTaskNotificationsFromConversationMessage(messages[index]!);
+    if (notifications.length === 0) break;
+    trailing.unshift(...notifications);
+  }
+
+  return trailing;
+}
+
+function recordPromptSuggestionObservation(
+  observation: PromptSuggestionObservation,
+  message: SDKMessage,
+): void {
+  if (message.type === 'assistant') {
+    const content = (message as any).message?.content;
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (!block || typeof block !== 'object' || block.type !== 'tool_use') continue;
+        const toolName = typeof block.name === 'string' ? block.name : undefined;
+        if (!toolName) continue;
+        observation.toolNames.add(toolName);
+
+        if (toolName === 'Task' || toolName === 'TaskOutput' || toolName === 'TaskStop') {
+          observation.sawTask = true;
+        }
+        if (toolName === 'Edit' || toolName === 'NotebookEdit') {
+          observation.sawEdit = true;
+        }
+        if (toolName === 'Write') {
+          observation.sawWrite = true;
+        }
+        if (toolName === 'Bash') {
+          observation.sawBash = true;
+          const command = typeof block.input?.command === 'string' ? block.input.command : '';
+          if (/\bgit\b/i.test(command)) observation.sawGit = true;
+          if (/\b(test|tests|pytest|vitest|jest|bun test|npm test|pnpm test|yarn test|cargo test|go test)\b/i.test(command)) {
+            observation.sawTesting = true;
+          }
+        }
+        if ([
+          'Read',
+          'Glob',
+          'Grep',
+          'WebSearch',
+          'WebFetch',
+          'ToolSearch',
+          'Skill',
+          'ListMcpResourcesTool',
+          'ReadMcpResourceTool',
+        ].includes(toolName)) {
+          observation.sawResearch = true;
+        }
+      }
+    }
+    return;
+  }
+
+  if (message.type === 'tool_result') {
+    if ((message as any).is_error === true) {
+      observation.sawFailure = true;
+    }
+    return;
+  }
+
+  if (message.type === 'system') {
+    const subtype = (message as any).subtype;
+    if (subtype === 'task_notification') {
+      recordTaskNotificationObservation(observation, message as SDKTaskNotificationMessage);
+      return;
+    }
+    if (subtype === 'task_started' || subtype === 'task_progress') {
+      observation.sawTask = true;
+      observation.sawSubagent = true;
+    }
+    return;
+  }
+
+  if (message.type === 'result' && message.is_error === true) {
+    observation.sawResultError = true;
+  }
+}
+
+function normalizeOptionalString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function truncateText(text: string, maxLength: number): string {
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function summarizePlainText(text?: string): string {
+  const normalized = normalizeOptionalString(text);
+  if (!normalized) return 'No summary available.';
+  return truncateText(normalized.replace(/\s+/g, ' '), 200);
+}
+
+function buildPromptSessionMetadata(
+  promptText?: string,
+  explicitTitle?: string,
+): {
+  title?: string;
+  summary?: string;
+  createdFromPrompt?: string;
+} {
+  const normalizedPrompt = normalizeOptionalString(promptText);
+  const normalizedTitle = normalizeOptionalString(explicitTitle);
+
+  if (!normalizedPrompt && !normalizedTitle) {
+    return {};
+  }
+
+  const fallbackTitle = normalizedPrompt
+    ? truncateText(normalizedPrompt.split('\n')[0].replace(/\s+/g, ' '), 80)
+    : undefined;
+  const title = normalizedTitle ?? fallbackTitle;
+
+  return {
+    ...(title ? { title } : {}),
+    ...(normalizedPrompt ? {
+      summary: truncateText(normalizedPrompt.replace(/\s+/g, ' '), 200),
+      createdFromPrompt: truncateText(normalizedPrompt, 4000),
+    } : normalizedTitle ? { summary: normalizedTitle } : {}),
+  };
+}
+
+function buildResultSessionMetadata(
+  sessionInfo: Awaited<ReturnType<SessionManager['getSession']>>,
+  resultMessage: SDKMessage,
+): {
+  summary?: string;
+} {
+  if (resultMessage.type !== 'result') {
+    return {};
+  }
+
+  const prefix = sessionInfo?.title ? `${sessionInfo.title} — ` : '';
+  if (resultMessage.is_error) {
+    const errorText = Array.isArray((resultMessage as any).errors)
+      ? (resultMessage as any).errors.join(' ')
+      : 'Execution failed.';
+    return {
+      summary: truncateText(`${prefix}Failed: ${summarizePlainText(errorText)}`, 200),
+    };
+  }
+
+  const resultText = typeof (resultMessage as any).result === 'string'
+    ? (resultMessage as any).result
+    : '';
+  return {
+    summary: truncateText(`${prefix}${summarizePlainText(resultText)}`, 200),
+  };
+}
+
+function buildResumeMetadata(
+  options: QueryOptions,
+  effectiveResumeSessionId?: string,
+): {
+  resumeSource?: 'new' | 'continue' | 'resume' | 'resume_at' | 'fork';
+  parentSessionId?: string;
+  forkedFromSessionId?: string;
+} {
+  if (options.forkSession && effectiveResumeSessionId) {
+    return {
+      resumeSource: 'fork',
+      parentSessionId: effectiveResumeSessionId,
+      forkedFromSessionId: effectiveResumeSessionId,
+    };
+  }
+  if (options.resumeSessionAt) {
+    return { resumeSource: 'resume_at' };
+  }
+  if (options.resume) {
+    return { resumeSource: 'resume' };
+  }
+  if (options.continue && effectiveResumeSessionId) {
+    return { resumeSource: 'continue' };
+  }
+  return { resumeSource: 'new' };
+}
+
+function extractUserPromptText(message: SDKMessage): string | undefined {
+  if (message.type !== 'user') return undefined;
+  const content = (message as SDKUserMessage).message?.content;
+  if (typeof content === 'string') {
+    return normalizeOptionalString(content);
+  }
+  if (Array.isArray(content)) {
+    const text = content
+      .filter((block): block is { type: string; text?: string } =>
+        block !== null && typeof block === 'object' && (block as any).type === 'text',
+      )
+      .map((block) => block.text ?? '')
+      .join('\n')
+      .trim();
+    return normalizeOptionalString(text);
+  }
+  return undefined;
+}
+
+function convertSubagentEventToSdkMessages(
+  parentToolUseId: string,
+  sessionId: string,
+  event: SubagentStreamEvent,
+): SDKMessage[] {
+  const taskId = event.taskId ?? event.agentId;
+  if (!taskId) return [];
+
+  if (event.type === 'launched') {
+    return [{
+      type: 'system',
+      subtype: 'task_started',
+      task_id: taskId,
+      tool_use_id: parentToolUseId,
+      description: event.description ?? 'Subagent task started.',
+      task_type: 'agent',
+      uuid: randomUUID(),
+      session_id: sessionId,
+    }];
+  }
+
+  if (event.type === 'tool_result' && event.usage) {
+    return [{
+      type: 'system',
+      subtype: 'task_progress',
+      task_id: taskId,
+      tool_use_id: parentToolUseId,
+      description: event.description ?? `Subagent used ${event.toolName ?? 'a tool'}.`,
+      usage: event.usage,
+      ...(event.lastToolName ?? event.toolName
+        ? { last_tool_name: event.lastToolName ?? event.toolName }
+        : {}),
+      uuid: randomUUID(),
+      session_id: sessionId,
+    }];
+  }
+
+  if (event.type === 'completed' || event.type === 'failed' || event.type === 'shutdown') {
+    const status = event.type === 'shutdown'
+      ? 'stopped'
+      : (event.status ?? (event.type === 'completed' ? 'completed' : 'failed'));
+    const orchestrationTemplates = buildTaskOrchestrationTemplates({
+      taskId,
+      status,
+      description: event.description,
+      summary: event.summary,
+      result: event.output ?? event.error,
+    });
+    return [{
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: taskId,
+      tool_use_id: parentToolUseId,
+      ...(event.teamName ? { team_name: event.teamName } : {}),
+      ...(event.description ? { description: event.description } : {}),
+      status,
+      ...(event.completedAt ? { completed_at: event.completedAt } : {}),
+      output_file: event.outputFile ?? '',
+      summary: event.summary ?? summarizePlainText(event.output ?? event.error),
+      ...(event.output ? { result: event.output } : {}),
+      orchestration_templates: orchestrationTemplates,
+      ...(event.usage ? { usage: event.usage } : {}),
+      uuid: randomUUID(),
+      session_id: sessionId,
+    }];
+  }
+
+  return [];
+}
+
+function buildTaskNotificationFingerprint(input: {
+  task_id?: unknown;
+  status?: unknown;
+  completed_at?: unknown;
+}): string | null {
+  if (typeof input.task_id !== 'string' || typeof input.status !== 'string') {
+    return null;
+  }
+  const completedAt = typeof input.completed_at === 'string' ? input.completed_at : '';
+  return `${input.task_id}::${input.status}::${completedAt}`;
+}
+
+function mapAgentStateToTaskStatus(
+  state: AgentSession['state'],
+): SDKTaskNotificationMessage['status'] | null {
+  if (state === 'completed') return 'completed';
+  if (state === 'failed') return 'failed';
+  if (state === 'shutdown') return 'stopped';
+  return null;
+}
+
+type PendingTaskNotificationSession = Pick<
+  AgentSession,
+  | 'agentId'
+  | 'agentType'
+  | 'name'
+  | 'teamName'
+  | 'state'
+  | 'parentSessionId'
+  | 'completedAt'
+  | 'result'
+  | 'error'
+  | 'outputFile'
+  | 'totalTokens'
+  | 'totalToolUseCount'
+  | 'durationMs'
+>;
+
+export function __internal_collectPendingTaskNotifications(params: {
+  sessionId: string;
+  transcriptEntries: unknown[];
+  childSessions: PendingTaskNotificationSession[];
+}): SDKTaskNotificationMessage[] {
+  const seen = new Set<string>();
+
+  for (const entry of params.transcriptEntries) {
+    if (!entry || typeof entry !== 'object') continue;
+    const record = entry as Record<string, unknown>;
+    if (record.type !== 'system' || record.subtype !== 'task_notification') continue;
+    const fingerprint = buildTaskNotificationFingerprint(record);
+    if (fingerprint) {
+      seen.add(fingerprint);
+    }
+  }
+
+  return params.childSessions
+    .filter((session) => session.parentSessionId === params.sessionId)
+    .filter((session) => mapAgentStateToTaskStatus(session.state) !== null)
+    .filter((session) => typeof session.completedAt === 'string' && session.completedAt.length > 0)
+    .sort((left, right) => new Date(left.completedAt ?? 0).getTime() - new Date(right.completedAt ?? 0).getTime())
+    .filter((session) => {
+      const fingerprint = buildTaskNotificationFingerprint({
+        task_id: session.agentId,
+        status: mapAgentStateToTaskStatus(session.state),
+        completed_at: session.completedAt,
+      });
+      return fingerprint ? !seen.has(fingerprint) : false;
+    })
+    .map((session) => {
+      const status = mapAgentStateToTaskStatus(session.state)!;
+      return {
+        type: 'system' as const,
+        subtype: 'task_notification' as const,
+        task_id: session.agentId,
+        status,
+        ...(session.teamName ? { team_name: session.teamName } : {}),
+        completed_at: session.completedAt,
+        output_file: session.outputFile ?? '',
+        summary: summarizePlainText(session.result ?? session.error),
+        ...(session.result ?? session.error ? { result: session.result ?? session.error } : {}),
+        ...(session.name ?? session.agentType ? { description: session.name ?? session.agentType } : {}),
+        orchestration_templates: buildTaskOrchestrationTemplates({
+          taskId: session.agentId,
+          status,
+          description: session.name ?? session.agentType,
+          summary: summarizePlainText(session.result ?? session.error),
+          result: session.result ?? session.error,
+        }),
+        ...(session.totalTokens !== undefined || session.totalToolUseCount !== undefined || session.durationMs !== undefined
+          ? {
+              usage: {
+                total_tokens: session.totalTokens ?? 0,
+                tool_uses: session.totalToolUseCount ?? 0,
+                duration_ms: session.durationMs ?? 0,
+              },
+            }
+          : {}),
+        uuid: randomUUID(),
+        session_id: params.sessionId,
+      };
+    });
+}
+
 function assertUnsupportedOptions(options: QueryOptions): void {
   const unsupportedKeys: Array<keyof QueryOptions> = [
     'betas',
@@ -1664,7 +2549,6 @@ function assertUnsupportedOptions(options: QueryOptions): void {
     'plugins',
     'debugFile',
     'spawnClaudeCodeProcess',
-    'promptSuggestions',
   ];
   for (const key of unsupportedKeys) {
     if ((options as Record<string, unknown>)[key] !== undefined) {
@@ -1711,6 +2595,260 @@ export function __internal_isToolAllowedByPolicies(
     }
   }
   return true;
+}
+
+export function __internal_buildPromptSuggestions(params: {
+  result: SDKMessage;
+  observation: PromptSuggestionObservation;
+  language?: string;
+}): SDKPromptSuggestionMessage[] {
+  if (params.result.type !== 'result') return [];
+
+  const isChinese = /中文|chinese|zh/i.test(params.language ?? '');
+  const build = (zh: string, en: string) => (isChinese ? zh : en);
+  const normalizeTeammateName = (value?: string): string | undefined => {
+    const normalized = normalizeOptionalString(value);
+    if (!normalized) return undefined;
+    const generic = new Set([
+      'worker',
+      'verifier',
+      'general-purpose',
+      'code-writer',
+      'architecture-logic-reviewer',
+      'explore',
+      'plan',
+      'bash',
+    ]);
+    return generic.has(normalized.toLowerCase()) ? undefined : normalized;
+  };
+  const buildTaskAction = (input: {
+    description: string;
+    prompt: string;
+    subagentType: 'worker' | 'verifier';
+    resume?: string;
+  }): NonNullable<NonNullable<SDKPromptSuggestionMessage['scaffold']>['action']> => ({
+    tool: 'Task',
+    arguments: {
+      description: input.description,
+      prompt: input.prompt,
+      subagent_type: input.subagentType,
+      ...(input.resume ? { resume: input.resume } : {}),
+    },
+  });
+  const buildSendMessageAction = (input: {
+    recipient: string;
+    content: string;
+    summary: string;
+  }): NonNullable<NonNullable<SDKPromptSuggestionMessage['scaffold']>['action']> => ({
+    tool: 'SendMessage',
+    arguments: {
+      type: 'message',
+      recipient: input.recipient,
+      summary: input.summary,
+      content: input.content,
+    },
+  });
+  const out: SDKPromptSuggestionMessage[] = [];
+  const seen = new Set<string>();
+  const pushSuggestion = (
+    suggestion: string,
+    scaffold?: SDKPromptSuggestionMessage['scaffold'],
+  ): void => {
+    if (seen.has(suggestion)) return;
+    seen.add(suggestion);
+    out.push({
+      type: 'prompt_suggestion',
+      suggestion,
+      ...(scaffold ? { scaffold } : {}),
+      uuid: '',
+      session_id: '',
+    });
+  };
+
+  if (params.result.is_error) {
+    pushSuggestion(build('继续定位这次失败的根因并给出修复方案', 'Continue debugging this failure and propose a fix'));
+    pushSuggestion(build('把关键错误链路和日志整理成摘要', 'Summarize the key error path and logs'));
+    pushSuggestion(build('换一个更小范围的修复路径再试一次', 'Try a smaller-scope fix path and rerun'));
+    return out.slice(0, 3);
+  }
+
+  const { observation } = params;
+  const changedCode = observation.sawEdit || observation.sawWrite;
+  const workerRef = observation.lastTaskId
+    ? `worker \`${observation.lastTaskId}\``
+    : build('同一个 worker', 'the same worker');
+  const recentWorkerRef = observation.lastTaskId
+    ? `worker \`${observation.lastTaskId}\``
+    : build('刚才的 worker', 'the worker that just finished');
+  const teammateRecipient = observation.lastTaskTeamName
+    ? normalizeTeammateName(observation.lastTaskDescription)
+    : undefined;
+  const templates = observation.lastTaskTemplates;
+
+  if (observation.lastTaskStatus === 'completed') {
+    pushSuggestion(
+      build(
+        `继续复用 ${workerRef} 做定向收尾或小范围扩展`,
+        `Resume ${workerRef} for targeted follow-up or a small scoped extension`,
+      ),
+      templates?.resume_prompt_template
+        ? {
+            kind: 'resume_worker',
+            title: build('复用原 worker 模板', 'Resume worker template'),
+            agent_type: 'worker',
+            prompt: templates.resume_prompt_template,
+            source_task_id: observation.lastTaskId,
+            resume_task_id: observation.lastTaskId,
+            task_status: observation.lastTaskStatus,
+            action: teammateRecipient
+              ? buildSendMessageAction({
+                  recipient: teammateRecipient,
+                  summary: build(`继续 ${teammateRecipient}`, `Continue ${teammateRecipient}`),
+                  content: templates.resume_prompt_template,
+                })
+              : buildTaskAction({
+                  description: build('继续原 worker', 'Resume existing worker'),
+                  prompt: templates.resume_prompt_template,
+                  subagentType: 'worker',
+                  resume: observation.lastTaskId,
+                }),
+          }
+        : undefined,
+    );
+    pushSuggestion(
+      build(
+        `新开一个 \`verifier\`，独立验证 ${recentWorkerRef} 的结果`,
+        `Launch a fresh \`verifier\` to independently validate the result from ${recentWorkerRef}`,
+      ),
+      templates?.verification_prompt_template
+        ? {
+            kind: 'launch_verifier',
+            title: build('Verifier 验证模板', 'Verifier validation template'),
+            agent_type: 'verifier',
+            prompt: templates.verification_prompt_template,
+            source_task_id: observation.lastTaskId,
+            task_status: observation.lastTaskStatus,
+            action: buildTaskAction({
+              description: build('独立验证结果', 'Verify worker result'),
+              prompt: templates.verification_prompt_template,
+              subagentType: 'verifier',
+            }),
+          }
+        : undefined,
+    );
+    pushSuggestion(build(
+      `把 ${recentWorkerRef} 的产出整合成主线补丁、测试和风险清单`,
+      `Turn the output from ${recentWorkerRef} into a concrete patch, test, and risk checklist`,
+    ));
+  } else if (observation.lastTaskStatus === 'failed') {
+    pushSuggestion(
+      build(
+        `继续复用 ${workerRef}，沿用上下文定位失败根因并重试`,
+        `Resume ${workerRef} and keep debugging the failure with its current context`,
+      ),
+      templates?.retry_prompt_template
+        ? {
+            kind: 'retry_worker',
+            title: build('失败重试模板', 'Failure retry template'),
+            agent_type: 'worker',
+            prompt: templates.retry_prompt_template,
+            source_task_id: observation.lastTaskId,
+            resume_task_id: observation.lastTaskId,
+            task_status: observation.lastTaskStatus,
+            action: teammateRecipient
+              ? buildSendMessageAction({
+                  recipient: teammateRecipient,
+                  summary: build(`重试 ${teammateRecipient}`, `Retry ${teammateRecipient}`),
+                  content: templates.retry_prompt_template,
+                })
+              : buildTaskAction({
+                  description: build('沿原上下文重试', 'Retry with existing worker context'),
+                  prompt: templates.retry_prompt_template,
+                  subagentType: 'worker',
+                  resume: observation.lastTaskId,
+                }),
+          }
+        : undefined,
+    );
+    pushSuggestion(build(
+      `把这次失败拆成更小的修复步骤后，继续交给 ${workerRef}`,
+      `Break the failure into a smaller fix plan and hand it back to ${workerRef}`,
+    ));
+    pushSuggestion(build(
+      `总结 ${recentWorkerRef} 失败的关键阻塞，并明确下一次重试条件`,
+      `Summarize the key blockers from ${recentWorkerRef} and define the next retry conditions`,
+    ));
+  } else if (observation.lastTaskStatus === 'stopped') {
+    pushSuggestion(
+      build(
+        `继续复用 ${workerRef} 从中断点推进剩余工作`,
+        `Resume ${workerRef} from the interruption point and finish the remaining work`,
+      ),
+      templates?.resume_prompt_template
+        ? {
+            kind: 'stopped_worker_followup',
+            title: build('中断恢复模板', 'Stopped worker resume template'),
+            agent_type: 'worker',
+            prompt: templates.resume_prompt_template,
+            source_task_id: observation.lastTaskId,
+            resume_task_id: observation.lastTaskId,
+            task_status: observation.lastTaskStatus,
+            action: teammateRecipient
+              ? buildSendMessageAction({
+                  recipient: teammateRecipient,
+                  summary: build(`恢复 ${teammateRecipient}`, `Resume ${teammateRecipient}`),
+                  content: templates.resume_prompt_template,
+                })
+              : buildTaskAction({
+                  description: build('恢复中断 worker', 'Resume interrupted worker'),
+                  prompt: templates.resume_prompt_template,
+                  subagentType: 'worker',
+                  resume: observation.lastTaskId,
+                }),
+          }
+        : undefined,
+    );
+    pushSuggestion(build(
+      `先整理 ${recentWorkerRef} 中断前已完成的内容，再决定是否新开 \`verifier\``,
+      `Summarize what ${recentWorkerRef} finished before the interruption, then decide whether to launch a fresh \`verifier\``,
+    ));
+    pushSuggestion(build(
+      '把剩余未完成事项整理成明确的执行清单',
+      'Turn the unfinished work into a concrete execution checklist',
+    ));
+  }
+
+  if (changedCode) {
+    pushSuggestion(build('继续运行针对性测试并修复失败项', 'Run targeted tests next and fix any failures'));
+    pushSuggestion(build('帮我检查这次改动的 git diff 并总结风险点', 'Review this git diff and summarize any risks'));
+    pushSuggestion(build('把这次改动整理成 commit message 或 PR 摘要', 'Turn these changes into a commit message or PR summary'));
+  }
+
+  if (observation.sawResearch && !changedCode) {
+    pushSuggestion(build('基于这些发现继续落地实现', 'Implement the next step based on these findings'));
+    pushSuggestion(build('把关键结论整理成执行计划', 'Turn the findings into an execution plan'));
+    pushSuggestion(build('对比两个可行方案并推荐一个', 'Compare the viable approaches and recommend one'));
+  }
+
+  if ((observation.sawTask || observation.sawSubagent) && observation.lastTaskStatus === undefined) {
+    pushSuggestion(build('继续把子任务结果整合成下一步执行方案', 'Integrate the subtask outputs into the next execution plan'));
+  }
+
+  if (observation.sawBash && !observation.sawTesting) {
+    pushSuggestion(build('把刚才的命令结果整理成结论和后续动作', 'Turn the command output into conclusions and next steps'));
+  }
+
+  if (observation.sawGit) {
+    pushSuggestion(build('继续检查变更范围并准备提交', 'Inspect the change scope and prepare a commit'));
+  }
+
+  if (out.length === 0) {
+    pushSuggestion(build('继续把结果展开成可执行的下一步', 'Expand this result into the next actionable step'));
+    pushSuggestion(build('把当前结论整理成简短摘要', 'Condense the current outcome into a short summary'));
+    pushSuggestion(build('继续推进下一个最有收益的改动', 'Proceed to the next highest-leverage improvement'));
+  }
+
+  return out.slice(0, 3);
 }
 
 function readFileMaybe(filePath: string): string | null {
@@ -1819,6 +2957,7 @@ function getDefaultSlashCommands(): SlashCommand[] {
     { name: '/effort', description: 'Show or change effort level', argumentHint: '[low|medium|high|max]' },
     { name: '/config', description: 'Show current configuration', argumentHint: '' },
     { name: '/agents', description: 'List available agent types', argumentHint: '' },
+    { name: '/skills', description: 'List available skills', argumentHint: '' },
     { name: '/mcp', description: 'Show MCP server status', argumentHint: '' },
     { name: '/sessions', description: 'List recent sessions', argumentHint: '' },
     { name: '/commit', description: 'Create a git commit with AI message', argumentHint: '' },
