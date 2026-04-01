@@ -1,161 +1,99 @@
-import { describe, expect, it } from 'bun:test';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'fs';
-import { homedir } from 'os';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
-import { randomUUID } from 'crypto';
-import { TaskManager } from '../task-manager.js';
+import { tmpdir } from 'os';
+import { TaskManager } from '../task-manager';
 
-function makeHarness() {
-  const teamName = `task-manager-${randomUUID()}`;
-  const manager = new TaskManager(teamName);
-  const taskDir = join(homedir(), '.open-agent', 'tasks', teamName);
+describe('TaskManager scheduling', () => {
+  let rootDir: string;
+  let manager: TaskManager;
 
-  return {
-    teamName,
-    manager,
-    taskDir,
-    cleanup() {
-      rmSync(taskDir, { recursive: true, force: true });
-    },
-  };
-}
-
-function taskPath(taskDir: string, taskId: string): string {
-  return join(taskDir, `${taskId}.json`);
-}
-
-function readTaskFile(taskDir: string, taskId: string): any {
-  return JSON.parse(readFileSync(taskPath(taskDir, taskId), 'utf-8'));
-}
-
-function writeTaskFile(taskDir: string, taskId: string, task: Record<string, unknown>): void {
-  writeFileSync(taskPath(taskDir, taskId), JSON.stringify(task, null, 2));
-}
-
-describe('TaskManager claim/lease workflow', () => {
-  it('claimNext 成功领取任务并写入 owner/status/lease 状态', () => {
-    const { manager, taskDir, cleanup } = makeHarness();
-
-    try {
-      const created = manager.create('subject-1', 'description-1');
-      const claimed = (manager as any).claimNext('worker-1');
-      const stored = manager.get(created.id) as any;
-
-      expect(claimed?.id ?? claimed?.task?.id).toBe(created.id);
-      expect(claimed?.owner ?? claimed?.task?.owner).toBe('worker-1');
-      expect(stored.owner).toBe('worker-1');
-      expect(stored.status).toBe('in_progress');
-      expect(stored.leaseOwner ?? stored.owner).toBe('worker-1');
-      expect(typeof stored.leaseExpiresAt).toBe('string');
-      expect(stored.leaseExpiresAt.length).toBeGreaterThan(0);
-      expect(readTaskFile(taskDir, created.id).status).toBe('in_progress');
-    } finally {
-      cleanup();
-    }
+  beforeEach(() => {
+    rootDir = mkdtempSync(join(tmpdir(), 'open-agent-task-manager-'));
+    manager = new TaskManager('demo', { rootDir });
   });
 
-  it('有效 lease 不可重复领取', () => {
-    const { manager, cleanup } = makeHarness();
-
-    try {
-      const created = manager.create('subject-2', 'description-2');
-      const firstClaim = (manager as any).claimNext('worker-1');
-      const secondClaim = (manager as any).claimNext('worker-2');
-
-      expect(firstClaim?.id ?? firstClaim?.task?.id).toBe(created.id);
-      expect(secondClaim == null).toBe(true);
-      expect((manager.get(created.id) as any).owner).toBe('worker-1');
-    } finally {
-      cleanup();
-    }
+  afterEach(() => {
+    rmSync(rootDir, { recursive: true, force: true });
   });
 
-  it('过期 lease 会释放并可再次领取', () => {
-    const { manager, taskDir, cleanup } = makeHarness();
+  it('claims the highest-priority available task first', () => {
+    manager.create('low', 'low priority', undefined, undefined, 1);
+    manager.create('high', 'high priority', undefined, undefined, 10);
 
-    try {
-      const created = manager.create('subject-3', 'description-3');
-      writeTaskFile(taskDir, created.id, {
-        ...created,
-        status: 'in_progress',
-        owner: 'worker-1',
-        leaseOwner: 'worker-1',
-        claimedAt: '2020-01-01T00:00:00.000Z',
-        leaseExpiresAt: '2020-01-01T00:00:00.000Z',
-      });
+    const claimed = manager.claimNext('worker-a', {
+      now: new Date('2026-04-01T10:00:00.000Z'),
+      leaseMs: 60_000,
+    });
 
-      (manager as any).releaseExpiredLeases();
-
-      const storedAfterRelease = manager.get(created.id) as any;
-      expect(storedAfterRelease.status).toBe('pending');
-      expect(storedAfterRelease.owner).toBeUndefined();
-      expect(storedAfterRelease.leaseOwner).toBeUndefined();
-
-      const reclaimed = (manager as any).claimNext('worker-2');
-      const storedAfterReclaim = manager.get(created.id) as any;
-
-      expect(reclaimed?.id ?? reclaimed?.task?.id).toBe(created.id);
-      expect(storedAfterReclaim.owner).toBe('worker-2');
-      expect(storedAfterReclaim.status).toBe('in_progress');
-    } finally {
-      cleanup();
-    }
+    expect(claimed?.subject).toBe('high');
+    expect(claimed?.status).toBe('in_progress');
+    expect(claimed?.owner).toBe('worker-a');
+    expect(claimed?.lease?.attempts).toBe(1);
+    expect(manager.listAvailable(new Date('2026-04-01T10:00:30.000Z')).map((task) => task.subject)).toEqual(['low']);
   });
 
-  it('非 owner heartbeat 会报错', () => {
-    const { manager, taskDir, cleanup } = makeHarness();
+  it('reclaims expired leases and increments attempts', () => {
+    manager.create('recover', 'recover expired worker lease', undefined, undefined, 5);
 
-    try {
-      const created = manager.create('subject-4', 'description-4');
-      writeTaskFile(taskDir, created.id, {
-        ...created,
-        status: 'in_progress',
-        owner: 'worker-1',
-        leaseOwner: 'worker-1',
-        claimedAt: '2020-01-01T00:00:00.000Z',
-        leaseExpiresAt: '2099-01-01T00:00:00.000Z',
-      });
+    const firstClaim = manager.claimNext('worker-a', {
+      now: new Date('2026-04-01T10:00:00.000Z'),
+      leaseMs: 1_000,
+    });
+    expect(firstClaim?.lease?.owner).toBe('worker-a');
 
-      expect(() => (manager as any).heartbeat(created.id, 'worker-2', 60_000)).toThrow(/owner|lease/i);
-      expect((manager.get(created.id) as any).leaseOwner).toBe('worker-1');
-    } finally {
-      cleanup();
-    }
+    expect(manager.listAvailable(new Date('2026-04-01T10:00:00.500Z'))).toHaveLength(0);
+
+    const reclaimed = manager.claimNext('worker-b', {
+      now: new Date('2026-04-01T10:00:02.000Z'),
+      leaseMs: 5_000,
+    });
+
+    expect(reclaimed?.id).toBe(firstClaim?.id);
+    expect(reclaimed?.owner).toBe('worker-b');
+    expect(reclaimed?.lease?.attempts).toBe(2);
+    expect(reclaimed?.lease?.expiresAt).toBe('2026-04-01T10:00:07.000Z');
   });
 
-  it('blockedBy 未完成的任务不可 claim', () => {
-    const { manager, cleanup } = makeHarness();
+  it('renews and releases leases with ownership checks', () => {
+    const task = manager.create('ship', 'ship release', undefined, undefined, 3);
+    manager.claimNext('worker-a', {
+      now: new Date('2026-04-01T10:00:00.000Z'),
+      leaseMs: 60_000,
+    });
 
-    try {
-      const blocker = manager.create('blocker', 'blocker task');
-      const blocked = manager.create('blocked', 'blocked task');
-      manager.update(blocked.id, { addBlockedBy: [blocker.id] });
+    expect(() => manager.renewLease(task.id, 'worker-b')).toThrow(`Task ${task.id} is not leased by worker-b`);
 
-      const firstClaim = (manager as any).claimNext('worker-1');
-      const secondClaim = (manager as any).claimNext('worker-2');
+    const renewed = manager.renewLease(task.id, 'worker-a', {
+      now: new Date('2026-04-01T10:01:00.000Z'),
+      leaseMs: 30_000,
+    });
+    expect(renewed.lease?.expiresAt).toBe('2026-04-01T10:01:30.000Z');
 
-      expect(firstClaim?.id ?? firstClaim?.task?.id).toBe(blocker.id);
-      expect(secondClaim == null).toBe(true);
-      expect((manager.get(blocked.id) as any).status).toBe('pending');
-      expect((manager.get(blocked.id) as any).blockedBy).toEqual([blocker.id]);
-    } finally {
-      cleanup();
-    }
+    const released = manager.releaseLease(task.id, 'worker-a');
+    expect(released.status).toBe('pending');
+    expect(released.owner).toBeUndefined();
+    expect(released.lease).toBeUndefined();
+    expect(manager.listAvailable(new Date('2026-04-01T10:01:01.000Z')).map((entry) => entry.id)).toEqual([task.id]);
   });
 
-  it('deleted 任务不可 claim', () => {
-    const { manager, taskDir, cleanup } = makeHarness();
+  it('does not claim blocked or deleted tasks', () => {
+    const blocker = manager.create('blocker', 'finish first', undefined, undefined, 2);
+    const blocked = manager.create('blocked', 'depends on blocker', undefined, undefined, 9);
+    const deleted = manager.create('deleted', 'removed work item', undefined, undefined, 100);
 
-    try {
-      const created = manager.create('subject-6', 'description-6');
-      manager.update(created.id, { status: 'deleted' });
+    manager.update(blocked.id, { addBlockedBy: [blocker.id] });
+    manager.update(deleted.id, { status: 'deleted' });
 
-      const claimed = (manager as any).claimNext('worker-1');
+    const claimed = manager.claimNext('worker-a', {
+      now: new Date('2026-04-01T10:00:00.000Z'),
+      leaseMs: 60_000,
+    });
 
-      expect(claimed == null).toBe(true);
-      expect(existsSync(taskPath(taskDir, created.id))).toBe(false);
-    } finally {
-      cleanup();
-    }
+    expect(claimed?.id).toBe(blocker.id);
+    expect(manager.listAvailable(new Date('2026-04-01T10:00:01.000Z')).map((entry) => entry.id)).toEqual([]);
+
+    manager.releaseLease(blocker.id, 'worker-a', 'completed');
+    expect(manager.listAvailable(new Date('2026-04-01T10:00:02.000Z')).map((entry) => entry.id)).toEqual([blocked.id]);
   });
 });

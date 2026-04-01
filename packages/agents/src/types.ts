@@ -32,9 +32,16 @@ export interface TaskItem {
   description: string;
   status: 'pending' | 'in_progress' | 'completed' | 'deleted';
   owner?: string;
+  priority?: number;
   activeForm?: string;
   blocks?: string[];
   blockedBy?: string[];
+  lease?: {
+    owner: string;
+    claimedAt: string;
+    expiresAt: string;
+    attempts: number;
+  };
   createdAt: string;
   updatedAt: string;
   metadata?: Record<string, unknown>;
