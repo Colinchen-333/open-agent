@@ -24,6 +24,7 @@ export interface BashInput {
   timeout?: number;
   description?: string;
   run_in_background?: boolean;
+  dangerouslyDisableSandbox?: boolean;
 }
 
 export interface GlobInput {

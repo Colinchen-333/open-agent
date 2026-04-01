@@ -6,7 +6,7 @@ import type {
   PermissionRule,
   SandboxConfig,
 } from './types';
-import { classifyBashCommand } from './bash-risk';
+import { classifyBashCommand } from './bash-policy.js';
 
 // Read-only tools that are always safe for informational access
 const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion'];
@@ -136,6 +136,18 @@ export class PermissionEngine {
             reason: `destructive bash command (${classification.reason})`,
           };
         }
+        if (classification.level === 'system') {
+          return {
+            behavior: 'ask',
+            reason: `system-level bash command (${classification.reason})`,
+          };
+        }
+        if (classification.level === 'network-pipe') {
+          return {
+            behavior: 'ask',
+            reason: `network piping command requires approval (${classification.reason})`,
+          };
+        }
 
         if (this.mode === 'default') {
           if (classification.level === 'read-only') {
@@ -156,6 +168,12 @@ export class PermissionEngine {
             return {
               behavior: 'ask',
               reason: `networked bash command requires approval (${classification.reason})`,
+            };
+          }
+          if (classification.level === 'unknown') {
+            return {
+              behavior: 'ask',
+              reason: `unclassified bash command requires approval (${classification.reason})`,
             };
           }
           return {
@@ -196,6 +214,13 @@ export class PermissionEngine {
 
       if (request.toolName === 'Bash') {
         const cmd = String((request.input as Record<string, unknown>)?.command ?? '');
+        const classification = classifyBashCommand(cmd);
+        if (rule.ruleContent.startsWith('risk:')) {
+          return classification.level === rule.ruleContent.slice('risk:'.length);
+        }
+        if (rule.ruleContent.startsWith('category:')) {
+          return classification.categories.includes(rule.ruleContent.slice('category:'.length));
+        }
         return this.matchesStringPattern(cmd, rule.ruleContent);
       }
 
@@ -379,9 +404,16 @@ export class PermissionEngine {
       }
     }
 
-    // Sandbox: auto-allow Bash if autoAllowBashIfSandboxed is set
+    // Sandbox: auto-allow only non-destructive Bash if explicitly enabled.
     if (this.sandbox.autoAllowBashIfSandboxed && request.toolName === 'Bash') {
-      return { behavior: 'allow', reason: 'sandbox: auto-allow bash (sandboxed)' };
+      const cmd = String((inp?.command ?? ''));
+      const classification = classifyBashCommand(cmd);
+      if (classification.level === 'read-only' || classification.level === 'workspace-write') {
+        return {
+          behavior: 'allow',
+          reason: `sandbox: auto-allow ${classification.level} bash (${classification.reason})`,
+        };
+      }
     }
 
     return null;
