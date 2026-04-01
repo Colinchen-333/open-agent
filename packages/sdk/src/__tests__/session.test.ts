@@ -107,6 +107,25 @@ describe('createSession()', () => {
     expect(typeof session.sessionId).toBe('string');
     expect(session.sessionId.length).toBeGreaterThan(0);
     expect(typeof session.send).toBe('function');
+    expect(typeof session.interrupt).toBe('function');
+    expect(typeof session.setPermissionMode).toBe('function');
+    expect(typeof session.setModel).toBe('function');
+    expect(typeof session.setMaxThinkingTokens).toBe('function');
+    expect(typeof session.supportedCommands).toBe('function');
+    expect(typeof session.supportedModels).toBe('function');
+    expect(typeof session.supportedAgents).toBe('function');
+    expect(typeof session.supportedSkills).toBe('function');
+    expect(typeof session.mcpServerStatus).toBe('function');
+    expect(typeof session.accountInfo).toBe('function');
+    expect(typeof session.initializationResult).toBe('function');
+    expect(typeof session.sessionInfo).toBe('function');
+    expect(typeof session.listBackgroundTasks).toBe('function');
+    expect(typeof session.getBackgroundTask).toBe('function');
+    expect(typeof session.stopTask).toBe('function');
+    expect(typeof session.reconnectMcpServer).toBe('function');
+    expect(typeof session.toggleMcpServer).toBe('function');
+    expect(typeof session.setMcpServers).toBe('function');
+    expect(typeof session.rewindFiles).toBe('function');
     expect(typeof session.close).toBe('function');
     expect(typeof session[Symbol.asyncDispose]).toBe('function');
     session.close();
@@ -185,6 +204,45 @@ describe('createSession()', () => {
     session.close();
   });
 
+  it('forwards host introspection control methods through the stable session handle', async () => {
+    const session = createSession({
+      model: 'mock-model',
+      apiKey: 'sk-test-key',
+      provider: makeMockProvider([textResponse('unused')]),
+      sessionTitle: 'SDK Session Host Control',
+      permissionMode: 'acceptEdits',
+    } as any);
+
+    const commands = await session.supportedCommands();
+    expect(commands.some((command) => command.name === '/help')).toBe(true);
+
+    const models = await session.supportedModels();
+    expect(models.some((model) => model.value === 'mock-model')).toBe(true);
+
+    const init = await session.initializationResult();
+    expect(Array.isArray(init.commands)).toBe(true);
+    expect(init).toHaveProperty('capability_snapshot');
+
+    const info = await session.sessionInfo();
+    expect(info?.id).toBe(session.sessionId);
+    expect(info?.title).toBe('SDK Session Host Control');
+    expect(info?.permissionMode).toBe('acceptEdits');
+
+    const account = await session.accountInfo();
+    expect(account.apiKeySource).toBe('direct');
+
+    expect(Array.isArray(await session.supportedAgents())).toBe(true);
+    expect(Array.isArray(await session.supportedSkills())).toBe(true);
+    expect(Array.isArray(await session.mcpServerStatus())).toBe(true);
+    expect(Array.isArray(await session.listBackgroundTasks())).toBe(true);
+
+    await session.setModel('mock-model');
+    await session.setMaxThinkingTokens(2048);
+    await session.setPermissionMode('bypassPermissions');
+    await session.interrupt();
+    session.close();
+  });
+
   it('streams live orchestration events and worker follow-ups from the stable session handle', async () => {
     const teamName = `alpha-team-${Date.now()}`;
     const session = createSession({
@@ -194,7 +252,7 @@ describe('createSession()', () => {
           description: 'Delegate worker',
           prompt: 'Use DummyTool once, then report completion.',
           subagent_type: 'worker',
-          name: 'alice',
+          name: 'worker',
           team_name: teamName,
         }),
         toolUseResponse('worker-tool-1', 'DummyTool', { value: 'from-session-worker' }),
@@ -244,6 +302,25 @@ describe('createSession()', () => {
     const followUps = await session.getWorkerFollowUps(workers[0]!.workerId);
     expect(followUps.some((item) => item.scaffold.kind === 'resume_worker')).toBe(true);
     expect(followUps.some((item) => item.scaffold.kind === 'launch_verifier')).toBe(true);
+    const resumeFollowUp = followUps.find((item) => item.scaffold.kind === 'resume_worker')!;
+    const resumed = await session.executeFollowUp(resumeFollowUp);
+    const expectedTool = resumeFollowUp.scaffold.action?.tool;
+    if (expectedTool === 'SendMessage') {
+      expect(resumed.kind).toBe('team_message');
+      if (resumed.kind === 'team_message') {
+        expect(resumed.followUpKind).toBe(resumeFollowUp.scaffold.kind);
+        expect(resumed.teamMessage?.teamName).toBe(teamName);
+        expect(resumed.teamMessage?.to).toBe('alice');
+      }
+      const inboxAfterFollowUp = await session.readTeamInbox({ teamName, memberName: 'alice', consume: true });
+      expect(inboxAfterFollowUp.some((message) => message.content.includes('worker finished successfully'))).toBe(true);
+    } else {
+      expect(resumed.kind).toBe('worker');
+      if (resumed.kind === 'worker') {
+        expect(resumed.worker.workerId).toBe(workers[0]!.workerId);
+        expect(await session.stopWorker(resumed.worker.workerId)).toEqual({ success: true });
+      }
+    }
     expect(turnMessages.some((message) => message.type === 'result' && message.result === 'session parent done')).toBe(true);
     session.close();
   });
@@ -290,6 +367,42 @@ describe('createSession()', () => {
     expect(await session.stopWorker(resumed.workerId)).toEqual({ success: true });
     await waitForWorkerStatus((workerId) => session.getWorker(workerId), resumed.workerId, 'shutdown');
     await eventIterator.return?.();
+    session.close();
+  });
+
+  it('forwards follow-up dispatch through the stable session handle', async () => {
+    const teamName = `alpha-team-${Date.now()}`;
+    const session = createSession({
+      model: 'mock-model',
+      provider: makeMockProvider([textResponse('unused')]),
+    } as any);
+
+    await session.createTeam({ name: teamName, setActive: true });
+    const dispatched = await session.executeFollowUp({
+      suggestion: 'Tell alice to continue.',
+      scaffold: {
+        kind: 'generic_followup',
+        action: {
+          tool: 'SendMessage',
+          arguments: {
+            type: 'message',
+            recipient: 'alice',
+            summary: 'Continue',
+            content: 'Continue from the stable session follow-up.',
+          },
+        },
+      },
+    });
+
+    expect(dispatched.kind).toBe('team_message');
+    if (dispatched.kind === 'team_message') {
+      expect(dispatched.followUpKind).toBe('generic_followup');
+      expect(dispatched.teamMessage?.teamName).toBe(teamName);
+    }
+
+    const inbox = await session.readTeamInbox({ teamName, memberName: 'alice', consume: true });
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0]?.content).toBe('Continue from the stable session follow-up.');
     session.close();
   });
 });

@@ -553,6 +553,17 @@ export interface SubscribeTimelineOptions extends TimelineInboxOptions {
   signal?: AbortSignal;
 }
 
+export type FollowUpExecutable =
+  | WorkerFollowUpSuggestion
+  | NonNullable<SDKPromptSuggestionMessage['scaffold']>;
+
+export interface FollowUpExecutionResult {
+  kind: 'worker' | 'team_message';
+  followUpKind: NonNullable<SDKPromptSuggestionMessage['scaffold']>['kind'];
+  worker?: WorkerRecord;
+  teamMessage?: TeamMessageRecord;
+}
+
 /**
  * Returned by `query()`.  Implements `AsyncGenerator<SDKMessage>` so callers
  * can iterate with `for await … of` as well as calling control methods.
@@ -609,6 +620,8 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   subscribeOrchestrationEvents(options?: SubscribeOrchestrationEventsOptions): AsyncIterable<SDKOrchestrationEvent>;
   /** Subscribe to a merged timeline of team inbox messages and worker orchestration events. */
   subscribeTimeline(options?: SubscribeTimelineOptions): AsyncIterable<SDKTimelineItem>;
+  /** Execute a structured follow-up scaffold without manually decoding Task / SendMessage arguments. */
+  executeFollowUp(followUp: FollowUpExecutable): Promise<FollowUpExecutionResult>;
   /** List known worker sessions visible to this SDK session. */
   listWorkers(options?: WorkerListOptions): Promise<WorkerRecord[]>;
   /** Return one worker session by ID, or null if it does not exist. */
@@ -718,6 +731,30 @@ export interface Session {
   send(message: string | SDKUserMessage): Promise<void>;
   /** Async-iterate over all SDKMessages produced by the session. */
   stream(): AsyncGenerator<SDKMessage, void>;
+  /** Abort the current in-flight turn for this session. */
+  interrupt(): Promise<void>;
+  /** Dynamically change the permission mode before the next turn. */
+  setPermissionMode(mode: PermissionMode): Promise<void>;
+  /** Swap the model before the next turn. */
+  setModel(model?: string): Promise<void>;
+  /** Adjust the extended-thinking token budget before the next turn. */
+  setMaxThinkingTokens(maxThinkingTokens: number | null): Promise<void>;
+  /** Return the list of available slash commands for this session. */
+  supportedCommands(): Promise<SlashCommand[]>;
+  /** Return the provider's model list. */
+  supportedModels(): Promise<ModelInfo[]>;
+  /** Return available built-in agent profiles. */
+  supportedAgents(): Promise<AgentInfo[]>;
+  /** Return the resolved skill catalog for this session. */
+  supportedSkills(): Promise<SkillCatalogEntry[]>;
+  /** Return the runtime status of every configured MCP server. */
+  mcpServerStatus(): Promise<McpServerStatus[]>;
+  /** Return account/billing information for the active API key. */
+  accountInfo(): Promise<AccountInfo>;
+  /** Return initialization metadata for this session handle. */
+  initializationResult(): Promise<InitializationResult>;
+  /** Return persisted metadata for the current session. */
+  sessionInfo(): Promise<SessionInfo | null>;
   /** List all known teams visible to this SDK session. */
   listTeams(): Promise<TeamRecord[]>;
   /** Return one team by name, or null if it does not exist. */
@@ -742,6 +779,8 @@ export interface Session {
   subscribeOrchestrationEvents(options?: SubscribeOrchestrationEventsOptions): AsyncIterable<SDKOrchestrationEvent>;
   /** Subscribe to a merged timeline of team inbox messages and worker orchestration events. */
   subscribeTimeline(options?: SubscribeTimelineOptions): AsyncIterable<SDKTimelineItem>;
+  /** Execute a structured follow-up scaffold without manually decoding Task / SendMessage arguments. */
+  executeFollowUp(followUp: FollowUpExecutable): Promise<FollowUpExecutionResult>;
   /** List known worker sessions visible to this SDK session. */
   listWorkers(options?: WorkerListOptions): Promise<WorkerRecord[]>;
   /** Return one worker session by ID, or null if it does not exist. */
@@ -770,6 +809,22 @@ export interface Session {
   heartbeatTask(taskId: string, owner: string, options?: TaskClaimOptions): Promise<TaskRecord>;
   /** Release a claimed task back to pending or mark it completed. */
   releaseTask(taskId: string, owner: string, options?: TaskReleaseOptions): Promise<TaskRecord>;
+  /** Return visible background bash/agent tasks for the current runtime. */
+  listBackgroundTasks(): Promise<BackgroundTaskSummary[]>;
+  /** Return structured details for a specific background task, if found. */
+  getBackgroundTask(taskId: string, options?: { block?: boolean; timeout?: number }): Promise<BackgroundTaskInspection | null>;
+  /** Abort the current task. */
+  stopTask(taskId: string): Promise<void>;
+  /** Reconnect a specific MCP server by name (disconnect -> reconnect). */
+  reconnectMcpServer(serverName: string): Promise<void>;
+  /** Enable or disable a specific MCP server without removing its config. */
+  toggleMcpServer(serverName: string, enabled: boolean): Promise<void>;
+  /** Dynamically replace the full set of MCP servers for this session. */
+  setMcpServers(
+    servers: Record<string, McpServerConfig>,
+  ): Promise<{ added: string[]; removed: string[]; errors: Record<string, string> }>;
+  /** Restore files to the state before a checkpointed tool run. */
+  rewindFiles(userMessageId: string, options?: RewindFilesOptions): Promise<RewindFilesResult>;
   /** Close the session and release resources. */
   close(): void;
   /** Supports `await using session = …` (TC39 explicit resource management). */

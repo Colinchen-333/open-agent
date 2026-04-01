@@ -203,7 +203,6 @@ describe('query() timeline control plane', () => {
 
       const worker = await q.launchWorker({
         prompt: 'Wait until stopped.',
-        name: 'alice',
       });
       const launchedItem = await readTimelineItem(iterator, (item) =>
         item.kind === 'worker_lifecycle'
@@ -223,6 +222,12 @@ describe('query() timeline control plane', () => {
       expect(notificationItem?.kind).toBe('task_notification');
       expect(notificationItem?.taskNotification?.teamName).toBe(teamName);
       expect(notificationItem?.taskNotification?.followUps.some((item) => item.scaffold.kind === 'stopped_worker_followup')).toBe(true);
+
+      const resumed = await q.executeFollowUp(notificationItem!.taskNotification!.followUps[0]!);
+      expect(resumed.kind).toBe('worker');
+      expect(resumed.worker?.workerId).toBe(worker.workerId);
+      expect(await q.stopWorker(resumed.worker!.workerId)).toEqual({ success: true });
+      await waitForWorkerStatus(q, resumed.worker!.workerId, 'shutdown');
 
       await iterator.return?.();
       q.close();

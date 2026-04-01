@@ -88,6 +88,18 @@ export function forkSession(sessionId: string, options?: QueryOptions): SDKSessi
  */
 type SessionControlMethods = Pick<
   Query,
+  | 'interrupt'
+  | 'setPermissionMode'
+  | 'setModel'
+  | 'setMaxThinkingTokens'
+  | 'supportedCommands'
+  | 'supportedModels'
+  | 'supportedAgents'
+  | 'supportedSkills'
+  | 'mcpServerStatus'
+  | 'accountInfo'
+  | 'initializationResult'
+  | 'sessionInfo'
   | 'listTeams'
   | 'getTeam'
   | 'createTeam'
@@ -100,6 +112,7 @@ type SessionControlMethods = Pick<
   | 'readTimelineInbox'
   | 'subscribeOrchestrationEvents'
   | 'subscribeTimeline'
+  | 'executeFollowUp'
   | 'listWorkers'
   | 'getWorker'
   | 'getWorkerFollowUps'
@@ -114,6 +127,13 @@ type SessionControlMethods = Pick<
   | 'claimNextTask'
   | 'heartbeatTask'
   | 'releaseTask'
+  | 'listBackgroundTasks'
+  | 'getBackgroundTask'
+  | 'stopTask'
+  | 'reconnectMcpServer'
+  | 'toggleMcpServer'
+  | 'setMcpServers'
+  | 'rewindFiles'
 >;
 
 export interface SDKSession extends SessionControlMethods {
@@ -353,6 +373,18 @@ function _buildSession(
       }
     },
 
+    interrupt: (...args) => q.interrupt(...args),
+    setPermissionMode: (...args) => q.setPermissionMode(...args),
+    setModel: (...args) => q.setModel(...args),
+    setMaxThinkingTokens: (...args) => q.setMaxThinkingTokens(...args),
+    supportedCommands: (...args) => q.supportedCommands(...args),
+    supportedModels: (...args) => q.supportedModels(...args),
+    supportedAgents: (...args) => q.supportedAgents(...args),
+    supportedSkills: (...args) => q.supportedSkills(...args),
+    mcpServerStatus: (...args) => q.mcpServerStatus(...args),
+    accountInfo: (...args) => q.accountInfo(...args),
+    initializationResult: (...args) => q.initializationResult(...args),
+    sessionInfo: (...args) => q.sessionInfo(...args),
     listTeams: (...args) => q.listTeams(...args),
     getTeam: (...args) => q.getTeam(...args),
     createTeam: (...args) => q.createTeam(...args),
@@ -365,6 +397,7 @@ function _buildSession(
     readTimelineInbox: (...args) => q.readTimelineInbox(...args),
     subscribeOrchestrationEvents: (...args) => q.subscribeOrchestrationEvents(...args),
     subscribeTimeline: (...args) => q.subscribeTimeline(...args),
+    executeFollowUp: (...args) => q.executeFollowUp(...args),
     listWorkers: (...args) => q.listWorkers(...args),
     getWorker: (...args) => q.getWorker(...args),
     getWorkerFollowUps: (...args) => q.getWorkerFollowUps(...args),
@@ -379,6 +412,13 @@ function _buildSession(
     claimNextTask: (...args) => q.claimNextTask(...args),
     heartbeatTask: (...args) => q.heartbeatTask(...args),
     releaseTask: (...args) => q.releaseTask(...args),
+    listBackgroundTasks: (...args) => q.listBackgroundTasks(...args),
+    getBackgroundTask: (...args) => q.getBackgroundTask(...args),
+    stopTask: (...args) => q.stopTask(...args),
+    reconnectMcpServer: (...args) => q.reconnectMcpServer(...args),
+    toggleMcpServer: (...args) => q.toggleMcpServer(...args),
+    setMcpServers: (...args) => q.setMcpServers(...args),
+    rewindFiles: (...args) => q.rewindFiles(...args),
 
     close(): void {
       if (closed) return;
@@ -582,6 +622,18 @@ export function unstable_v2_createSession(
       yield* q;
     },
 
+    interrupt: (...args) => q.interrupt(...args),
+    setPermissionMode: (...args) => q.setPermissionMode(...args),
+    setModel: (...args) => q.setModel(...args),
+    setMaxThinkingTokens: (...args) => q.setMaxThinkingTokens(...args),
+    supportedCommands: (...args) => q.supportedCommands(...args),
+    supportedModels: (...args) => q.supportedModels(...args),
+    supportedAgents: (...args) => q.supportedAgents(...args),
+    supportedSkills: (...args) => q.supportedSkills(...args),
+    mcpServerStatus: (...args) => q.mcpServerStatus(...args),
+    accountInfo: (...args) => q.accountInfo(...args),
+    initializationResult: (...args) => q.initializationResult(...args),
+    sessionInfo: (...args) => q.sessionInfo(...args),
     listTeams: (...args) => q.listTeams(...args),
     getTeam: (...args) => q.getTeam(...args),
     createTeam: (...args) => q.createTeam(...args),
@@ -594,6 +646,7 @@ export function unstable_v2_createSession(
     readTimelineInbox: (...args) => q.readTimelineInbox(...args),
     subscribeOrchestrationEvents: (...args) => q.subscribeOrchestrationEvents(...args),
     subscribeTimeline: (...args) => q.subscribeTimeline(...args),
+    executeFollowUp: (...args) => q.executeFollowUp(...args),
     listWorkers: (...args) => q.listWorkers(...args),
     getWorker: (...args) => q.getWorker(...args),
     getWorkerFollowUps: (...args) => q.getWorkerFollowUps(...args),
@@ -608,6 +661,13 @@ export function unstable_v2_createSession(
     claimNextTask: (...args) => q.claimNextTask(...args),
     heartbeatTask: (...args) => q.heartbeatTask(...args),
     releaseTask: (...args) => q.releaseTask(...args),
+    listBackgroundTasks: (...args) => q.listBackgroundTasks(...args),
+    getBackgroundTask: (...args) => q.getBackgroundTask(...args),
+    stopTask: (...args) => q.stopTask(...args),
+    reconnectMcpServer: (...args) => q.reconnectMcpServer(...args),
+    toggleMcpServer: (...args) => q.toggleMcpServer(...args),
+    setMcpServers: (...args) => q.setMcpServers(...args),
+    rewindFiles: (...args) => q.rewindFiles(...args),
 
     close(): void {
       if (closed) return;

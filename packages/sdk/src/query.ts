@@ -73,6 +73,8 @@ import type {
   SubscribeOrchestrationEventsOptions,
   SDKTimelineItem,
   SubscribeTimelineOptions,
+  FollowUpExecutable,
+  FollowUpExecutionResult,
 } from './types.js';
 import { applyPermissionUpdates } from './permission-updates.js';
 import { createPermissionPrompterBridge } from './permission-prompter.js';
@@ -2279,6 +2281,77 @@ export function query(
     );
   };
 
+  queryObj.executeFollowUp = async (followUp: FollowUpExecutable): Promise<FollowUpExecutionResult> => {
+    const scaffold = resolveFollowUpScaffold(followUp);
+    if (!scaffold?.action) {
+      throw new Error('Follow-up scaffold is missing an executable action.');
+    }
+
+    const action = scaffold.action;
+    if (action.tool === 'Task') {
+      const prompt = normalizeOptionalString(action.arguments['prompt']);
+      if (!prompt) {
+        throw new Error('Task follow-up action is missing a prompt.');
+      }
+      const subagentType = normalizeOptionalString(action.arguments['subagent_type']) ?? 'worker';
+      const input = {
+        prompt,
+        ...(normalizeOptionalString(action.arguments['name']) ? { name: normalizeOptionalString(action.arguments['name']) } : {}),
+        ...(normalizeOptionalString(action.arguments['team_name']) ? { teamName: normalizeOptionalString(action.arguments['team_name']) } : {}),
+        ...(normalizeOptionalString(action.arguments['model']) ? { model: normalizeOptionalString(action.arguments['model']) } : {}),
+        ...(normalizeOptionalString(action.arguments['mode']) ? { mode: normalizeOptionalString(action.arguments['mode']) } : {}),
+        ...(normalizeOptionalString(action.arguments['cwd']) ? { cwd: normalizeOptionalString(action.arguments['cwd']) } : {}),
+        ...(action.arguments['isolation'] === 'worktree' ? { isolation: 'worktree' as const } : {}),
+        ...(normalizeIntegerField(action.arguments['max_turns']) !== undefined
+          ? { maxTurns: normalizeIntegerField(action.arguments['max_turns'])! }
+          : {}),
+      };
+      const resumeTaskId = normalizeOptionalString(action.arguments['resume']);
+
+      if (subagentType === 'verifier') {
+        return {
+          kind: 'worker',
+          followUpKind: scaffold.kind,
+          worker: await queryObj.launchVerifier(input),
+        };
+      }
+      if (subagentType !== 'worker') {
+        throw new Error(`Unsupported Task follow-up subagent_type: ${subagentType}`);
+      }
+      return {
+        kind: 'worker',
+        followUpKind: scaffold.kind,
+        worker: resumeTaskId
+          ? await queryObj.resumeWorker(resumeTaskId, input)
+          : await queryObj.launchWorker(input),
+      };
+    }
+
+    if (action.tool === 'SendMessage') {
+      const recipient = normalizeOptionalString(action.arguments['recipient'])
+        ?? normalizeOptionalString(action.arguments['to']);
+      if (!recipient) {
+        throw new Error('SendMessage follow-up action is missing a recipient.');
+      }
+      return {
+        kind: 'team_message',
+        followUpKind: scaffold.kind,
+        teamMessage: await queryObj.sendTeamMessage({
+          ...(normalizeOptionalString(action.arguments['team_name']) ? { teamName: normalizeOptionalString(action.arguments['team_name']) } : {}),
+          type: normalizeTimelineMessageType(action.arguments['type']) ?? 'message',
+          ...(normalizeOptionalString(action.arguments['from']) ? { from: normalizeOptionalString(action.arguments['from']) } : {}),
+          recipient,
+          ...(normalizeOptionalString(action.arguments['content']) ? { content: normalizeOptionalString(action.arguments['content']) } : {}),
+          ...(normalizeOptionalString(action.arguments['summary']) ? { summary: normalizeOptionalString(action.arguments['summary']) } : {}),
+          ...(typeof action.arguments['approve'] === 'boolean' ? { approve: action.arguments['approve'] } : {}),
+          ...(normalizeOptionalString(action.arguments['requestId']) ? { requestId: normalizeOptionalString(action.arguments['requestId']) } : {}),
+        }),
+      };
+    }
+
+    throw new Error(`Unsupported follow-up action tool: ${String((action as { tool?: unknown }).tool)}`);
+  };
+
   const emitStandaloneOrchestrationEvent = (event: SubagentStreamEvent): void => {
     const orchestrationEvent = convertSubagentEventToOrchestrationEvent(undefined, sessionId, event);
     if (!orchestrationEvent) return;
@@ -3618,6 +3691,36 @@ function buildTimelineTaskNotificationFollowUps(
       suggestion: item.suggestion,
       scaffold: item.scaffold!,
     }));
+}
+
+function resolveFollowUpScaffold(
+  followUp: FollowUpExecutable,
+): NonNullable<SDKPromptSuggestionMessage['scaffold']> {
+  if ('scaffold' in followUp) {
+    return followUp.scaffold;
+  }
+  return followUp;
+}
+
+function normalizeIntegerField(value: unknown): number | undefined {
+  return Number.isInteger(value) ? value as number : undefined;
+}
+
+function normalizeTimelineMessageType(
+  value: unknown,
+): TeamMessageRecord['type'] | undefined {
+  if (
+    value === 'message'
+    || value === 'broadcast'
+    || value === 'shutdown_request'
+    || value === 'shutdown_response'
+    || value === 'plan_approval_response'
+    || value === 'idle_notification'
+    || value === 'plan_approval_request'
+  ) {
+    return value;
+  }
+  return undefined;
 }
 
 function extractTimelineTimestamp(event: SDKOrchestrationEvent): string {
