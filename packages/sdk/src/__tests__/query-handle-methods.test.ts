@@ -7,6 +7,27 @@ import { query } from '../query.js';
 import { createSdkMcpServer, tool } from '../mcp-helpers.js';
 import { savePersistedBackgroundTask } from '@open-agent/tools';
 
+function createTempHome(prefix: string): { cwd: string; originalHome: string | undefined; restore(): void } {
+  const cwd = mkdtempSync(join(tmpdir(), prefix));
+  const home = join(cwd, 'home');
+  mkdirSync(home, { recursive: true });
+  const originalHome = process.env.HOME;
+  process.env.HOME = home;
+
+  return {
+    cwd,
+    originalHome,
+    restore() {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+      rmSync(cwd, { recursive: true, force: true });
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // initializationResult()
 // ---------------------------------------------------------------------------
@@ -110,6 +131,91 @@ describe('query().sessionInfo()', () => {
     expect(info?.title).toBe('Harness 对齐');
     expect(info?.createdFromPrompt).toContain('设计一下 harness');
     q.close();
+  });
+});
+
+describe('query() team control plane', () => {
+  it('creates, lists, retrieves, activates, and deletes teams', async () => {
+    const temp = createTempHome('open-agent-sdk-team-plane-');
+
+    try {
+      const q = query('manage teams', { cwd: temp.cwd, model: 'claude-sonnet-4-6' });
+      const alphaName = `alpha-${Date.now()}`;
+      const betaName = `beta-${Date.now()}`;
+
+      const alpha = await q.createTeam({
+        name: alphaName,
+        description: 'Primary workers',
+      });
+      expect(alpha.name).toBe(alphaName);
+      expect(alpha.description).toBe('Primary workers');
+      expect(alpha.isActive).toBe(true);
+
+      const beta = await q.createTeam({
+        name: betaName,
+        description: 'Verification lane',
+        setActive: false,
+      });
+      expect(beta.isActive).toBe(false);
+
+      const teams = await q.listTeams();
+      expect(teams.some((team) => team.name === alphaName)).toBe(true);
+      expect(teams.some((team) => team.name === betaName)).toBe(true);
+
+      const fetched = await q.getTeam(alphaName);
+      expect(fetched?.scratchpadPath).toContain(`/${alphaName}/scratchpad`);
+
+      const active = await q.getActiveTeam();
+      expect(active?.name).toBe(alphaName);
+
+      const switched = await q.setActiveTeam(betaName);
+      expect(switched?.name).toBe(betaName);
+      expect((await q.getActiveTeam())?.name).toBe(betaName);
+
+      expect(await q.deleteTeam(betaName)).toEqual({ success: true });
+      expect(await q.getTeam(betaName)).toBeNull();
+
+      await expect(q.setActiveTeam(null)).resolves.toBeNull();
+      expect(await q.getActiveTeam()).toBeNull();
+      q.close();
+    } finally {
+      temp.restore();
+    }
+  });
+
+  it('sends and reads team inbox messages', async () => {
+    const temp = createTempHome('open-agent-sdk-team-inbox-');
+
+    try {
+      const q = query('team inbox', { cwd: temp.cwd, model: 'claude-sonnet-4-6' });
+      const teamName = `alpha-${Date.now()}`;
+      await q.createTeam({ name: teamName });
+
+      const sent = await q.sendTeamMessage({
+        teamName,
+        type: 'shutdown_request',
+        recipient: 'alice',
+        content: 'Please stop after finishing the current step.',
+        summary: 'shutdown alice',
+      });
+      expect(sent.teamName).toBe(teamName);
+      expect(sent.requestId).toBeTruthy();
+
+      expect(await q.getTeamInboxCount('alice', { teamName })).toBe(1);
+
+      const peeked = await q.readTeamInbox({ teamName, memberName: 'alice', consume: false });
+      expect(peeked).toHaveLength(1);
+      expect(peeked[0]?.type).toBe('shutdown_request');
+      expect(await q.getTeamInboxCount('alice', { teamName })).toBe(1);
+
+      const consumed = await q.readTeamInbox({ teamName, memberName: 'alice', consume: true });
+      expect(consumed).toHaveLength(1);
+      expect(consumed[0]?.content).toContain('Please stop');
+      expect(await q.getTeamInboxCount('alice', { teamName })).toBe(0);
+      q.close();
+    } finally {
+      temp.restore();
+    }
   });
 });
 

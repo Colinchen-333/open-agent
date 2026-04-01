@@ -381,6 +381,71 @@ export interface TaskReleaseOptions {
   status?: 'pending' | 'completed';
 }
 
+export interface TeamMemberRecord {
+  name: string;
+  agentId: string;
+  agentType: string;
+  model?: string;
+  status: 'active' | 'idle' | 'shutdown';
+}
+
+export interface TeamRecord {
+  name: string;
+  description?: string;
+  members: TeamMemberRecord[];
+  createdAt: string;
+  configPath: string;
+  scratchpadPath: string;
+  inboxesPath: string;
+  taskQueuePath: string;
+  isActive: boolean;
+}
+
+export interface TeamMessageRecord {
+  teamName: string;
+  type: 'message' | 'broadcast' | 'shutdown_request' | 'shutdown_response' | 'plan_approval_response' | 'idle_notification' | 'plan_approval_request';
+  from: string;
+  to?: string;
+  content: string;
+  summary?: string;
+  timestamp: string;
+  requestId?: string;
+  approve?: boolean;
+  idleReason?: string;
+  routing?: {
+    sender: string;
+    senderColor?: string;
+    target: string;
+    targetColor?: string;
+    summary?: string;
+    content?: string;
+  };
+}
+
+export interface TeamCreateInput {
+  name: string;
+  description?: string;
+  setActive?: boolean;
+}
+
+export interface TeamMessageInput {
+  teamName?: string;
+  type: TeamMessageRecord['type'];
+  from?: string;
+  to?: string;
+  recipient?: string;
+  content?: string;
+  summary?: string;
+  approve?: boolean;
+  requestId?: string;
+}
+
+export interface TeamInboxOptions {
+  teamName?: string;
+  memberName: string;
+  consume?: boolean;
+}
+
 /**
  * Returned by `query()`.  Implements `AsyncGenerator<SDKMessage>` so callers
  * can iterate with `for await … of` as well as calling control methods.
@@ -413,6 +478,24 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   initializationResult(): Promise<InitializationResult>;
   /** Return persisted metadata for the current session. */
   sessionInfo(): Promise<SessionInfo | null>;
+  /** List all known teams visible to this SDK session. */
+  listTeams(): Promise<TeamRecord[]>;
+  /** Return one team by name, or null if it does not exist. */
+  getTeam(name: string): Promise<TeamRecord | null>;
+  /** Create a team and optionally make it active for this session. */
+  createTeam(input: TeamCreateInput): Promise<TeamRecord>;
+  /** Delete a team and return whether it existed. */
+  deleteTeam(name: string): Promise<{ success: boolean }>;
+  /** Return the currently active team for this session, if any. */
+  getActiveTeam(): Promise<TeamRecord | null>;
+  /** Change the active team for this session, or clear it with null. */
+  setActiveTeam(name: string | null): Promise<TeamRecord | null>;
+  /** Send a team message into the selected or named team inbox fabric. */
+  sendTeamMessage(input: TeamMessageInput): Promise<TeamMessageRecord>;
+  /** Read or peek a member inbox from the selected or named team. */
+  readTeamInbox(options: TeamInboxOptions): Promise<TeamMessageRecord[]>;
+  /** Return the unread inbox count for a member in the selected or named team. */
+  getTeamInboxCount(memberName: string, options?: { teamName?: string }): Promise<number>;
   /** Return visible background bash/agent tasks for the current runtime. */
   listBackgroundTasks(): Promise<BackgroundTaskSummary[]>;
   /** Return task records from the shared task control plane for the current or specified team. */

@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, rmSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import type {
@@ -16,7 +16,7 @@ import { ConversationLoop, SessionManager, buildSystemPrompt, FileCheckpoint, is
 import { createStore, createDefaultAppState } from '@open-agent/state';
 import type { AppState } from '@open-agent/state';
 import { AgentLoader, AgentExecutor, TeamManager, TaskManager } from '@open-agent/agents';
-import type { SubagentStreamEvent, AgentSession, TaskItem } from '@open-agent/agents';
+import type { SubagentStreamEvent, AgentSession, TaskItem, TeamConfig, TeamMember, TeamMessage } from '@open-agent/agents';
 import {
   createDefaultToolRegistry,
   createTaskTool,
@@ -59,6 +59,11 @@ import type {
   TaskClaimOptions,
   TaskReleaseOptions,
   TaskRecord,
+  TeamRecord,
+  TeamMessageRecord,
+  TeamCreateInput,
+  TeamMessageInput,
+  TeamInboxOptions,
 } from './types.js';
 import { applyPermissionUpdates } from './permission-updates.js';
 import { createPermissionPrompterBridge } from './permission-prompter.js';
@@ -360,6 +365,38 @@ export function query(
   const resolveTaskTeamName = (teamName?: string) => teamName ?? activeTeamName ?? defaultTeamName;
   const getTaskManager = (teamName?: string) => new TaskManager(resolveTaskTeamName(teamName), {
     rootDir: join(cwd, '.open-agent', 'tasks'),
+  });
+  const resolveTeamName = (teamName?: string) => normalizeOptionalString(teamName) ?? activeTeamName ?? defaultTeamName;
+  const toTeamMemberRecord = (member: TeamMember): TeamRecord['members'][number] => ({
+    name: member.name,
+    agentId: member.agentId,
+    agentType: member.agentType,
+    ...(member.model ? { model: member.model } : {}),
+    status: member.status,
+  });
+  const toTeamRecord = (config: TeamConfig): TeamRecord => ({
+    name: config.name,
+    ...(config.description ? { description: config.description } : {}),
+    members: config.members.map((member) => toTeamMemberRecord(member)),
+    createdAt: config.createdAt,
+    configPath: join(sdkTeamManager.getTeamDir(config.name), 'config.json'),
+    scratchpadPath: sdkTeamManager.getScratchpadDir(config.name),
+    inboxesPath: join(sdkTeamManager.getTeamDir(config.name), 'inboxes'),
+    taskQueuePath: join(cwd, '.open-agent', 'tasks', config.name),
+    isActive: activeTeamName === config.name,
+  });
+  const toTeamMessageRecord = (teamName: string, message: TeamMessage): TeamMessageRecord => ({
+    teamName,
+    type: message.type,
+    from: message.from,
+    ...(message.to ? { to: message.to } : {}),
+    content: message.content,
+    ...(message.summary ? { summary: message.summary } : {}),
+    timestamp: message.timestamp,
+    ...(message.requestId ? { requestId: message.requestId } : {}),
+    ...(typeof message.approve === 'boolean' ? { approve: message.approve } : {}),
+    ...(message.idleReason ? { idleReason: message.idleReason } : {}),
+    ...(message.routing ? { routing: JSON.parse(JSON.stringify(message.routing)) } : {}),
   });
   const toTaskRecord = (task: TaskItem, teamName: string): TaskRecord => ({
     id: task.id,
@@ -1824,6 +1861,87 @@ export function query(
     if (!sessionMgr) return null;
     const info = sessionMgr.getSession(cwd, sessionId);
     return info ? JSON.parse(JSON.stringify(info)) : null;
+  };
+
+  queryObj.listTeams = async () => sdkTeamManager.listTeams()
+    .map((name) => sdkTeamManager.getTeam(name))
+    .filter((config): config is TeamConfig => Boolean(config))
+    .map((config) => toTeamRecord(config));
+
+  queryObj.getTeam = async (name: string) => {
+    const team = sdkTeamManager.getTeam(name);
+    return team ? toTeamRecord(team) : null;
+  };
+
+  queryObj.createTeam = async (input: TeamCreateInput) => {
+    const team = sdkTeamManager.createTeam(input.name, input.description);
+    getTaskManager(team.name);
+    if (input.setActive !== false) {
+      activeTeamName = team.name;
+    }
+    return toTeamRecord(team);
+  };
+
+  queryObj.deleteTeam = async (name: string) => {
+    const existed = sdkTeamManager.getTeam(name) !== null;
+    sdkTeamManager.deleteTeam(name);
+    rmSync(join(cwd, '.open-agent', 'tasks', name), { recursive: true, force: true });
+    if (activeTeamName === name) {
+      activeTeamName = null;
+    }
+    return { success: existed };
+  };
+
+  queryObj.getActiveTeam = async () => {
+    if (!activeTeamName) {
+      return null;
+    }
+    const team = sdkTeamManager.getTeam(activeTeamName);
+    return team ? toTeamRecord(team) : null;
+  };
+
+  queryObj.setActiveTeam = async (name: string | null) => {
+    if (name === null) {
+      activeTeamName = null;
+      return null;
+    }
+    const team = sdkTeamManager.getTeam(name);
+    if (!team) {
+      throw new Error(`Team not found: ${name}`);
+    }
+    activeTeamName = name;
+    return toTeamRecord(team);
+  };
+
+  queryObj.sendTeamMessage = async (input: TeamMessageInput) => {
+    const teamName = resolveTeamName(input.teamName);
+    const requestId = input.requestId
+      ?? ((input.type === 'shutdown_request' || input.type === 'plan_approval_request') ? randomUUID() : undefined);
+    const message: TeamMessage = {
+      type: input.type,
+      from: input.from ?? 'sdk',
+      ...(input.recipient ? { to: input.recipient } : {}),
+      content: input.content ?? '',
+      ...(input.summary ? { summary: input.summary } : {}),
+      timestamp: new Date().toISOString(),
+      ...(requestId ? { requestId } : {}),
+      ...(typeof input.approve === 'boolean' ? { approve: input.approve } : {}),
+    };
+    sdkTeamManager.sendMessage(teamName, message);
+    return toTeamMessageRecord(teamName, message);
+  };
+
+  queryObj.readTeamInbox = async (options: TeamInboxOptions) => {
+    const teamName = resolveTeamName(options?.teamName);
+    const messages = options?.consume === false
+      ? sdkTeamManager.readMessages(teamName, options.memberName)
+      : sdkTeamManager.readInbox(teamName, options.memberName);
+    return messages.map((message) => toTeamMessageRecord(teamName, message));
+  };
+
+  queryObj.getTeamInboxCount = async (memberName: string, options?: { teamName?: string }) => {
+    const teamName = resolveTeamName(options?.teamName);
+    return sdkTeamManager.getInboxCount(teamName, memberName);
   };
 
   queryObj.listTasks = async (options?: TaskListOptions) => {
