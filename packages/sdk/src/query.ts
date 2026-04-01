@@ -142,7 +142,6 @@ export function query(
   const outputStyle = options.outputStyle ?? 'text';
   const responseLanguage = normalizeOptionalString(options.language);
   const isGitRepo = isGitRepository(cwd);
-  const gitContext = isGitRepo ? buildGitContextSnapshot(cwd) : undefined;
   const sessionExistedBeforeQuery = shouldPersist
     ? resumeManager.getSession(cwd, sessionId) !== null
     : false;
@@ -964,6 +963,8 @@ export function query(
     ],
     additionalDirectories: options.additionalDirectories,
   });
+  const hasContextSection = (key: string): boolean =>
+    promptContext.sections.some((section) => section.key === key);
 
   let activeModel = model;
   const presetSystemPrompt = typeof options.systemPrompt === 'object'
@@ -989,10 +990,10 @@ export function query(
         outputStyle,
         knowledgeCutoff: 'August 2025',
         agentInstructions: promptContext.agentInstructions,
-        memoryDir: promptContext.memoryDir,
-        memoryContent: promptContext.memoryContent,
+        memoryDir: hasContextSection('memory-context') ? undefined : promptContext.memoryDir,
+        memoryContent: hasContextSection('memory-context') ? undefined : promptContext.memoryContent,
         isGitRepo,
-        gitContext: promptContext.gitContext,
+        gitContext: hasContextSection('git-context') ? undefined : promptContext.gitContext,
         contextSections: promptContext.sections,
         toolDescriptions: getToolPromptDescriptions(),
         runtimeSnapshot: {

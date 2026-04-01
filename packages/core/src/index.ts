@@ -15,8 +15,15 @@ export {
 export { AutoMemory } from './auto-memory.js';
 export { ConfigLoader, type Settings, type PermissionRuleConfig, type HookConfig } from './config-loader.js';
 export {
+  DEFAULT_PROMPT_CONTEXT_PROVIDERS,
+  createAdditionalDirectoriesProvider,
+  createAgentInstructionsProvider,
+  createGitContextProvider,
+  createMemoryContextProvider,
   loadPromptContext,
   type PromptContextOptions,
+  type PromptContextProvider,
+  type PromptContextProviderResult,
   type PromptContextSection,
   type PromptContextSnapshot,
 } from './context-providers.js';
