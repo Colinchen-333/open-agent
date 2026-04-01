@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'bun:test';
+import type { ModelInfo } from '@open-agent/core';
+import type { LLMProvider, Message, StreamEvent, ChatOptions } from '@open-agent/providers';
 import {
   createSession,
   resumeSession,
@@ -9,6 +11,44 @@ import {
   __internal_buildSessionTurnQueryOptions,
   __internal_loadInitialMessages,
 } from '../session.js';
+
+function makeMockProvider(responses: StreamEvent[][]): LLMProvider {
+  let callIndex = 0;
+
+  return {
+    name: 'mock-session-provider',
+    async *chat(_messages: Message[], _options: ChatOptions): AsyncGenerator<StreamEvent> {
+      const events = responses[Math.min(callIndex, responses.length - 1)] ?? [];
+      callIndex += 1;
+      for (const event of events) {
+        yield event;
+      }
+    },
+    async listModels(): Promise<ModelInfo[]> {
+      return [{ value: 'mock-model', displayName: 'Mock Model', description: 'Session test model' }];
+    },
+  };
+}
+
+function toolUseResponse(
+  toolId: string,
+  toolName: string,
+  toolInput: Record<string, unknown>,
+): StreamEvent[] {
+  return [
+    { type: 'tool_use_start', id: toolId, name: toolName },
+    { type: 'tool_use_delta', id: toolId, partial_json: JSON.stringify(toolInput) },
+    { type: 'tool_use_end', id: toolId },
+    { type: 'message_end', message: {}, usage: { input_tokens: 10, output_tokens: 20 } },
+  ];
+}
+
+function textResponse(text: string): StreamEvent[] {
+  return [
+    { type: 'text_delta', text },
+    { type: 'message_end', message: {}, usage: { input_tokens: 10, output_tokens: 20 } },
+  ];
+}
 
 describe('createSession()', () => {
   it('returns a session with required interface methods', () => {
@@ -60,6 +100,97 @@ describe('createSession()', () => {
       threw = true;
     }
     expect(threw).toBe(true);
+  });
+
+  it('forwards team and task control plane methods through the stable session handle', async () => {
+    const session = createSession({
+      model: 'mock-model',
+      provider: makeMockProvider([textResponse('unused')]),
+    } as any);
+
+    const teamName = `alpha-team-${Date.now()}`;
+    const createdTeam = await session.createTeam({ name: teamName });
+    expect(createdTeam.name).toBe(teamName);
+    expect((await session.getActiveTeam())?.name).toBe(teamName);
+
+    const createdTask = await session.createTask({
+      subject: 'Session-scoped task',
+      description: 'Should inherit the active team from the session control plane.',
+    });
+    expect(createdTask.teamName).toBe(teamName);
+
+    await session.sendTeamMessage({
+      type: 'message',
+      recipient: 'alice',
+      content: 'Continue the session-scoped task.',
+    });
+    const inbox = await session.readTeamInbox({ memberName: 'alice', consume: true });
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0]?.teamName).toBe(teamName);
+    session.close();
+  });
+
+  it('streams live orchestration events and worker follow-ups from the stable session handle', async () => {
+    const teamName = `alpha-team-${Date.now()}`;
+    const session = createSession({
+      model: 'mock-model',
+      provider: makeMockProvider([
+        toolUseResponse('task-parent-session', 'Task', {
+          description: 'Delegate worker',
+          prompt: 'Use DummyTool once, then report completion.',
+          subagent_type: 'worker',
+          name: 'alice',
+          team_name: teamName,
+        }),
+        toolUseResponse('worker-tool-1', 'DummyTool', { value: 'from-session-worker' }),
+        textResponse('worker finished successfully'),
+        textResponse('session parent done'),
+      ]),
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
+      setupTools(registry) {
+        registry.register({
+          name: 'DummyTool',
+          description: 'Return a stable string for session orchestration tests.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              value: { type: 'string' },
+            },
+            required: ['value'],
+          },
+          async execute(input) {
+            return `dummy:${String((input as { value?: string }).value ?? '')}`;
+          },
+        });
+      },
+    } as any);
+
+    const eventIterator = session.subscribeOrchestrationEvents({ teamName })[Symbol.asyncIterator]();
+    const turnMessages: any[] = [];
+    for await (const message of session.send('delegate from stable session')) {
+      turnMessages.push(message);
+    }
+
+    const events = [
+      (await eventIterator.next()).value,
+      (await eventIterator.next()).value,
+      (await eventIterator.next()).value,
+      (await eventIterator.next()).value,
+    ].filter(Boolean);
+    await eventIterator.return?.();
+
+    expect(events.some((event) => event.kind === 'worker_lifecycle' && event.raw.type === 'launched')).toBe(true);
+    expect(events.some((event) => event.kind === 'worker_tool' && event.raw.toolName === 'DummyTool')).toBe(true);
+    expect(events.some((event) => event.kind === 'worker_lifecycle' && event.raw.type === 'completed')).toBe(true);
+
+    const workers = await session.listWorkers({ teamName });
+    expect(workers).toHaveLength(1);
+    const followUps = await session.getWorkerFollowUps(workers[0]!.workerId);
+    expect(followUps.some((item) => item.scaffold.kind === 'resume_worker')).toBe(true);
+    expect(followUps.some((item) => item.scaffold.kind === 'launch_verifier')).toBe(true);
+    expect(turnMessages.some((message) => message.type === 'result' && message.result === 'session parent done')).toBe(true);
+    session.close();
   });
 });
 

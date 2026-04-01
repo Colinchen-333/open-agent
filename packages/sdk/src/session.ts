@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import type { SDKMessage, SDKUserMessage, SDKResultMessage } from '@open-agent/core';
 import { SessionManager } from '@open-agent/core';
 import type { Message } from '@open-agent/providers';
-import type { SessionOptions, Session, QueryOptions } from './types.js';
+import type { SessionOptions, Session, Query, QueryOptions } from './types.js';
 import { query } from './query.js';
 
 // --------------------------------------------------------------------------
@@ -86,7 +86,32 @@ export function forkSession(sessionId: string, options?: QueryOptions): SDKSessi
  * The session handle returned by `createSession` / `resumeSession`.
  * Each call to `send()` runs one conversation turn and yields SDK messages.
  */
-export interface SDKSession {
+type SessionControlMethods = Pick<
+  Query,
+  | 'listTeams'
+  | 'getTeam'
+  | 'createTeam'
+  | 'deleteTeam'
+  | 'getActiveTeam'
+  | 'setActiveTeam'
+  | 'sendTeamMessage'
+  | 'readTeamInbox'
+  | 'getTeamInboxCount'
+  | 'subscribeOrchestrationEvents'
+  | 'listWorkers'
+  | 'getWorker'
+  | 'getWorkerFollowUps'
+  | 'stopWorker'
+  | 'listTasks'
+  | 'getTask'
+  | 'createTask'
+  | 'updateTask'
+  | 'claimNextTask'
+  | 'heartbeatTask'
+  | 'releaseTask'
+>;
+
+export interface SDKSession extends SessionControlMethods {
   /** Stable identifier for this session. */
   readonly sessionId: string;
   /**
@@ -187,8 +212,10 @@ function _buildSession(
 ): SDKSession {
   let closed = false;
   const abortController = options?.abortController ?? new AbortController();
-  // Conversation history accumulates across turns so the model retains context.
-  const history: Message[] = initialMessages ? [...initialMessages] : [];
+  let activeTurn = false;
+  const messageQueue: SDKUserMessage[] = [];
+  let resolveNext: ((msg: SDKUserMessage) => void) | null = null;
+  let rejectNext: ((err: Error) => void) | null = null;
 
   // Session manager for persisting transcripts when requested.
   const shouldPersist = options?.persistSession ?? false;
@@ -207,6 +234,65 @@ function _buildSession(
     }
   }
 
+  async function* userMessages(): AsyncIterable<SDKUserMessage> {
+    while (!closed) {
+      if (messageQueue.length > 0) {
+        yield messageQueue.shift()!;
+      } else {
+        try {
+          yield await new Promise<SDKUserMessage>((resolve, reject) => {
+            resolveNext = resolve;
+            rejectNext = reject;
+          });
+        } catch {
+          return;
+        }
+      }
+    }
+  }
+
+  const q = query({
+    prompt: userMessages(),
+    options: {
+      ...options,
+      sessionId,
+      abortController,
+      ...(initialMessages && initialMessages.length > 0 ? { initialMessages } : {}),
+      persistSession: false,
+    },
+  });
+
+  const enqueueMessage = (message: SDKUserMessage): void => {
+    if (resolveNext) {
+      const resolve = resolveNext;
+      resolveNext = null;
+      rejectNext = null;
+      resolve(message);
+    } else {
+      messageQueue.push(message);
+    }
+  };
+
+  const persistTurnMessage = (msg: SDKMessage): void => {
+    if (!sessionMgr) return;
+    if (msg.type === 'user' || msg.type === 'assistant' || msg.type === 'tool_result') {
+      try {
+        sessionMgr.appendToTranscript(cwd, sessionId, msg);
+      } catch {
+        // Non-critical
+      }
+      return;
+    }
+    if (msg.type === 'result') {
+      try {
+        sessionMgr.appendToTranscript(cwd, sessionId, msg);
+        sessionMgr.touchSession(cwd, sessionId);
+      } catch {
+        // Non-critical
+      }
+    }
+  };
+
   return {
     get sessionId(): string {
       return sessionId;
@@ -215,6 +301,9 @@ function _buildSession(
     async *send(message: string): AsyncGenerator<SDKMessage, void> {
       if (closed) {
         throw new Error(`Session ${sessionId} is closed.`);
+      }
+      if (activeTurn) {
+        throw new Error(`Session ${sessionId} already has an active turn.`);
       }
 
        if (sessionMgr) {
@@ -232,51 +321,68 @@ function _buildSession(
           // Non-critical
         }
       }
-
-      // Each send() uses a fresh query() call with accumulated history
-      // so the ConversationLoop sees the full prior context.
-      const q = query(
-        message,
-        __internal_buildSessionTurnQueryOptions(options, sessionId, abortController, history),
-      );
-
+      const sdkMessage: SDKUserMessage = {
+        type: 'user',
+        message: { role: 'user', content: message },
+        parent_tool_use_id: null,
+        uuid: randomUUID(),
+        session_id: sessionId,
+      };
+      enqueueMessage(sdkMessage);
+      activeTurn = true;
       try {
-        for await (const msg of q) {
-          // Capture user/assistant turns into history for the next send().
-          if (msg.type === 'user' || msg.type === 'assistant' || msg.type === 'tool_result') {
-            __internal_appendSdkMessageToHistory(history, msg);
-            // Persist to disk if requested.
-            if (sessionMgr) {
-              try {
-                sessionMgr.appendToTranscript(cwd, sessionId, msg);
-              } catch {
-                // Non-critical: don't crash if disk write fails.
-              }
-            }
+        while (true) {
+          const next = await q.next();
+          if (next.done) {
+            return;
           }
-
+          const msg = next.value;
+          persistTurnMessage(msg);
           yield msg;
-          // Stop iterating this turn once we get the result.
           if (msg.type === 'result') {
-            if (sessionMgr) {
-              try {
-                sessionMgr.appendToTranscript(cwd, sessionId, msg);
-                sessionMgr.touchSession(cwd, sessionId);
-              } catch { /* non-critical */ }
-            }
             break;
           }
         }
       } finally {
-        q.close();
+        activeTurn = false;
       }
     },
 
+    listTeams: (...args) => q.listTeams(...args),
+    getTeam: (...args) => q.getTeam(...args),
+    createTeam: (...args) => q.createTeam(...args),
+    deleteTeam: (...args) => q.deleteTeam(...args),
+    getActiveTeam: (...args) => q.getActiveTeam(...args),
+    setActiveTeam: (...args) => q.setActiveTeam(...args),
+    sendTeamMessage: (...args) => q.sendTeamMessage(...args),
+    readTeamInbox: (...args) => q.readTeamInbox(...args),
+    getTeamInboxCount: (...args) => q.getTeamInboxCount(...args),
+    subscribeOrchestrationEvents: (...args) => q.subscribeOrchestrationEvents(...args),
+    listWorkers: (...args) => q.listWorkers(...args),
+    getWorker: (...args) => q.getWorker(...args),
+    getWorkerFollowUps: (...args) => q.getWorkerFollowUps(...args),
+    stopWorker: (...args) => q.stopWorker(...args),
+    listTasks: (...args) => q.listTasks(...args),
+    getTask: (...args) => q.getTask(...args),
+    createTask: (...args) => q.createTask(...args),
+    updateTask: (...args) => q.updateTask(...args),
+    claimNextTask: (...args) => q.claimNextTask(...args),
+    heartbeatTask: (...args) => q.heartbeatTask(...args),
+    releaseTask: (...args) => q.releaseTask(...args),
+
     close(): void {
+      if (closed) return;
       closed = true;
+      if (rejectNext) {
+        const reject = rejectNext;
+        resolveNext = null;
+        rejectNext = null;
+        reject(new Error('Session closed'));
+      }
       if (!abortController.signal.aborted) {
         abortController.abort();
       }
+      q.close();
     },
 
     async [Symbol.asyncDispose](): Promise<void> {
@@ -465,6 +571,28 @@ export function unstable_v2_createSession(
     async *stream(): AsyncGenerator<SDKMessage, void> {
       yield* q;
     },
+
+    listTeams: (...args) => q.listTeams(...args),
+    getTeam: (...args) => q.getTeam(...args),
+    createTeam: (...args) => q.createTeam(...args),
+    deleteTeam: (...args) => q.deleteTeam(...args),
+    getActiveTeam: (...args) => q.getActiveTeam(...args),
+    setActiveTeam: (...args) => q.setActiveTeam(...args),
+    sendTeamMessage: (...args) => q.sendTeamMessage(...args),
+    readTeamInbox: (...args) => q.readTeamInbox(...args),
+    getTeamInboxCount: (...args) => q.getTeamInboxCount(...args),
+    subscribeOrchestrationEvents: (...args) => q.subscribeOrchestrationEvents(...args),
+    listWorkers: (...args) => q.listWorkers(...args),
+    getWorker: (...args) => q.getWorker(...args),
+    getWorkerFollowUps: (...args) => q.getWorkerFollowUps(...args),
+    stopWorker: (...args) => q.stopWorker(...args),
+    listTasks: (...args) => q.listTasks(...args),
+    getTask: (...args) => q.getTask(...args),
+    createTask: (...args) => q.createTask(...args),
+    updateTask: (...args) => q.updateTask(...args),
+    claimNextTask: (...args) => q.claimNextTask(...args),
+    heartbeatTask: (...args) => q.heartbeatTask(...args),
+    releaseTask: (...args) => q.releaseTask(...args),
 
     close(): void {
       if (closed) return;

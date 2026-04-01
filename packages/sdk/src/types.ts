@@ -352,6 +352,17 @@ export interface WorkerFollowUpSuggestion {
   scaffold: NonNullable<SDKPromptSuggestionMessage['scaffold']>;
 }
 
+export interface WorkerLaunchInput {
+  prompt: string;
+  name?: string;
+  teamName?: string;
+  model?: string;
+  maxTurns?: number;
+  mode?: string;
+  cwd?: string;
+  isolation?: 'worktree';
+}
+
 export interface TaskLeaseInfo {
   owner: string;
   claimedAt: string;
@@ -556,6 +567,12 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   getWorker(workerId: string): Promise<WorkerRecord | null>;
   /** Build Claude Code style follow-up suggestions for a finished worker. */
   getWorkerFollowUps(workerId: string): Promise<WorkerFollowUpSuggestion[]>;
+  /** Launch a background worker directly through the SDK control plane. */
+  launchWorker(input: WorkerLaunchInput): Promise<WorkerRecord>;
+  /** Launch a fresh background verifier directly through the SDK control plane. */
+  launchVerifier(input: WorkerLaunchInput): Promise<WorkerRecord>;
+  /** Resume an existing worker directly through the SDK control plane. */
+  resumeWorker(workerId: string, input: WorkerLaunchInput): Promise<WorkerRecord>;
   /** Stop a live worker in the current runtime and report whether it was found. */
   stopWorker(workerId: string): Promise<{ success: boolean }>;
   /** Return visible background bash/agent tasks for the current runtime. */
@@ -653,6 +670,48 @@ export interface Session {
   send(message: string | SDKUserMessage): Promise<void>;
   /** Async-iterate over all SDKMessages produced by the session. */
   stream(): AsyncGenerator<SDKMessage, void>;
+  /** List all known teams visible to this SDK session. */
+  listTeams(): Promise<TeamRecord[]>;
+  /** Return one team by name, or null if it does not exist. */
+  getTeam(name: string): Promise<TeamRecord | null>;
+  /** Create a team and optionally make it active for this session. */
+  createTeam(input: TeamCreateInput): Promise<TeamRecord>;
+  /** Delete a team and return whether it existed. */
+  deleteTeam(name: string): Promise<{ success: boolean }>;
+  /** Return the currently active team for this session, if any. */
+  getActiveTeam(): Promise<TeamRecord | null>;
+  /** Change the active team for this session, or clear it with null. */
+  setActiveTeam(name: string | null): Promise<TeamRecord | null>;
+  /** Send a team message into the selected or named team inbox fabric. */
+  sendTeamMessage(input: TeamMessageInput): Promise<TeamMessageRecord>;
+  /** Read or peek a member inbox from the selected or named team. */
+  readTeamInbox(options: TeamInboxOptions): Promise<TeamMessageRecord[]>;
+  /** Return the unread inbox count for a member in the selected or named team. */
+  getTeamInboxCount(memberName: string, options?: { teamName?: string }): Promise<number>;
+  /** Subscribe to live worker orchestration events for this SDK session. */
+  subscribeOrchestrationEvents(options?: SubscribeOrchestrationEventsOptions): AsyncIterable<SDKOrchestrationEvent>;
+  /** List known worker sessions visible to this SDK session. */
+  listWorkers(options?: WorkerListOptions): Promise<WorkerRecord[]>;
+  /** Return one worker session by ID, or null if it does not exist. */
+  getWorker(workerId: string): Promise<WorkerRecord | null>;
+  /** Build Claude Code style follow-up suggestions for a finished worker. */
+  getWorkerFollowUps(workerId: string): Promise<WorkerFollowUpSuggestion[]>;
+  /** Stop a live worker in the current runtime and report whether it was found. */
+  stopWorker(workerId: string): Promise<{ success: boolean }>;
+  /** Return task records from the shared task control plane for the current or specified team. */
+  listTasks(options?: TaskListOptions): Promise<TaskRecord[]>;
+  /** Return a single task record, or null if it does not exist. */
+  getTask(taskId: string, options?: { teamName?: string }): Promise<TaskRecord | null>;
+  /** Create a task record in the shared task control plane. */
+  createTask(input: TaskCreateInput): Promise<TaskRecord>;
+  /** Update a task record in the shared task control plane. */
+  updateTask(input: TaskUpdateInput): Promise<TaskRecord>;
+  /** Claim the next available task for a worker, applying a lease. */
+  claimNextTask(owner: string, options?: TaskClaimOptions): Promise<TaskRecord | null>;
+  /** Heartbeat / renew an existing claimed task lease. */
+  heartbeatTask(taskId: string, owner: string, options?: TaskClaimOptions): Promise<TaskRecord>;
+  /** Release a claimed task back to pending or mark it completed. */
+  releaseTask(taskId: string, owner: string, options?: TaskReleaseOptions): Promise<TaskRecord>;
   /** Close the session and release resources. */
   close(): void;
   /** Supports `await using session = …` (TC39 explicit resource management). */
