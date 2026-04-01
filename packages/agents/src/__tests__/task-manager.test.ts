@@ -66,7 +66,7 @@ describe('TaskManager scheduling', () => {
     expect(released).toHaveLength(1);
     expect(released[0]?.status).toBe('pending');
     expect(released[0]?.owner).toBeUndefined();
-    expect(released[0]?.lease).toBeUndefined();
+    expect(released[0]?.lease?.attempts).toBe(1);
 
     const reclaimed = manager.claimNext('worker-b', {
       now: new Date('2026-04-01T10:00:02.000Z'),
