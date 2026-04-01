@@ -10,6 +10,7 @@ export function createToolSearchTool(deps: ToolSearchDeps): ToolDefinition {
     name: 'ToolSearch',
     description:
       'Search for available deferred tools. Use "select:<tool_name>" for direct selection, or keywords to search.',
+    isReadOnly: true,
     inputSchema: {
       type: 'object',
       properties: {

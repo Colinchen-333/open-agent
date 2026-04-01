@@ -20,6 +20,7 @@
         "@open-agent/cli": "workspace:*",
         "@open-agent/core": "workspace:*",
         "@open-agent/hooks": "workspace:*",
+        "@open-agent/ink": "workspace:*",
         "@open-agent/mcp": "workspace:*",
         "@open-agent/permissions": "workspace:*",
         "@open-agent/plugins": "workspace:*",

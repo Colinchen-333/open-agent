@@ -21,6 +21,8 @@ export interface SlashCommandContext {
   effort?: string;
   /** Available agent types with descriptions. */
   agentTypes?: { name: string; description: string }[];
+  /** Available skills with descriptions and source labels. */
+  skills?: { name: string; description: string; source?: string }[];
   /** MCP server status. */
   mcpStatus?: { name: string; status: string }[];
   /** Permission engine instance for detailed rule display. */
@@ -102,6 +104,7 @@ const SLASH_COMMANDS: Record<
         '    /permissions     Show permission mode and rules',
         '    /memory          Show auto-memory status',
         '    /agents          List available agent types',
+        '    /skills          List available skills',
         '    /mcp             Show MCP server status',
         '',
         '  Git',
@@ -286,6 +289,22 @@ const SLASH_COMMANDS: Record<
       return {
         handled: true,
         output: `Available agent types (${agents.length}):\n${lines.join('\n')}`,
+      };
+    },
+  },
+  '/skills': {
+    description: 'List available skills',
+    handler: async (_args, ctx) => {
+      const skills = ctx.skills ?? [];
+      if (skills.length === 0) {
+        return { handled: true, output: 'No skills loaded.' };
+      }
+      const lines = skills.map((skill) =>
+        `  ${skill.name.padEnd(28)} ${skill.description || '(no description)'}${skill.source ? ` [${skill.source}]` : ''}`
+      );
+      return {
+        handled: true,
+        output: `Available skills (${skills.length}):\n${lines.join('\n')}`,
       };
     },
   },

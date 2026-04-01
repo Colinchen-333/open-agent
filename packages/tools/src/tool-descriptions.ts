@@ -88,21 +88,28 @@ export function getToolPromptDescriptions(): Record<string, string> {
     // ── Subagents & tasks ────────────────────────────────────────────────────
 
     Task: `Launch a specialized subagent to handle a complex, multi-step task autonomously.
-- Available subagent types: Explore (read-only research), Plan (planning without edits), code-writer, general-purpose
+- Available subagent types: Explore (read-only research), Plan (planning without edits), worker (default coordinated worker), verifier (clean-slate validation), code-writer, general-purpose
 - Launch multiple agents concurrently when the tasks are independent
 - The agent result is NOT directly visible to the user — you must summarize it in your reply
 - Provide a clear, self-contained prompt so the agent can work without further clarification
+- After a worker reports success, prefer launching a fresh verifier for independent proof instead of asking the same worker to self-approve
+- After a worker reports failure, prefer resuming that same worker with the failure context, logs, and a narrower retry target
+- When delegating verification, restate the exact claims, files, commands, and pass/fail criteria — do not just say "review this"
+- Completed or failed task notifications may include orchestration prompt templates; adapt those templates when they fit instead of drafting follow-up prompts from scratch
+- Use resume to continue an existing worker and preserve its loaded context when the follow-up overlaps heavily with the earlier task
+- Resumed sessions may contain user-role <task-notification> blocks from finished workers; use the included <task-id> as the resume target when continuing that worker
 - The agent runs in the same working directory by default; pass cwd to override`,
 
-    TaskOutput: `Retrieve output from a running or completed background Bash task.
+    TaskOutput: `Retrieve output from a running or completed background task (Bash or agent).
 - Pass the task_id returned when the task was started with run_in_background
 - Set block: true (default) to wait until the task finishes before returning
 - Set a timeout (milliseconds) to cap how long you wait
-- Check status: "running" | "completed" | "error"`,
+- For agent tasks, inspect task_event for structured task_progress / task_notification payloads
+- Check status: "running" | "completed" | "failed" | "stopped"`,
 
-    TaskStop: `Stop a running background Bash task.
+    TaskStop: `Stop a running background task.
 - Pass the task_id returned when the task was started with run_in_background
-- This sends SIGTERM to the process; output collected so far is preserved`,
+- For Bash tasks this sends SIGTERM; for agent tasks it requests shutdown and preserves captured output`,
 
     // ── Task list (project management) ───────────────────────────────────────
 
@@ -133,8 +140,11 @@ export function getToolPromptDescriptions(): Record<string, string> {
 
     TeamCreate: `Create a new team to coordinate multiple agents working in parallel.
 - Creates a team config file at ~/.open-agent/teams/{team-name}/config.json
+- Creates a shared scratchpad at ~/.open-agent/teams/{team-name}/scratchpad/
 - Creates a shared task directory at ~/.open-agent/tasks/{team-name}/
 - Spawn teammates with the Task tool using the team_name parameter
+- Use the scratchpad for durable handoffs, synthesized findings, and cross-worker notes
+- After launching teammates, tell the user only what you started — do not predict the outcome before results arrive
 - Always shut down teammates with SendMessage (shutdown_request) before calling TeamDelete`,
 
     TeamDelete: `Remove the team and its task directory when all work is complete.
@@ -147,6 +157,11 @@ export function getToolPromptDescriptions(): Record<string, string> {
 - type "shutdown_request": ask a teammate to gracefully shut down
 - type "shutdown_response": approve or reject a received shutdown request (pass request_id)
 - type "plan_approval_response": approve or reject a teammate's plan (pass request_id)
+- First synthesize worker findings yourself, then send a precise self-contained follow-up prompt with exact files, constraints, and verification requirements
+- Prefer continuing the same teammate when its context helps; use a fresh verifier teammate for independent verification or clean-slate retries
+- After a successful implementation handoff, include the exact claims to verify, changed files, commands to run, and expected evidence
+- After a failed attempt, send the same teammate a narrowed retry plan with the observed failure chain and concrete next hypothesis
+- Never send vague instructions like "based on your findings" without restating the actual findings
 - Always refer to teammates by NAME, never by agent ID
 - Messages are automatically delivered; you do not need to check an inbox manually`,
 

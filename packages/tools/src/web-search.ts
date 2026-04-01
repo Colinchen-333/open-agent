@@ -1,4 +1,5 @@
 import type { ToolDefinition, ToolContext } from './types.js';
+import { truncateSummary } from './tool-summary.js';
 
 interface SearchResult {
   title: string;
@@ -163,6 +164,10 @@ export function createWebSearchTool(): ToolDefinition {
     name: 'WebSearch',
     description:
       'Search the web and return results. Use this for current events and recent information.',
+    isReadOnly: true,
+    getToolUseSummary(input: { query: string }) {
+      return `Searched web for ${truncateSummary(input.query, 40)}`;
+    },
     inputSchema: {
       type: 'object',
       properties: {

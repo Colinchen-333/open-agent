@@ -1,4 +1,5 @@
 import type { ToolDefinition } from './types.js';
+import { truncateSummary } from './tool-summary.js';
 
 // Simple in-memory cache with 15-minute TTL for fetched URL content.
 const CACHE_TTL_MS = 15 * 60 * 1000;
@@ -113,6 +114,10 @@ export function createWebFetchTool(): ToolDefinition {
     description: 'Fetch content from a URL and convert it to readable Markdown text. ' +
       'The prompt parameter describes what you are looking for; use it to guide ' +
       'your own interpretation of the returned content.',
+    isReadOnly: true,
+    getToolUseSummary(input: { url: string }) {
+      return `Fetched ${truncateSummary(input.url, 45)}`;
+    },
     inputSchema: {
       type: 'object',
       properties: {

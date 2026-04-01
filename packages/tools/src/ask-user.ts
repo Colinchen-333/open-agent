@@ -40,6 +40,7 @@ export function createAskUserTool(): ToolDefinition {
   return {
     name: 'AskUserQuestion',
     description: 'Ask the user one or more questions with structured multiple-choice options',
+    isReadOnly: true,
     inputSchema: {
       type: 'object',
       properties: {

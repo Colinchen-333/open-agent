@@ -25,6 +25,7 @@ export function createNotebookEditTool(): ToolDefinition {
   return {
     name: 'NotebookEdit',
     description: 'Edit a Jupyter notebook cell',
+    isConcurrencySafe: false,
     inputSchema: {
       type: 'object',
       properties: {

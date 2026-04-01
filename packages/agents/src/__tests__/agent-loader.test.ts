@@ -9,18 +9,19 @@ describe('AgentLoader', () => {
     loader.loadDefaults('/tmp');
   });
 
-  it('loads all 8 built-in agent types', () => {
+  it('loads all built-in agent types including verifier', () => {
     const agents = loader.list();
     const names = agents.map(([name]) => name);
     expect(names).toContain('Explore');
     expect(names).toContain('Plan');
     expect(names).toContain('code-writer');
     expect(names).toContain('general-purpose');
+    expect(names).toContain('verifier');
     expect(names).toContain('architecture-logic-reviewer');
     expect(names).toContain('Bash');
     expect(names).toContain('open-agent-guide');
     expect(names).toContain('statusline-setup');
-    expect(agents.length).toBeGreaterThanOrEqual(8);
+    expect(agents.length).toBeGreaterThanOrEqual(9);
   });
 
   describe('get()', () => {
@@ -218,6 +219,26 @@ describe('AgentLoader', () => {
     it('allows background execution', () => {
       const agent = loader.get('architecture-logic-reviewer')!;
       expect(agent.allowBackgroundExecution).toBe(true);
+    });
+  });
+
+  describe('verifier agent', () => {
+    it('is defined', () => {
+      const agent = loader.get('verifier');
+      expect(agent).toBeDefined();
+    });
+
+    it('is read-only plus bash validation', () => {
+      const agent = loader.get('verifier')!;
+      expect(agent.tools).toEqual(['Read', 'Glob', 'Grep', 'Bash']);
+      expect(agent.disallowedTools).toContain('Edit');
+      expect(agent.disallowedTools).toContain('Write');
+      expect(agent.disallowedTools).toContain('Task');
+    });
+
+    it('has mode set to default', () => {
+      const agent = loader.get('verifier')!;
+      expect(agent.mode).toBe('default');
     });
   });
 

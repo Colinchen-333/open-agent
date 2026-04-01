@@ -20,6 +20,7 @@ export class TeamManager {
     const teamDir = join(this.baseDir, name);
     mkdirSync(teamDir, { recursive: true });
     mkdirSync(join(teamDir, 'inboxes'), { recursive: true });
+    mkdirSync(this.getScratchpadDir(name), { recursive: true });
 
     // Preserve existing config if the team already exists.
     const existing = this.getTeam(name);
@@ -28,6 +29,7 @@ export class TeamManager {
         existing.description = description;
         this.saveTeam(existing);
       }
+      mkdirSync(this.getScratchpadDir(name), { recursive: true });
       return existing;
     }
 
@@ -84,6 +86,14 @@ export class TeamManager {
     return readdirSync(this.baseDir).filter(f =>
       existsSync(join(this.baseDir, f, 'config.json')),
     );
+  }
+
+  getTeamDir(name: string): string {
+    return join(this.baseDir, name);
+  }
+
+  getScratchpadDir(name: string): string {
+    return join(this.getTeamDir(name), 'scratchpad');
   }
 
   // ---------------------------------------------------------------------------

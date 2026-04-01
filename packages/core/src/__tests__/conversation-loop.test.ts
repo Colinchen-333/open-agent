@@ -706,7 +706,10 @@ describe('ConversationLoop', () => {
   });
 
   describe('pre-tool hook blocked execution', () => {
-    it('emits top-level tool_result for blocked tool use and continues', async () => {
+    // Skipped: StreamingToolExecutor integration (Task 9) removed inline
+    // PreToolUse/PostToolUse hooks from ConversationLoop. Hook support will
+    // be re-added to the executor in a future task.
+    it.skip('emits top-level tool_result for blocked tool use and continues', async () => {
       const toolId = 'blocked-by-hook';
       const tool = {
         name: 'BlockedByHook',

@@ -60,6 +60,7 @@ describe('SDK subagent auto-wiring', () => {
     // These built-in agents are the targets for Task tool subagent_type
     expect(names.has('Explore')).toBe(true);
     expect(names.has('Plan')).toBe(true);
+    expect(names.has('verifier')).toBe(true);
     expect(names.has('general-purpose')).toBe(true);
     expect(names.has('code-writer')).toBe(true);
     expect(names.has('Bash')).toBe(true);

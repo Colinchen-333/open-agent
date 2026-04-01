@@ -1,5 +1,6 @@
 import type { ToolDefinition, ToolContext, FileEditInput } from './types.js';
 import { fileExists, readText, writeText } from '@open-agent/core';
+import { summarizeFilePath } from './tool-summary.js';
 
 /**
  * Generate a simple unified-style diff showing the changed lines and up to
@@ -66,6 +67,11 @@ export function createEditTool(): ToolDefinition {
   return {
     name: 'Edit',
     description: 'Perform an exact string replacement in a file. By default ensures old_string appears exactly once (use replace_all to replace every occurrence).',
+    isConcurrencySafe: false,
+    getToolUseSummary(input: FileEditInput, _result, isError) {
+      const file = summarizeFilePath(input.file_path) ?? 'file';
+      return isError ? `Edit failed in ${file}` : `Edited ${file}`;
+    },
     inputSchema: {
       type: 'object',
       properties: {

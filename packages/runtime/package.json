@@ -1,5 +1,5 @@
 {
-  "name": "@open-agent/tools",
+  "name": "@open-agent/runtime",
   "version": "0.1.0",
   "private": true,
   "main": "src/index.ts",
@@ -11,12 +11,13 @@
     }
   },
   "scripts": {
-    "build": "echo 'No build step for tools'",
-    "dev": "echo 'No dev step for tools'"
+    "build": "echo 'No build step for runtime'",
+    "dev": "echo 'No dev step for runtime'"
   },
   "dependencies": {
     "@open-agent/core": "workspace:*",
+    "@open-agent/mcp": "workspace:*",
     "@open-agent/skills": "workspace:*",
-    "fast-glob": "^3.3.3"
+    "@open-agent/tools": "workspace:*"
   }
 }

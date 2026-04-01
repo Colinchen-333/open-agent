@@ -1,4 +1,5 @@
 import type { ToolDefinition, ToolContext } from './types.js';
+import { truncateSummary } from './tool-summary.js';
 
 // Avoid circular dependency: runner factory is injected via deps
 export interface TaskToolDeps {
@@ -20,7 +21,7 @@ export interface TaskToolDeps {
 
   // Background agent management
   getBackgroundAgent?: (agentId: string) => {
-    status: 'running' | 'completed' | 'failed';
+    status: 'running' | 'completed' | 'failed' | 'stopped';
     output_file: string;
     result?: string;
   } | null;
@@ -31,6 +32,10 @@ export function createTaskTool(deps: TaskToolDeps): ToolDefinition {
     name: 'Task',
     description: 'Launch a new agent to handle complex, multi-step tasks autonomously. Specify subagent_type to choose the agent type and prompt to describe the task.',
     timeout: 600_000, // 10 minutes — subagents may run complex multi-step tasks
+    getToolUseSummary(input: { description: string; subagent_type: string }, _result, isError) {
+      const label = truncateSummary(input.description || input.subagent_type || 'task', 40);
+      return isError ? `Delegation failed: ${label}` : `Delegated ${label}`;
+    },
     inputSchema: {
       type: 'object',
       properties: {

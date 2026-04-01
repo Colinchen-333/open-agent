@@ -2,11 +2,17 @@ import { mkdir } from 'fs/promises';
 import { dirname } from 'path';
 import type { ToolDefinition, ToolContext, FileWriteInput } from './types.js';
 import { fileExists, writeText } from '@open-agent/core';
+import { summarizeFilePath } from './tool-summary.js';
 
 export function createWriteTool(): ToolDefinition {
   return {
     name: 'Write',
     description: 'Write content to a file, creating it or overwriting it entirely. Creates parent directories as needed.',
+    isConcurrencySafe: false,
+    getToolUseSummary(input: FileWriteInput, _result, isError) {
+      const file = summarizeFilePath(input.file_path) ?? 'file';
+      return isError ? `Write failed for ${file}` : `Wrote ${file}`;
+    },
     inputSchema: {
       type: 'object',
       properties: {

@@ -76,6 +76,7 @@ export function createTaskGetTool(deps: TaskToolsDeps): ToolDefinition {
   return {
     name: 'TaskGet',
     description: 'Retrieve a task by its ID with full details.',
+    isReadOnly: true,
     inputSchema: {
       type: 'object',
       properties: {
@@ -95,6 +96,7 @@ export function createTaskListTool(deps: TaskToolsDeps): ToolDefinition {
   return {
     name: 'TaskList',
     description: 'List all tasks in the current task list.',
+    isReadOnly: true,
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     async execute(_input: any, _ctx: ToolContext) {
       const tasks = await deps.listTasks();

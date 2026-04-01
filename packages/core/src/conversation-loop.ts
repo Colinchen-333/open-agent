@@ -6,6 +6,7 @@ import type { PermissionDenial } from './types.js';
 import type { AppState } from '@open-agent/state';
 import { randomUUID } from 'crypto';
 import { basename } from 'path';
+import { StreamingToolExecutor } from './tool-executor.js';
 
 /**
  * Minimal interface for permission checking — implemented by PermissionEngine
@@ -1109,7 +1110,7 @@ export class ConversationLoop {
         return;
       }
 
-      // ── Phase 2: Parallel execution of all approved tools ─────────────────
+      // ── Phase 2: Execute via StreamingToolExecutor ─────────────────────────
       type ExecutionResult = {
         toolUse: ApprovedEntry['toolUse'];
         resultStr: string;
@@ -1119,161 +1120,62 @@ export class ConversationLoop {
         isImageResult?: boolean;
       };
 
-      const TOOL_EXECUTE_TIMEOUT_MS = 60_000;
+      const executor = new StreamingToolExecutor(
+        this.options.tools,
+        {
+          cwd: this.options.cwd,
+          abortSignal: this.options.abortSignal,
+          sessionId: this.options.sessionId,
+          fileReadTracker: this.fileReadTracker,
+          getAppState: this.options.getAppState,
+          setAppState: this.options.setAppState,
+        },
+        sessionId,
+      );
 
-      const executeApprovedTool = async ({ toolUse, tool }: ApprovedEntry): Promise<ExecutionResult> => {
-          const toolCtx: ToolContext = {
-            cwd: this.options.cwd,
-            abortSignal: this.options.abortSignal,
-            sessionId: this.options.sessionId,
-            toolUseId: toolUse.id,
-            fileReadTracker: this.fileReadTracker,
-            getAppState: this.options.getAppState,
-            setAppState: this.options.setAppState,
-          };
+      for (const { toolUse } of approvedTools) {
+        executor.addTool({
+          id: toolUse.id,
+          name: toolUse.name,
+          input: toolUse.input as Record<string, unknown>,
+        });
+      }
 
-          // ── PreToolUse hook ──────────────────────────────────────────────
-          if (this.options.hookExecutor) {
-            try {
-              const hookResult = await this.options.hookExecutor.execute(
-                'PreToolUse',
-                { ...this.hookBase(), hook_event_name: 'PreToolUse', tool_name: toolUse.name, tool_input: toolUse.input },
-                toolUse.id,
-              );
-
-              if (hookResult.continue === false) {
-                return {
-                  toolUse,
-                  resultStr: hookResult.decision ?? 'Blocked by hook',
-                  isError: true,
-                  blocked: true,
-                  blockReason: hookResult.decision ?? 'Blocked by hook',
-                };
-              }
-
-              // Allow the hook to mutate the tool input before execution.
-              if (hookResult.updatedInput) {
-                toolUse.input = { ...(toolUse.input as Record<string, unknown>), ...hookResult.updatedInput };
-              }
-            } catch (hookErr) {
-              // Re-throw abort errors so Ctrl+C still works.
-              if (hookErr instanceof DOMException && hookErr.name === 'AbortError') throw hookErr;
-              if (this.options.abortSignal?.aborted) throw new DOMException('Aborted', 'AbortError');
-              // Non-abort hook crash → treat as a blocked tool to avoid
-              // crashing the entire run() generator.
-              return {
-                toolUse,
-                resultStr: `PreToolUse hook error: ${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
-                isError: true,
-                blocked: true,
-                blockReason: `Hook error: ${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
-              };
-            }
-          }
-          // ── End PreToolUse hook ──────────────────────────────────────────
-
-          if (this.options.abortSignal?.aborted) throw new DOMException('Aborted', 'AbortError');
-
-          try {
-            let toolTimer: ReturnType<typeof setTimeout>;
-            const toolTimeout = tool.timeout ?? TOOL_EXECUTE_TIMEOUT_MS;
-            const timeoutPromise = new Promise<never>((_, reject) => {
-              toolTimer = setTimeout(() => reject(new Error(`Tool execution timed out after ${Math.round(toolTimeout / 1000)}s`)), toolTimeout);
-            });
-            const result = await Promise.race([tool.execute(toolUse.input, toolCtx), timeoutPromise])
-              .finally(() => clearTimeout(toolTimer!));
-            const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
-
-            // ── PostToolUse hook (success) ───────────────────────────────
-            if (this.options.hookExecutor) {
-              try {
-                await this.options.hookExecutor.execute(
-                  'PostToolUse',
-                  {
-                    ...this.hookBase(),
-                    hook_event_name: 'PostToolUse',
-                    tool_name: toolUse.name,
-                    tool_input: toolUse.input,
-                    tool_response: resultStr,
-                  },
-                  toolUse.id,
-                );
-              } catch (e) {
-                if (e instanceof DOMException && e.name === 'AbortError') throw e;
-                // Non-abort hook errors must not prevent tool results from reaching the LLM.
-              }
-            }
-            // ── End PostToolUse hook ─────────────────────────────────────
-
-            // Check if the result is a structured image content block.
-            // When the Read tool returns base64 image data, we want the LLM
-            // to receive it as an actual image block rather than a JSON string
-            // so vision capabilities are properly exercised.
+      // Collect results for Phase 3 processing
+      const orderedResults: ExecutionResult[] = [];
+      for await (const event of executor.getResults()) {
+        if (event.type === 'tool_result') {
+          // Find matching approved tool entry
+          const approved = approvedTools.find(a => a.toolUse.id === event.tool_use_id);
+          if (approved) {
+            // Detect structured image results for special handling in Phase 3
             let isImageResult = false;
-            try {
-              const parsed = JSON.parse(resultStr);
-              if (
-                parsed?.type === 'image' &&
-                parsed?.source?.type === 'base64' &&
-                typeof parsed?.source?.media_type === 'string' &&
-                typeof parsed?.source?.data === 'string'
-              ) {
-                isImageResult = true;
-              }
-            } catch {
-              // Not JSON — not an image result
-            }
-
-            return { toolUse, resultStr, isError: false, blocked: false, isImageResult };
-          } catch (error: unknown) {
-            // Re-throw abort errors so the loop stops immediately on Ctrl+C
-            if (error instanceof DOMException && error.name === 'AbortError') throw error;
-            if (this.options.abortSignal?.aborted) throw new DOMException('Aborted', 'AbortError');
-
-            const msg = error instanceof Error ? error.message : String(error);
-
-            // ── PostToolUseFailure hook ────────────────────────────────
-            if (this.options.hookExecutor) {
+            if (!event.is_error) {
               try {
-                await this.options.hookExecutor.execute(
-                  'PostToolUseFailure',
-                  {
-                    ...this.hookBase(),
-                    hook_event_name: 'PostToolUseFailure',
-                    tool_name: toolUse.name,
-                    tool_input: toolUse.input,
-                    error: msg,
-                  },
-                  toolUse.id,
-                );
-              } catch (e) {
-                if (e instanceof DOMException && e.name === 'AbortError') throw e;
-                // Non-abort hook errors must not prevent error results from reaching the LLM.
+                const parsed = JSON.parse(event.result);
+                if (
+                  parsed?.type === 'image' &&
+                  parsed?.source?.type === 'base64' &&
+                  typeof parsed?.source?.media_type === 'string' &&
+                  typeof parsed?.source?.data === 'string'
+                ) {
+                  isImageResult = true;
+                }
+              } catch {
+                // Not JSON — not an image result
               }
             }
-            // ── End PostToolUseFailure hook ────────────────────────────
 
-            return { toolUse, resultStr: msg, isError: true, blocked: false, isImageResult: false };
+            orderedResults.push({
+              toolUse: approved.toolUse,
+              resultStr: event.result,
+              isError: event.is_error,
+              blocked: false,
+              isImageResult,
+            });
           }
-      };
-      const sequentialApproved = approvedTools.filter(
-        ({ toolUse, tool }) => !this.toolFlag(tool, 'isConcurrencySafe', toolUse.input, true),
-      );
-      const parallelApproved = approvedTools.filter(
-        ({ toolUse, tool }) => this.toolFlag(tool, 'isConcurrencySafe', toolUse.input, true),
-      );
-      const resultsById = new Map<string, ExecutionResult>();
-      const parallelResults: ExecutionResult[] = await Promise.all(parallelApproved.map(executeApprovedTool));
-      for (const result of parallelResults) {
-        resultsById.set(result.toolUse.id, result);
+        }
       }
-      for (const approved of sequentialApproved) {
-        const result = await executeApprovedTool(approved);
-        resultsById.set(result.toolUse.id, result);
-      }
-      const orderedResults = approvedTools
-        .map(({ toolUse }) => resultsById.get(toolUse.id))
-        .filter((result): result is ExecutionResult => result !== undefined);
       // ── End Phase 2 ───────────────────────────────────────────────────────
 
       // ── Phase 3: Yield results in original call order ─────────────────────
