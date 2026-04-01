@@ -15,14 +15,17 @@ import type {
 import { ConversationLoop, SessionManager, buildSystemPrompt, FileCheckpoint, isGitRepository, buildTaskOrchestrationTemplates, loadPromptContext, buildCoordinatorContext } from '@open-agent/core';
 import { createStore, createDefaultAppState } from '@open-agent/state';
 import type { AppState } from '@open-agent/state';
-import { AgentLoader, AgentExecutor, TeamManager } from '@open-agent/agents';
-import type { SubagentStreamEvent } from '@open-agent/agents';
-import type { AgentSession } from '@open-agent/agents';
+import { AgentLoader, AgentExecutor, TeamManager, TaskManager } from '@open-agent/agents';
+import type { SubagentStreamEvent, AgentSession, TaskItem } from '@open-agent/agents';
 import {
   createDefaultToolRegistry,
   createTaskTool,
   createTaskOutputTool,
   createTaskStopTool,
+  createTaskCreateTool,
+  createTaskUpdateTool,
+  createTaskGetTool,
+  createTaskListTool,
   createTeamCreateTool,
   createTeamDeleteTool,
   createSendMessageTool,
@@ -44,7 +47,19 @@ import {
 import type { SandboxConfig, SettingsFile, BashSandboxExecutionPolicy } from '@open-agent/permissions';
 import { HookExecutor } from '@open-agent/hooks';
 import { OpenAgentRuntime } from '@open-agent/runtime';
-import type { QueryOptions, Query, RewindFilesResult, AgentInfo, BackgroundTaskInspection } from './types.js';
+import type {
+  QueryOptions,
+  Query,
+  RewindFilesResult,
+  AgentInfo,
+  BackgroundTaskInspection,
+  TaskListOptions,
+  TaskCreateInput,
+  TaskUpdateInput,
+  TaskClaimOptions,
+  TaskReleaseOptions,
+  TaskRecord,
+} from './types.js';
 import { applyPermissionUpdates } from './permission-updates.js';
 import { createPermissionPrompterBridge } from './permission-prompter.js';
 
@@ -339,9 +354,79 @@ export function query(
     }
   }
 
-  const sdkTeamManager = new TeamManager();
   const defaultTeamName = 'default';
+  const sdkTeamManager = new TeamManager();
   let activeTeamName: string | null = null;
+  const resolveTaskTeamName = (teamName?: string) => teamName ?? activeTeamName ?? defaultTeamName;
+  const getTaskManager = (teamName?: string) => new TaskManager(resolveTaskTeamName(teamName), {
+    rootDir: join(cwd, '.open-agent', 'tasks'),
+  });
+  const toTaskRecord = (task: TaskItem, teamName: string): TaskRecord => ({
+    id: task.id,
+    subject: task.subject,
+    description: task.description,
+    status: task.status,
+    ...(task.owner ? { owner: task.owner } : {}),
+    ...(typeof task.priority === 'number' ? { priority: task.priority } : {}),
+    ...(task.activeForm ? { activeForm: task.activeForm } : {}),
+    blocks: [...(task.blocks ?? [])],
+    blockedBy: [...(task.blockedBy ?? [])],
+    ...(task.lease
+      ? {
+          lease: {
+            owner: task.lease.owner,
+            claimedAt: task.lease.claimedAt,
+            expiresAt: task.lease.expiresAt,
+            attempts: task.lease.attempts,
+          },
+        }
+      : {}),
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    ...(task.metadata ? { metadata: JSON.parse(JSON.stringify(task.metadata)) } : {}),
+    teamName,
+  });
+
+  const taskToolsDeps = {
+    createTask: async (params: {
+      subject: string;
+      description: string;
+      activeForm?: string;
+      metadata?: Record<string, unknown>;
+      priority?: number;
+    }) => {
+      const item = getTaskManager().create(
+        params.subject,
+        params.description,
+        params.activeForm,
+        params.metadata,
+        params.priority,
+      );
+      return { id: item.id, subject: item.subject };
+    },
+    updateTask: async (params: { taskId: string; [key: string]: unknown }) => {
+      getTaskManager().update(params.taskId, params as any);
+      return { success: true };
+    },
+    getTask: async (taskId: string) => getTaskManager().get(taskId),
+    listTasks: async () => getTaskManager().listAll(),
+  };
+
+  if (!toolRegistry.get('TaskCreate')) {
+    toolRegistry.register(createTaskCreateTool(taskToolsDeps));
+  }
+
+  if (!toolRegistry.get('TaskUpdate')) {
+    toolRegistry.register(createTaskUpdateTool(taskToolsDeps));
+  }
+
+  if (!toolRegistry.get('TaskGet')) {
+    toolRegistry.register(createTaskGetTool(taskToolsDeps));
+  }
+
+  if (!toolRegistry.get('TaskList')) {
+    toolRegistry.register(createTaskListTool(taskToolsDeps));
+  }
 
   if (!toolRegistry.get('TeamCreate')) {
     toolRegistry.register(createTeamCreateTool({
@@ -1739,6 +1824,69 @@ export function query(
     if (!sessionMgr) return null;
     const info = sessionMgr.getSession(cwd, sessionId);
     return info ? JSON.parse(JSON.stringify(info)) : null;
+  };
+
+  queryObj.listTasks = async (options?: TaskListOptions) => {
+    const teamName = resolveTaskTeamName(options?.teamName);
+    const manager = getTaskManager(teamName);
+    const tasks = options?.availableOnly
+      ? manager.listAvailable(options.now ?? new Date())
+      : manager.listAll();
+    return tasks.map((task) => toTaskRecord(task, teamName));
+  };
+
+  queryObj.getTask = async (taskId: string, options?: { teamName?: string }) => {
+    const teamName = resolveTaskTeamName(options?.teamName);
+    const task = getTaskManager(teamName).get(taskId);
+    return task ? toTaskRecord(task, teamName) : null;
+  };
+
+  queryObj.createTask = async (input: TaskCreateInput) => {
+    const teamName = resolveTaskTeamName(input.teamName);
+    const item = getTaskManager(teamName).create(
+      input.subject,
+      input.description,
+      input.activeForm,
+      input.metadata,
+      input.priority,
+    );
+    return toTaskRecord(item, teamName);
+  };
+
+  queryObj.updateTask = async (input: TaskUpdateInput) => {
+    const teamName = resolveTaskTeamName(input.teamName);
+    const item = getTaskManager(teamName).update(input.taskId, input as any);
+    return toTaskRecord(item, teamName);
+  };
+
+  queryObj.claimNextTask = async (owner: string, options?: TaskClaimOptions) => {
+    const teamName = resolveTaskTeamName(options?.teamName);
+    const task = getTaskManager(teamName).claimNext(owner, {
+      leaseMs: options?.leaseMs,
+      now: options?.now,
+    });
+    return task ? toTaskRecord(task, teamName) : null;
+  };
+
+  queryObj.heartbeatTask = async (taskId: string, owner: string, options?: TaskClaimOptions) => {
+    const teamName = resolveTaskTeamName(options?.teamName);
+    const task = getTaskManager(teamName).heartbeat(
+      taskId,
+      owner,
+      options?.leaseMs,
+      options?.now,
+    );
+    return toTaskRecord(task, teamName);
+  };
+
+  queryObj.releaseTask = async (taskId: string, owner: string, options?: TaskReleaseOptions) => {
+    const teamName = resolveTaskTeamName(options?.teamName);
+    const task = getTaskManager(teamName).releaseLease(
+      taskId,
+      owner,
+      options?.status ?? 'pending',
+    );
+    return toTaskRecord(task, teamName);
   };
 
   queryObj.listBackgroundTasks = async () => {

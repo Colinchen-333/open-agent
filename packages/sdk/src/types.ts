@@ -317,6 +317,70 @@ export interface BackgroundTaskInspection {
   duration_ms?: number;
 }
 
+export interface TaskLeaseInfo {
+  owner: string;
+  claimedAt: string;
+  expiresAt: string;
+  attempts: number;
+}
+
+export interface TaskRecord {
+  id: string;
+  subject: string;
+  description: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'deleted';
+  owner?: string;
+  priority?: number;
+  activeForm?: string;
+  blocks: string[];
+  blockedBy: string[];
+  lease?: TaskLeaseInfo;
+  createdAt: string;
+  updatedAt: string;
+  metadata?: Record<string, unknown>;
+  teamName: string;
+}
+
+export interface TaskListOptions {
+  teamName?: string;
+  availableOnly?: boolean;
+  now?: Date;
+}
+
+export interface TaskCreateInput {
+  subject: string;
+  description: string;
+  activeForm?: string;
+  metadata?: Record<string, unknown>;
+  priority?: number;
+  teamName?: string;
+}
+
+export interface TaskUpdateInput {
+  taskId: string;
+  teamName?: string;
+  status?: TaskRecord['status'];
+  subject?: string;
+  description?: string;
+  activeForm?: string;
+  owner?: string;
+  priority?: number;
+  addBlocks?: string[];
+  addBlockedBy?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface TaskClaimOptions {
+  teamName?: string;
+  leaseMs?: number;
+  now?: Date;
+}
+
+export interface TaskReleaseOptions {
+  teamName?: string;
+  status?: 'pending' | 'completed';
+}
+
 /**
  * Returned by `query()`.  Implements `AsyncGenerator<SDKMessage>` so callers
  * can iterate with `for await … of` as well as calling control methods.
@@ -351,6 +415,20 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   sessionInfo(): Promise<SessionInfo | null>;
   /** Return visible background bash/agent tasks for the current runtime. */
   listBackgroundTasks(): Promise<BackgroundTaskSummary[]>;
+  /** Return task records from the shared task control plane for the current or specified team. */
+  listTasks(options?: TaskListOptions): Promise<TaskRecord[]>;
+  /** Return a single task record, or null if it does not exist. */
+  getTask(taskId: string, options?: { teamName?: string }): Promise<TaskRecord | null>;
+  /** Create a task record in the shared task control plane. */
+  createTask(input: TaskCreateInput): Promise<TaskRecord>;
+  /** Update a task record in the shared task control plane. */
+  updateTask(input: TaskUpdateInput): Promise<TaskRecord>;
+  /** Claim the next available task for a worker, applying a lease. */
+  claimNextTask(owner: string, options?: TaskClaimOptions): Promise<TaskRecord | null>;
+  /** Heartbeat / renew an existing claimed task lease. */
+  heartbeatTask(taskId: string, owner: string, options?: TaskClaimOptions): Promise<TaskRecord>;
+  /** Release a claimed task back to pending or mark it completed. */
+  releaseTask(taskId: string, owner: string, options?: TaskReleaseOptions): Promise<TaskRecord>;
   /** Return structured details for a specific background task, if found. */
   getBackgroundTask(taskId: string, options?: { block?: boolean; timeout?: number }): Promise<BackgroundTaskInspection | null>;
   /**

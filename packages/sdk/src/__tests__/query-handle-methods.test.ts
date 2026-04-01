@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { SessionManager } from '@open-agent/core';
@@ -110,6 +110,151 @@ describe('query().sessionInfo()', () => {
     expect(info?.title).toBe('Harness 对齐');
     expect(info?.createdFromPrompt).toContain('设计一下 harness');
     q.close();
+  });
+});
+
+describe('query() shared task control plane', () => {
+  it('creates, updates, lists, and retrieves shared tasks', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-sdk-task-plane-'));
+    const home = join(cwd, 'home');
+    mkdirSync(home, { recursive: true });
+    const originalHome = process.env.HOME;
+    process.env.HOME = home;
+
+    try {
+      const q = query('安排一下任务', {
+        cwd,
+        model: 'claude-sonnet-4-6',
+      });
+
+      const created = await q.createTask({
+        subject: 'Align SDK task plane',
+        description: 'Expose task APIs in the SDK and wire priority through.',
+        priority: 7,
+        metadata: { lane: 'sdk' },
+        teamName: 'alpha',
+      });
+      expect(created.id).toBeTruthy();
+      expect(created.status).toBe('pending');
+      expect(created.priority).toBe(7);
+      expect(created.teamName).toBe('alpha');
+
+      const updated = await q.updateTask({
+        taskId: created.id,
+        teamName: 'alpha',
+        status: 'in_progress',
+        owner: 'sdk-worker',
+        priority: 9,
+      });
+      expect(updated.status).toBe('in_progress');
+      expect(updated.owner).toBe('sdk-worker');
+      expect(updated.priority).toBe(9);
+      expect(updated.teamName).toBe('alpha');
+
+      const task = await q.getTask(created.id, { teamName: 'alpha' });
+      expect(task).not.toBeNull();
+      expect(task?.subject).toBe('Align SDK task plane');
+      expect(task?.status).toBe('in_progress');
+      expect(task?.owner).toBe('sdk-worker');
+      expect(task?.priority).toBe(9);
+      expect(task?.metadata).toEqual({ lane: 'sdk' });
+      expect(task?.teamName).toBe('alpha');
+
+      const tasks = await q.listTasks({ teamName: 'alpha' });
+      expect(tasks.some((entry) => entry.id === created.id && entry.priority === 9)).toBe(true);
+      q.close();
+    } finally {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null for unknown shared tasks', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-sdk-task-missing-'));
+    const home = join(cwd, 'home');
+    mkdirSync(home, { recursive: true });
+    const originalHome = process.env.HOME;
+    process.env.HOME = home;
+
+    try {
+      const q = query('empty tasks', { cwd, model: 'claude-sonnet-4-6' });
+      await expect(q.getTask('missing-task')).resolves.toBeNull();
+      q.close();
+    } finally {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('claims, heartbeats, and releases leased tasks per team', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-sdk-task-lease-'));
+    const home = join(cwd, 'home');
+    mkdirSync(home, { recursive: true });
+    const originalHome = process.env.HOME;
+    process.env.HOME = home;
+
+    try {
+      const q = query('lease tasks', { cwd, model: 'claude-sonnet-4-6' });
+      await q.createTask({
+        subject: 'low',
+        description: 'lower priority task',
+        priority: 1,
+        teamName: 'alpha',
+      });
+      const high = await q.createTask({
+        subject: 'high',
+        description: 'higher priority task',
+        priority: 10,
+        teamName: 'alpha',
+      });
+
+      const claimed = await q.claimNextTask('worker-a', {
+        teamName: 'alpha',
+        leaseMs: 60_000,
+        now: new Date('2026-04-01T10:00:00.000Z'),
+      });
+      expect(claimed?.id).toBe(high.id);
+      expect(claimed?.lease?.owner).toBe('worker-a');
+      expect(claimed?.teamName).toBe('alpha');
+
+      const available = await q.listTasks({
+        teamName: 'alpha',
+        availableOnly: true,
+        now: new Date('2026-04-01T10:00:30.000Z'),
+      });
+      expect(available.map((task) => task.subject)).toEqual(['low']);
+
+      const renewed = await q.heartbeatTask(claimed!.id, 'worker-a', {
+        teamName: 'alpha',
+        leaseMs: 30_000,
+        now: new Date('2026-04-01T10:00:45.000Z'),
+      });
+      expect(renewed.lease?.expiresAt).toBe('2026-04-01T10:01:15.000Z');
+
+      const released = await q.releaseTask(claimed!.id, 'worker-a', {
+        teamName: 'alpha',
+        status: 'completed',
+      });
+      expect(released.status).toBe('completed');
+      expect(released.owner).toBe('worker-a');
+      expect(released.lease).toBeUndefined();
+      q.close();
+    } finally {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 });
 
