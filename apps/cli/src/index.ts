@@ -3,6 +3,7 @@ import { parseArgs, TerminalRenderer, REPL, emitStreamJson, emitStreamJsonInit, 
 import { ConversationLoop, SessionManager, ConfigLoader, AutoMemory, buildSystemPrompt, isGitRepository, buildGitContextSnapshot, FileCheckpoint, buildTaskOrchestrationTemplates } from '@open-agent/core';
 import { createStore, createDefaultAppState } from '@open-agent/state';
 import type { AppState } from '@open-agent/state';
+import { renderApp } from '@open-agent/ink';
 import { createProvider, autoDetectProvider, calculateCost } from '@open-agent/providers';
 import {
   createDefaultToolRegistry,
@@ -870,6 +871,19 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------
   // Interactive REPL mode
   // ------------------------------------------------------------------
+
+  // Experimental Ink UI mode (--ink flag)
+  if (args.ink) {
+    const waitUntilExit = renderApp({
+      store: appStore,
+      loop,
+      model,
+      cwd,
+    });
+    await waitUntilExit();
+    process.exit(0);
+  }
+
   renderer.renderWelcome(model, cwd);
   const repl = new REPL(model);
 
