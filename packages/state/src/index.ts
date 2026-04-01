@@ -37,3 +37,13 @@ export function createStore<T>(
     },
   };
 }
+
+export {
+  type AppState,
+  type TaskItem,
+  type AgentInstance,
+  type McpServerStatus,
+  type TokenUsage,
+  type FileReadTracker,
+  createDefaultAppState,
+} from './app-state.js';
