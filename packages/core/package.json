@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@open-agent/providers": "workspace:*",
+    "@open-agent/state": "workspace:*",
     "@open-agent/tools": "workspace:*"
   },
   "scripts": {

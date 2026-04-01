@@ -49,6 +49,29 @@ describe('SessionManager', () => {
     expect(retrieved!.model).toBe('gpt-4o');
   });
 
+  it('createSession stores extended metadata fields', () => {
+    const created = sm.createSession(cwd, 'claude-sonnet-4-6', {
+      title: 'Implement task protocol',
+      summary: 'Align task lifecycle messages',
+      createdFromPrompt: 'Please align task lifecycle messages with Claude Code.',
+      outputStyle: 'text',
+      language: 'Chinese',
+      permissionMode: 'acceptEdits',
+      agent: 'general-purpose',
+      resumeSource: 'new',
+    });
+
+    const retrieved = sm.getSession(cwd, created.id);
+    expect(retrieved?.title).toBe('Implement task protocol');
+    expect(retrieved?.summary).toBe('Align task lifecycle messages');
+    expect(retrieved?.createdFromPrompt).toContain('align task lifecycle');
+    expect(retrieved?.outputStyle).toBe('text');
+    expect(retrieved?.language).toBe('Chinese');
+    expect(retrieved?.permissionMode).toBe('acceptEdits');
+    expect(retrieved?.agent).toBe('general-purpose');
+    expect(retrieved?.resumeSource).toBe('new');
+  });
+
   it('ensureSession creates metadata for a caller-provided session id', () => {
     const forcedId = 'forced-session-id-123';
     const ensured = sm.ensureSession(cwd, forcedId, 'claude-sonnet-4-6');
@@ -58,6 +81,26 @@ describe('SessionManager', () => {
     const retrieved = sm.getSession(cwd, forcedId);
     expect(retrieved).not.toBeNull();
     expect(retrieved!.id).toBe(forcedId);
+  });
+
+  it('updateSession merges metadata without replacing core identity fields', () => {
+    const created = sm.createSession(cwd, 'gpt-4o');
+    const updated = sm.updateSession(cwd, created.id, {
+      model: 'claude-sonnet-4-6',
+      title: 'Forked session',
+      forkedFromSessionId: '11111111-1111-4111-8111-111111111111',
+      parentSessionId: '11111111-1111-4111-8111-111111111111',
+      resumeSource: 'fork',
+    }, { touch: false });
+
+    expect(updated).not.toBeNull();
+    expect(updated?.id).toBe(created.id);
+    expect(updated?.cwd).toBe(cwd);
+    expect(updated?.model).toBe('claude-sonnet-4-6');
+    expect(updated?.title).toBe('Forked session');
+    expect(updated?.forkedFromSessionId).toBe('11111111-1111-4111-8111-111111111111');
+    expect(updated?.parentSessionId).toBe('11111111-1111-4111-8111-111111111111');
+    expect(updated?.resumeSource).toBe('fork');
   });
 
   it('getLatestSession returns the most recently touched session', () => {
@@ -212,6 +255,59 @@ describe('SessionManager', () => {
     expect(messages[0].content).toBe('what is 2+2?');
     expect(messages[1].role).toBe('assistant');
     expect(messages[2].role).toBe('user'); // tool_result becomes a user message
+  });
+
+  it('loadTranscript reconstructs task notifications as synthetic user messages', () => {
+    const session = sm.createSession(cwd, 'task-notification-model');
+
+    sm.appendToTranscript(cwd, session.id, {
+      type: 'assistant',
+      uuid: 'assistant-before-task',
+      session_id: session.id,
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Worker is running.' }],
+      },
+    });
+
+    sm.appendToTranscript(cwd, session.id, {
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: 'agent-123',
+      team_name: 'alpha-team',
+      description: 'auth-worker',
+      status: 'completed',
+      completed_at: '2026-04-01T10:10:00.000Z',
+      output_file: '/tmp/agent-123.output',
+      summary: 'Worker finished auth fix',
+      result: 'Updated src/auth.ts and ran bun test.',
+      orchestration_templates: {
+        resume_prompt_template: 'Continue from prior context.',
+        verification_prompt_template: 'Verify from a clean slate.',
+      },
+      usage: {
+        total_tokens: 321,
+        tool_uses: 4,
+        duration_ms: 900,
+      },
+      uuid: 'task-note-1',
+      session_id: session.id,
+    } as any);
+
+    const messages = sm.loadTranscript(cwd, session.id);
+    expect(messages).toHaveLength(2);
+    expect(messages[0].role).toBe('assistant');
+    expect(messages[1].role).toBe('user');
+    expect(typeof messages[1].content).toBe('string');
+    expect(messages[1].content).toContain('<task-notification>');
+    expect(messages[1].content).toContain('<task-id>agent-123</task-id>');
+    expect(messages[1].content).toContain('<team-name>alpha-team</team-name>');
+    expect(messages[1].content).toContain('<description>auth-worker</description>');
+    expect(messages[1].content).toContain('<status>completed</status>');
+    expect(messages[1].content).toContain('<completed-at>2026-04-01T10:10:00.000Z</completed-at>');
+    expect(messages[1].content).toContain('<output-file>/tmp/agent-123.output</output-file>');
+    expect(messages[1].content).toContain('<result>Updated src/auth.ts and ran bun test.</result>');
+    expect(messages[1].content).toContain('<verification-prompt-template>Verify from a clean slate.</verification-prompt-template>');
   });
 
   it('loadTranscriptUpToAssistant truncates history at target assistant uuid', () => {

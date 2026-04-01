@@ -3,7 +3,9 @@ import type { ToolDefinition, ToolContext } from '@open-agent/tools';
 import type { ThinkingConfig } from './types.js';
 import type { SDKMessage } from './types.js';
 import type { PermissionDenial } from './types.js';
+import type { AppState } from '@open-agent/state';
 import { randomUUID } from 'crypto';
+import { basename } from 'path';
 
 /**
  * Minimal interface for permission checking — implemented by PermissionEngine
@@ -65,6 +67,10 @@ export interface ConversationLoopOptions {
   responseFormat?: { type: 'json_schema'; schema: Record<string, unknown> };
   /** Server-side tools (e.g. Anthropic native web search) — executed by the provider, not locally. */
   serverTools?: ServerToolSpec[];
+  /** Reactive state store — getter. */
+  getAppState?: () => AppState;
+  /** Reactive state store — updater. */
+  setAppState?: (updater: (prev: AppState) => AppState) => void;
 }
 
 // Internal marker type for tracking open content blocks during accumulation.
@@ -105,6 +111,141 @@ function normalizePermissionDenialInput(input: unknown): Record<string, unknown>
     return {};
   }
   return input as Record<string, unknown>;
+}
+
+interface ToolUseSummaryEntry {
+  toolName: string;
+  toolUseId: string;
+  input: unknown;
+  result: string;
+  isError: boolean;
+}
+
+function truncateSummaryText(text: string, maxLength: number): string {
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function summarizeToolFile(input: unknown): string | null {
+  if (!input || typeof input !== 'object') return null;
+  const record = input as Record<string, unknown>;
+  const filePath = typeof record.file_path === 'string'
+    ? record.file_path
+    : typeof record.notebook_path === 'string'
+      ? record.notebook_path
+      : null;
+  return filePath ? basename(filePath) : null;
+}
+
+function summarizeSingleToolUse(
+  entry: ToolUseSummaryEntry,
+  resolveTool?: (toolName: string) => ToolDefinition | undefined,
+): string {
+  const tool = resolveTool?.(entry.toolName);
+  try {
+    const customSummary = tool?.getToolUseSummary?.(entry.input, entry.result, entry.isError);
+    if (customSummary && customSummary.trim()) {
+      return truncateSummaryText(customSummary.trim(), 60);
+    }
+  } catch {
+    // Fall back to built-in heuristics.
+  }
+
+  const file = summarizeToolFile(entry.input);
+  const input = (entry.input && typeof entry.input === 'object')
+    ? entry.input as Record<string, unknown>
+    : {};
+
+  switch (entry.toolName) {
+    case 'Read':
+      return `Read ${file ?? 'file'}`;
+    case 'Edit':
+      return `Edited ${file ?? 'file'}`;
+    case 'Write':
+      return `Wrote ${file ?? 'file'}`;
+    case 'NotebookEdit':
+      return `Edited ${file ?? 'notebook'}`;
+    case 'Glob':
+      return `Matched ${truncateSummaryText(String(input.pattern ?? 'files'), 40)}`;
+    case 'Grep':
+      return `Searched ${truncateSummaryText(String(input.pattern ?? 'codebase'), 40)}`;
+    case 'Bash': {
+      const description = typeof input.description === 'string' ? input.description : '';
+      const command = typeof input.command === 'string' ? input.command : '';
+      const summary = description || command || 'shell command';
+      return `Ran ${truncateSummaryText(summary, 50)}`;
+    }
+    case 'WebSearch':
+      return `Searched web for ${truncateSummaryText(String(input.query ?? input.q ?? 'query'), 40)}`;
+    case 'WebFetch':
+      return `Fetched ${truncateSummaryText(String(input.url ?? 'URL'), 45)}`;
+    case 'Task':
+      return `Delegated ${truncateSummaryText(String(input.description ?? input.subagent_type ?? 'task'), 40)}`;
+    case 'TaskOutput':
+      return 'Checked task output';
+    case 'TaskStop':
+      return 'Stopped task';
+    case 'ToolSearch':
+      return `Looked up ${truncateSummaryText(String(input.query ?? input.search_query ?? 'tool'), 40)}`;
+    case 'Skill':
+      return `Used skill ${truncateSummaryText(String(input.name ?? 'workflow'), 40)}`;
+    default:
+      return entry.isError ? `${entry.toolName} failed` : `Used ${entry.toolName}`;
+  }
+}
+
+function buildToolUseSummary(
+  entries: ToolUseSummaryEntry[],
+  resolveTool?: (toolName: string) => ToolDefinition | undefined,
+): string | null {
+  if (entries.length === 0) {
+    return null;
+  }
+
+  if (entries.length === 1) {
+    return summarizeSingleToolUse(entries[0], resolveTool);
+  }
+
+  const failures = entries.filter((entry) => entry.isError).length;
+  const countTools = (names: string[]) => entries.filter((entry) => names.includes(entry.toolName)).length;
+  const readCount = countTools(['Read']);
+  const writeCount = countTools(['Edit', 'Write', 'NotebookEdit']);
+  const grepCount = countTools(['Grep', 'Glob']);
+  const taskCount = countTools(['Task', 'TaskOutput', 'TaskStop']);
+  const webCount = countTools(['WebSearch', 'WebFetch']);
+  const bashEntries = entries.filter((entry) => entry.toolName === 'Bash');
+  const ranTests = bashEntries.some((entry) => /\b(test|tests|pytest|vitest|jest|bun test|npm test|pnpm test|yarn test|cargo test|go test)\b/i.test(String((entry.input as Record<string, unknown> | undefined)?.command ?? '')));
+  const touchedGit = bashEntries.some((entry) => /\bgit\b/i.test(String((entry.input as Record<string, unknown> | undefined)?.command ?? '')));
+  const clauses: string[] = [];
+
+  if (writeCount > 0) {
+    clauses.push(`updated ${writeCount} file${writeCount === 1 ? '' : 's'}`);
+  }
+  if (ranTests) {
+    clauses.push('ran tests');
+  } else if (touchedGit) {
+    clauses.push('checked git state');
+  } else if (bashEntries.length > 0) {
+    clauses.push(`ran ${bashEntries.length} command${bashEntries.length === 1 ? '' : 's'}`);
+  }
+  if (readCount > 0 && clauses.length < 2) {
+    clauses.push(`read ${readCount} file${readCount === 1 ? '' : 's'}`);
+  }
+  if (grepCount > 0 && clauses.length < 2) {
+    clauses.push(grepCount === 1 ? 'searched the codebase' : `searched ${grepCount} code paths`);
+  }
+  if (webCount > 0 && clauses.length < 2) {
+    clauses.push(webCount === 1 ? 'looked up external context' : `looked up ${webCount} external sources`);
+  }
+  if (taskCount > 0 && clauses.length < 2) {
+    clauses.push(`coordinated ${taskCount} task${taskCount === 1 ? '' : 's'}`);
+  }
+
+  const summary = clauses.length > 0
+    ? clauses.slice(0, 2).join(' and ')
+    : `used ${entries.length} tools`;
+  const withCapital = summary.charAt(0).toUpperCase() + summary.slice(1);
+
+  return failures > 0 ? `${withCapital} (${failures} failed)` : withCapital;
 }
 
 export class ConversationLoop {
@@ -149,6 +290,23 @@ export class ConversationLoop {
       session_id: this.options.sessionId,
       cwd: this.options.cwd,
     };
+  }
+
+  private toolFlag(
+    tool: ToolDefinition,
+    flag: 'isReadOnly' | 'isConcurrencySafe',
+    input: unknown,
+    defaultValue: boolean,
+  ): boolean {
+    const raw = tool[flag];
+    if (typeof raw === 'function') {
+      try {
+        return raw(input);
+      } catch {
+        return defaultValue;
+      }
+    }
+    return typeof raw === 'boolean' ? raw : defaultValue;
   }
 
   private interruptedResult(
@@ -245,13 +403,13 @@ export class ConversationLoop {
 
       // Hard message count ceiling: force compaction if messages exceed 500.
       if (this.messages.length > 500) {
-        await this.compact();
+        yield* this.compactWithEvents('auto');
       }
 
       // Check if context needs compaction
       const threshold = this.options.compactThreshold ?? 100000;
       if (this.estimateTokens() > threshold) {
-        await this.compact();
+        yield* this.compactWithEvents('auto');
       }
 
       // Guard: respect the caller-provided turn limit.
@@ -554,21 +712,7 @@ export class ConversationLoop {
           || (msg.includes('400') && /tokens?/i.test(msg));
         if (isContextError && this.messages.length > 4 && contextErrorRetryCount < 3) {
           contextErrorRetryCount++;
-          yield {
-            type: 'system',
-            subtype: 'status',
-            status: 'compacting',
-            session_id: sessionId,
-            uuid: randomUUID(),
-          } as any;
-          await this.compact();
-          yield {
-            type: 'system',
-            subtype: 'status',
-            status: null,
-            session_id: sessionId,
-            uuid: randomUUID(),
-          } as any;
+          yield* this.compactWithEvents('auto');
           this.turnCount--; // Don't count the failed attempt as a turn
           continue;
         }
@@ -601,6 +745,7 @@ export class ConversationLoop {
         this._totalInputTokens += inTok;
         this._totalOutputTokens += outTok;
       }
+      let _turnCostForStore = 0;
       if (this.options.costCalculator && messageUsage) {
         const turnCost = this.options.costCalculator(
           this.options.model,
@@ -611,6 +756,20 @@ export class ConversationLoop {
         );
         totalCostUsd += turnCost;
         this._totalCostUsd += turnCost;
+        _turnCostForStore = turnCost;
+      }
+      if (this.options.setAppState && messageUsage) {
+        const turnInput = messageUsage.input_tokens ?? 0;
+        const turnOutput = messageUsage.output_tokens ?? 0;
+        const turnCost = _turnCostForStore;
+        this.options.setAppState(prev => ({
+          ...prev,
+          totalUsage: {
+            inputTokens: prev.totalUsage.inputTokens + turnInput,
+            outputTokens: prev.totalUsage.outputTokens + turnOutput,
+            costUsd: prev.totalUsage.costUsd + turnCost,
+          },
+        }));
       }
 
       // Strip the internal `_closed` marker before storing / emitting.
@@ -686,7 +845,7 @@ export class ConversationLoop {
             // mark it so it can be stripped from persistent transcripts.
             this.messages.push({
               role: 'user',
-              content: 'Continue.',
+              content: this.createMaxTokensRecoveryPrompt(),
               // @ts-expect-error - transient marker, not part of the Message type
               _transient: true,
             });
@@ -766,6 +925,7 @@ export class ConversationLoop {
       //   Phase 3 — Yield results in original call order for determinism.
       const toolResults: ContentBlock[] = [];
       const permissionDenials: PermissionDenial[] = [];
+      const toolSummaryEntries: ToolUseSummaryEntry[] = [];
 
       // Approved tools collected during Phase 1, preserving call order.
       type ApprovedEntry = { toolUse: ContentBlock & { id: string; name: string; input: any }; tool: ToolDefinition };
@@ -777,6 +937,13 @@ export class ConversationLoop {
 
         if (!tool) {
           const notFound = `Error: Tool '${toolUse.name}' not found`;
+          toolSummaryEntries.push({
+            toolName: toolUse.name,
+            toolUseId: toolUse.id,
+            input: toolUse.input,
+            result: notFound,
+            isError: true,
+          });
           toolResults.push({
             type: 'tool_result',
             tool_use_id: toolUse.id,
@@ -806,6 +973,13 @@ export class ConversationLoop {
 
           if (decision.behavior === 'deny') {
             const reason = decision.reason ?? 'permission denied';
+            toolSummaryEntries.push({
+              toolName: toolUse.name,
+              toolUseId: toolUse.id,
+              input: toolUse.input,
+              result: `Permission denied: ${reason}`,
+              isError: true,
+            });
             permissionDenials.push({
               tool_name: toolUse.name,
               tool_use_id: toolUse.id,
@@ -843,6 +1017,13 @@ export class ConversationLoop {
             if (!permissionPrompter) {
               // No prompter available — deny by default when mode requires confirmation.
               const reason = decision.reason ?? 'permission required but no prompter configured';
+              toolSummaryEntries.push({
+                toolName: toolUse.name,
+                toolUseId: toolUse.id,
+                input: toolUse.input,
+                result: `Permission denied: ${reason}`,
+                isError: true,
+              });
               permissionDenials.push({
                 tool_name: toolUse.name,
                 tool_use_id: toolUse.id,
@@ -874,6 +1055,13 @@ export class ConversationLoop {
 
             if (userDecision === 'deny') {
               const reason = 'user denied permission';
+              toolSummaryEntries.push({
+                toolName: toolUse.name,
+                toolUseId: toolUse.id,
+                input: toolUse.input,
+                result: `Permission denied: ${reason}`,
+                isError: true,
+              });
               permissionDenials.push({
                 tool_name: toolUse.name,
                 tool_use_id: toolUse.id,
@@ -933,14 +1121,15 @@ export class ConversationLoop {
 
       const TOOL_EXECUTE_TIMEOUT_MS = 60_000;
 
-      const parallelResults: ExecutionResult[] = await Promise.all(
-        approvedTools.map(async ({ toolUse, tool }): Promise<ExecutionResult> => {
+      const executeApprovedTool = async ({ toolUse, tool }: ApprovedEntry): Promise<ExecutionResult> => {
           const toolCtx: ToolContext = {
             cwd: this.options.cwd,
             abortSignal: this.options.abortSignal,
             sessionId: this.options.sessionId,
             toolUseId: toolUse.id,
             fileReadTracker: this.fileReadTracker,
+            getAppState: this.options.getAppState,
+            setAppState: this.options.setAppState,
           };
 
           // ── PreToolUse hook ──────────────────────────────────────────────
@@ -1066,12 +1255,37 @@ export class ConversationLoop {
 
             return { toolUse, resultStr: msg, isError: true, blocked: false, isImageResult: false };
           }
-        }),
+      };
+      const sequentialApproved = approvedTools.filter(
+        ({ toolUse, tool }) => !this.toolFlag(tool, 'isConcurrencySafe', toolUse.input, true),
       );
+      const parallelApproved = approvedTools.filter(
+        ({ toolUse, tool }) => this.toolFlag(tool, 'isConcurrencySafe', toolUse.input, true),
+      );
+      const resultsById = new Map<string, ExecutionResult>();
+      const parallelResults: ExecutionResult[] = await Promise.all(parallelApproved.map(executeApprovedTool));
+      for (const result of parallelResults) {
+        resultsById.set(result.toolUse.id, result);
+      }
+      for (const approved of sequentialApproved) {
+        const result = await executeApprovedTool(approved);
+        resultsById.set(result.toolUse.id, result);
+      }
+      const orderedResults = approvedTools
+        .map(({ toolUse }) => resultsById.get(toolUse.id))
+        .filter((result): result is ExecutionResult => result !== undefined);
       // ── End Phase 2 ───────────────────────────────────────────────────────
 
       // ── Phase 3: Yield results in original call order ─────────────────────
-      for (const { toolUse, resultStr, isError, blocked, isImageResult } of parallelResults) {
+      for (const { toolUse, resultStr, isError, blocked, isImageResult } of orderedResults) {
+        toolSummaryEntries.push({
+          toolName: toolUse.name,
+          toolUseId: toolUse.id,
+          input: toolUse.input,
+          result: resultStr,
+          isError: blocked || isError,
+        });
+
         if (blocked) {
           // Pre-hook blocked execution — surface as an error result.
           toolResults.push({
@@ -1176,6 +1390,20 @@ export class ConversationLoop {
       }
       // ── End Phase 3 ───────────────────────────────────────────────────────
 
+      const toolUseSummary = buildToolUseSummary(
+        toolSummaryEntries,
+        (toolName) => this.options.tools.get(toolName),
+      );
+      if (toolUseSummary) {
+        yield {
+          type: 'tool_use_summary',
+          summary: toolUseSummary,
+          preceding_tool_use_ids: toolSummaryEntries.map((entry) => entry.toolUseId),
+          uuid: randomUUID(),
+          session_id: sessionId,
+        };
+      }
+
       // Accumulate permission denials across all turns for the final result.
       allPermissionDenials.push(...permissionDenials);
 
@@ -1214,6 +1442,11 @@ export class ConversationLoop {
   /** Update the thinking configuration. */
   setThinking(thinking: ThinkingConfig): void {
     this.options.thinking = thinking;
+  }
+
+  /** Update the system prompt used for subsequent LLM calls. */
+  setSystemPrompt(systemPrompt?: string): void {
+    this.options.systemPrompt = systemPrompt;
   }
 
   /** Update the effort level for subsequent LLM calls. */
@@ -1353,9 +1586,60 @@ export class ConversationLoop {
     return Math.ceil(chars / 4);
   }
 
+  private createMaxTokensRecoveryPrompt(): string {
+    return (
+      'Output token limit hit. Resume directly with no apology and no recap. ' +
+      'Continue from the exact point where the response stopped, and break the remaining work into smaller pieces if needed.'
+    );
+  }
+
+  private async *compactWithEvents(
+    trigger: 'manual' | 'auto',
+  ): AsyncGenerator<SDKMessage, boolean> {
+    const preTokens = this.estimateTokens();
+    const sessionId = this.options.sessionId;
+
+    yield {
+      type: 'system',
+      subtype: 'status',
+      status: 'compacting',
+      session_id: sessionId,
+      uuid: randomUUID(),
+    } as const;
+
+    const compacted = await this.compactInternal();
+
+    if (compacted) {
+      yield {
+        type: 'system',
+        subtype: 'compact_boundary',
+        compact_metadata: {
+          trigger,
+          pre_tokens: preTokens,
+        },
+        session_id: sessionId,
+        uuid: randomUUID(),
+      } as const;
+    }
+
+    yield {
+      type: 'system',
+      subtype: 'status',
+      status: null,
+      session_id: sessionId,
+      uuid: randomUUID(),
+    } as const;
+
+    return compacted;
+  }
+
   /** Compact conversation history by summarising older messages with the LLM. */
   async compact(): Promise<void> {
-    if (this.messages.length <= 4) return;
+    await this.compactInternal();
+  }
+
+  private async compactInternal(): Promise<boolean> {
+    if (this.messages.length <= 4) return false;
 
     // ── PreCompact hook ───────────────────────────────────────────────
     if (this.options.hookExecutor) {
@@ -1398,7 +1682,7 @@ export class ConversationLoop {
       keepFrom = Math.max(0, this.messages.length - 6);
     }
 
-    if (keepFrom <= 0) return; // Nothing to compact.
+    if (keepFrom <= 0) return false; // Nothing to compact.
 
     const toSummarize = this.messages.slice(0, keepFrom).filter(m => !(m as any)._transient);
     const toKeep = this.messages.slice(keepFrom);
@@ -1450,5 +1734,6 @@ export class ConversationLoop {
       },
       ...toKeep,
     ];
+    return true;
   }
 }

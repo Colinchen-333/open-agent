@@ -1,3 +1,5 @@
+import type { TaskNotificationStatus, TaskOrchestrationTemplates } from './task-notification.js';
+
 // Permission types
 export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk';
 export type PermissionBehavior = 'allow' | 'deny' | 'ask';
@@ -311,9 +313,14 @@ export interface SDKTaskNotificationMessage {
   subtype: 'task_notification';
   task_id: string;
   tool_use_id?: string;
-  status: 'completed' | 'failed' | 'stopped';
+  status: TaskNotificationStatus;
+  team_name?: string;
+  completed_at?: string;
   output_file: string;
   summary: string;
+  result?: string;
+  description?: string;
+  orchestration_templates?: TaskOrchestrationTemplates;
   usage?: {
     total_tokens: number;
     tool_uses: number;
@@ -413,6 +420,24 @@ export interface SDKRateLimitEvent {
 export interface SDKPromptSuggestionMessage {
   type: 'prompt_suggestion';
   suggestion: string;
+  scaffold?: {
+    kind:
+      | 'resume_worker'
+      | 'launch_verifier'
+      | 'retry_worker'
+      | 'stopped_worker_followup'
+      | 'generic_followup';
+    title?: string;
+    agent_type?: string;
+    prompt?: string;
+    source_task_id?: string;
+    resume_task_id?: string;
+    task_status?: TaskNotificationStatus;
+    action?: {
+      tool: 'Task' | 'SendMessage';
+      arguments: Record<string, unknown>;
+    };
+  };
   uuid: string;
   session_id: string;
 }
