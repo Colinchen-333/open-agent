@@ -597,15 +597,42 @@ export interface TeamApprovalResponseResult {
   response: TeamMessageRecord;
 }
 
-export type SDKOrchestrationEventKind = 'worker_lifecycle' | 'worker_tool';
+export type SDKTaskDispatcherEventType =
+  | 'started'
+  | 'dispatched'
+  | 'task_completed'
+  | 'task_requeued'
+  | 'draining'
+  | 'stopped';
+
+export interface SDKTaskDispatcherEvent {
+  type: SDKTaskDispatcherEventType;
+  dispatcherId: string;
+  owner: string;
+  teamName: string;
+  workerType: 'worker' | 'verifier';
+  status: TaskDispatcherRecord['status'];
+  timestamp: string;
+  taskId?: string;
+  workerId?: string;
+  taskStatus?: TaskRecord['status'];
+  activeTaskIds: string[];
+  activeWorkerIds: string[];
+}
+
+export type SDKOrchestrationEventKind = 'worker_lifecycle' | 'worker_tool' | 'task_dispatcher';
 
 export interface SDKOrchestrationEvent {
   kind: SDKOrchestrationEventKind;
   sessionId: string;
   parentToolCallId: string;
   workerId?: string;
+  dispatcherId?: string;
+  taskId?: string;
   teamName?: string;
-  raw: import('@open-agent/agents').SubagentStreamEvent;
+  lifecycle?: 'launched' | 'completed' | 'failed' | 'shutdown';
+  dispatcherEvent?: SDKTaskDispatcherEvent;
+  raw: import('@open-agent/agents').SubagentStreamEvent | SDKTaskDispatcherEvent;
 }
 
 export interface SubscribeOrchestrationEventsOptions {

@@ -82,6 +82,7 @@ import type {
   TimelineInboxOptions,
   SDKOrchestrationEvent,
   SubscribeOrchestrationEventsOptions,
+  SDKTaskDispatcherEvent,
   SDKTimelineItem,
   SubscribeTimelineOptions,
   FollowUpExecutable,
@@ -480,6 +481,7 @@ export function query(
     timestamp: extractTimelineTimestamp(event),
     ...(event.teamName ? { teamName: event.teamName } : {}),
     ...(event.workerId ? { workerId: event.workerId } : {}),
+    ...(event.dispatcherId ? { timelineId: `dispatcher:${event.dispatcherId}:${extractTimelineTimestamp(event)}`, cursor: `dispatcher:${event.dispatcherId}:${extractTimelineTimestamp(event)}` } : {}),
     ...(event.parentToolCallId ? { parentToolCallId: event.parentToolCallId } : {}),
     orchestrationEvent: cloneOrchestrationEvent(event),
   });
@@ -1914,6 +1916,42 @@ export function query(
     }
   };
 
+  const emitTaskDispatcherOrchestrationEvent = (
+    state: TaskDispatcherState,
+    type: SDKTaskDispatcherEvent['type'],
+    overrides: Partial<Pick<SDKTaskDispatcherEvent, 'taskId' | 'workerId' | 'taskStatus' | 'timestamp'>> = {},
+  ): void => {
+    const record = syncTaskDispatcherRecord(state);
+    const raw: SDKTaskDispatcherEvent = {
+      type,
+      dispatcherId: record.dispatcherId,
+      owner: record.owner,
+      teamName: record.teamName,
+      workerType: record.workerType,
+      status: record.status,
+      timestamp: overrides.timestamp ?? new Date().toISOString(),
+      activeTaskIds: [...record.activeTaskIds],
+      activeWorkerIds: [...record.activeWorkerIds],
+      ...(overrides.taskId ? { taskId: overrides.taskId } : {}),
+      ...(overrides.workerId ? { workerId: overrides.workerId } : {}),
+      ...(overrides.taskStatus ? { taskStatus: overrides.taskStatus } : {}),
+    };
+    const event: SDKOrchestrationEvent = {
+      kind: 'task_dispatcher',
+      sessionId,
+      parentToolCallId: `sdk-dispatcher:${record.dispatcherId}`,
+      dispatcherId: record.dispatcherId,
+      ...(record.teamName ? { teamName: record.teamName } : {}),
+      ...(raw.workerId ? { workerId: raw.workerId } : {}),
+      ...(raw.taskId ? { taskId: raw.taskId } : {}),
+      dispatcherEvent: raw,
+      raw,
+    };
+    for (const subscriber of orchestrationSubscribers) {
+      subscriber.push(event);
+    }
+  };
+
   const syncTaskDispatcherRecord = (state: TaskDispatcherState): TaskDispatcherRecord => {
     state.record.activeTaskIds = [...state.activeAssignments.values()].map((assignment) => assignment.taskId);
     state.record.activeWorkerIds = [...state.activeAssignments.values()].map((assignment) => assignment.workerId);
@@ -1929,7 +1967,9 @@ export function query(
     state.rerunRequested = false;
     state.record.status = 'stopped';
     state.record.stoppedAt = state.record.stoppedAt ?? new Date().toISOString();
-    return syncTaskDispatcherRecord(state);
+    const record = syncTaskDispatcherRecord(state);
+    emitTaskDispatcherOrchestrationEvent(state, 'stopped', { timestamp: record.stoppedAt });
+    return record;
   };
 
   const scheduleTaskDispatcherRun = (state: TaskDispatcherState, delayMs = state.record.pollIntervalMs): void => {
@@ -1976,6 +2016,15 @@ export function query(
       // Non-fatal — the task may already have been released manually.
     }
     syncTaskDispatcherRecord(state);
+    emitTaskDispatcherOrchestrationEvent(
+      state,
+      status === 'completed' ? 'task_completed' : 'task_requeued',
+      {
+        taskId: assignment.taskId,
+        workerId,
+        taskStatus: status,
+      },
+    );
     if (state.record.status === 'draining' && state.activeAssignments.size === 0) {
       markTaskDispatcherStopped(state);
       return;
@@ -2047,6 +2096,12 @@ export function query(
         });
         state.record.lastDispatchAt = new Date().toISOString();
         syncTaskDispatcherRecord(state);
+        emitTaskDispatcherOrchestrationEvent(state, 'dispatched', {
+          taskId: dispatched.task.id,
+          workerId: dispatched.worker.workerId,
+          taskStatus: dispatched.task.status,
+          timestamp: state.record.lastDispatchAt,
+        });
       }
     } finally {
       state.running = false;
@@ -2082,7 +2137,7 @@ export function query(
       return;
     }
 
-    const lifecycleType = event.raw.type;
+    const lifecycleType = event.lifecycle;
     if (lifecycleType === 'completed') {
       void reconcileTaskDispatcherAssignment(state, event.workerId, 'completed');
       return;
@@ -3094,6 +3149,7 @@ export function query(
     };
     taskDispatchers.set(dispatcherId, state);
     syncTaskDispatcherRecord(state);
+    emitTaskDispatcherOrchestrationEvent(state, 'started', { timestamp: startedAt });
     scheduleTaskDispatcherRun(state, 0);
     return cloneTaskDispatcherRecord(state.record);
   };
@@ -3130,6 +3186,7 @@ export function query(
     if (state.record.status === 'stopped') {
       markTaskDispatcherStopped(state);
     } else {
+      emitTaskDispatcherOrchestrationEvent(state, 'draining');
       scheduleTaskDispatcherRun(state, 0);
     }
     return {
@@ -4109,12 +4166,17 @@ function convertSubagentEventToOrchestrationEvent(
 ): SDKOrchestrationEvent | null {
   const kind = classifySubagentEvent(event);
   if (!kind) return null;
+  const lifecycle = kind === 'worker_lifecycle'
+    && (event.type === 'launched' || event.type === 'completed' || event.type === 'failed' || event.type === 'shutdown')
+    ? event.type
+    : undefined;
   return {
     kind,
     sessionId,
     parentToolCallId: parentToolCallId ?? event.agentId ?? event.taskId ?? 'sdk-control-plane',
     ...(event.agentId || event.taskId ? { workerId: event.agentId ?? event.taskId } : {}),
     ...(event.teamName ? { teamName: event.teamName } : {}),
+    ...(lifecycle ? { lifecycle } : {}),
     raw: cloneSubagentEvent(event),
   };
 }
@@ -4284,10 +4346,13 @@ function buildTimelineTaskNotificationFromOrchestrationEvent(
   event: SDKOrchestrationEvent,
   language?: string,
 ): SDKTimelineItem | null {
+  if (event.kind !== 'worker_lifecycle') {
+    return null;
+  }
   const taskNotification = convertSubagentEventToSdkMessages(
     event.parentToolCallId,
     event.sessionId,
-    event.raw,
+    event.raw as SubagentStreamEvent,
   ).find((message): message is SDKTaskNotificationMessage =>
     message.type === 'system' && message.subtype === 'task_notification',
   );

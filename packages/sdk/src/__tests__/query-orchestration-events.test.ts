@@ -233,4 +233,74 @@ describe('query().subscribeOrchestrationEvents()', () => {
     q.close();
     expect((await iterator.next()).done).toBe(true);
   });
+
+  it('streams task dispatcher events through the same orchestration channel', async () => {
+    const temp = makeTempCwd('open-agent-sdk-orchestration-dispatcher-');
+    providerFactory = () => makeScriptedProvider([
+      textScript('dispatcher worker complete'),
+    ]);
+
+    try {
+      const teamName = `alpha-team-${Date.now()}`;
+      const q = query('dispatcher orchestration', {
+        cwd: temp.cwd,
+        model: 'claude-sonnet-4-6',
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+      });
+      await q.createTeam({ name: teamName, setActive: true });
+      await q.createTask({
+        teamName,
+        subject: 'Ship dispatcher event stream',
+        description: 'Ensure dispatcher emits host-visible orchestration events.',
+        priority: 10,
+      });
+
+      const iterator = q.subscribeOrchestrationEvents({
+        types: ['task_dispatcher'],
+        teamName,
+      })[Symbol.asyncIterator]();
+
+      const dispatcher = await q.startTaskDispatcher({
+        dispatcherId: `dispatcher-${Date.now()}`,
+        owner: 'dispatcher-owner',
+        teamName,
+        pollIntervalMs: 25,
+      });
+
+      const started = await iterator.next();
+      const dispatched = await iterator.next();
+      const settled = await iterator.next();
+
+      expect(started.done).toBe(false);
+      expect(started.value.kind).toBe('task_dispatcher');
+      expect(started.value.dispatcherId).toBe(dispatcher.dispatcherId);
+      expect(started.value.dispatcherEvent?.type).toBe('started');
+
+      expect(dispatched.done).toBe(false);
+      expect(dispatched.value.kind).toBe('task_dispatcher');
+      expect(dispatched.value.dispatcherEvent?.type).toBe('dispatched');
+      expect(dispatched.value.dispatcherEvent?.taskId).toBeTruthy();
+      expect(dispatched.value.dispatcherEvent?.workerId).toBeTruthy();
+
+      expect(settled.done).toBe(false);
+      expect(settled.value.kind).toBe('task_dispatcher');
+      expect(settled.value.dispatcherEvent?.type).toBe('task_completed');
+      expect(settled.value.dispatcherEvent?.taskStatus).toBe('completed');
+
+      await expect(q.stopTaskDispatcher(dispatcher.dispatcherId)).resolves.toMatchObject({
+        success: true,
+      });
+      const stopped = await iterator.next();
+      expect(stopped.done).toBe(false);
+      expect(stopped.value.dispatcherEvent?.type).toBe('stopped');
+      expect(stopped.value.dispatcherEvent?.status).toBe('stopped');
+
+      await iterator.return?.();
+      q.close();
+    } finally {
+      providerFactory = null;
+      temp.cleanup();
+    }
+  });
 });

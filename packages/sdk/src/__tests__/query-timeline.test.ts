@@ -255,4 +255,71 @@ describe('query() timeline control plane', () => {
       temp.cleanup();
     }
   });
+
+  it('surfaces dispatcher lifecycle items through subscribeTimeline()', async () => {
+    const temp = makeTempHome('open-agent-sdk-timeline-dispatcher-');
+    const teamName = `alpha-team-${Date.now()}`;
+
+    try {
+      const q = query('timeline dispatcher', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeStaticProvider(),
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+      });
+
+      await q.createTeam({ name: teamName, setActive: true });
+      await q.createTask({
+        teamName,
+        subject: 'Expose dispatcher lifecycle',
+        description: 'Timeline should show dispatcher events.',
+        priority: 10,
+      });
+
+      const iterator = q.subscribeTimeline({
+        teamName,
+        pollIntervalMs: 25,
+        includeTaskNotifications: false,
+      })[Symbol.asyncIterator]();
+
+      const dispatcher = await q.startTaskDispatcher({
+        dispatcherId: `dispatcher-${Date.now()}`,
+        owner: 'dispatcher-owner',
+        teamName,
+        pollIntervalMs: 25,
+      });
+
+      const startedItem = await readTimelineItem(iterator, (item) =>
+        item.kind === 'task_dispatcher'
+        && item.orchestrationEvent?.dispatcherId === dispatcher.dispatcherId
+        && item.orchestrationEvent?.dispatcherEvent?.type === 'started',
+      );
+      expect(startedItem?.timelineId).toContain(dispatcher.dispatcherId);
+
+      const dispatchedItem = await readTimelineItem(iterator, (item) =>
+        item.kind === 'task_dispatcher'
+        && item.orchestrationEvent?.dispatcherId === dispatcher.dispatcherId
+        && item.orchestrationEvent?.dispatcherEvent?.type === 'dispatched',
+      );
+      expect(dispatchedItem?.orchestrationEvent?.dispatcherEvent?.workerId).toBeTruthy();
+      expect(dispatchedItem?.taskNotification).toBeUndefined();
+
+      await expect(q.stopTaskDispatcher(dispatcher.dispatcherId)).resolves.toMatchObject({
+        success: true,
+      });
+
+      const stoppedItem = await readTimelineItem(iterator, (item) =>
+        item.kind === 'task_dispatcher'
+        && item.orchestrationEvent?.dispatcherId === dispatcher.dispatcherId
+        && item.orchestrationEvent?.dispatcherEvent?.type === 'stopped',
+      );
+      expect(stoppedItem?.orchestrationEvent?.dispatcherEvent?.status).toBe('stopped');
+
+      await iterator.return?.();
+      q.close();
+    } finally {
+      temp.cleanup();
+    }
+  });
 });
