@@ -59,6 +59,10 @@ import type {
   TaskClaimOptions,
   TaskDispatchInput,
   TaskDispatchResult,
+  TaskDispatcherListOptions,
+  TaskDispatcherRecord,
+  TaskDispatcherStartInput,
+  TaskDispatcherStopResult,
   TaskReleaseOptions,
   TaskRecord,
   WorkerListOptions,
@@ -377,6 +381,7 @@ export function query(
     }
     const orchestrationEvent = convertSubagentEventToOrchestrationEvent(parentToolUseId, sessionId, event);
     if (orchestrationEvent) {
+      handleTaskDispatcherOrchestrationEvent(orchestrationEvent);
       for (const subscriber of orchestrationSubscribers) {
         subscriber.push(orchestrationEvent);
       }
@@ -524,6 +529,33 @@ export function query(
     ].filter((line): line is string => Boolean(line));
     return lines.join('\n\n') || 'Work on the claimed task.';
   };
+  const DEFAULT_TASK_DISPATCHER_POLL_INTERVAL_MS = 250;
+  const DEFAULT_TASK_LEASE_MS = 5 * 60 * 1000;
+
+  interface TaskDispatcherAssignment {
+    taskId: string;
+    workerId: string;
+  }
+
+  interface TaskDispatcherState {
+    record: TaskDispatcherRecord;
+    prompt?: string;
+    name?: string;
+    model?: string;
+    maxTurns?: number;
+    mode?: string;
+    cwd?: string;
+    isolation?: 'worktree';
+    timer: ReturnType<typeof setTimeout> | null;
+    running: boolean;
+    rerunRequested: boolean;
+    disposed: boolean;
+    activeAssignments: Map<string, TaskDispatcherAssignment>;
+  }
+
+  const cloneTaskDispatcherRecord = (record: TaskDispatcherRecord): TaskDispatcherRecord => (
+    JSON.parse(JSON.stringify(record))
+  );
   const toWorkerRecord = (session: AgentSession): WorkerRecord => ({
     workerId: session.agentId,
     workerType: session.agentType,
@@ -709,6 +741,8 @@ export function query(
   // instance is created later (after hooks) and captured via closure.
   // ------------------------------------------------------------------
   let sdkAgentExecutor: AgentExecutor | undefined;
+  const taskDispatchers = new Map<string, TaskDispatcherState>();
+  const taskDispatcherByWorkerId = new Map<string, { dispatcherId: string; taskId: string }>();
   const taskToolAutoWired = !toolRegistry.get('Task');
   if (taskToolAutoWired) {
     const getAgentInfo = (agentId: string) => {
@@ -1431,6 +1465,7 @@ export function query(
   function cleanupQueryResources(): void {
     if (cleanedUp) return;
     cleanedUp = true;
+    cleanupTaskDispatchers(true);
     if (mcpManager) {
       runtime.disconnectMcpServers().catch(() => {});
     }
@@ -1878,6 +1913,213 @@ export function query(
       void returnPromise.catch(() => {});
     }
   };
+
+  const syncTaskDispatcherRecord = (state: TaskDispatcherState): TaskDispatcherRecord => {
+    state.record.activeTaskIds = [...state.activeAssignments.values()].map((assignment) => assignment.taskId);
+    state.record.activeWorkerIds = [...state.activeAssignments.values()].map((assignment) => assignment.workerId);
+    return state.record;
+  };
+
+  const markTaskDispatcherStopped = (state: TaskDispatcherState): TaskDispatcherRecord => {
+    if (state.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    state.running = false;
+    state.rerunRequested = false;
+    state.record.status = 'stopped';
+    state.record.stoppedAt = state.record.stoppedAt ?? new Date().toISOString();
+    return syncTaskDispatcherRecord(state);
+  };
+
+  const scheduleTaskDispatcherRun = (state: TaskDispatcherState, delayMs = state.record.pollIntervalMs): void => {
+    if (state.disposed || state.record.status === 'stopped') {
+      return;
+    }
+    if (state.running) {
+      state.rerunRequested = true;
+      return;
+    }
+    if (state.timer) {
+      if (delayMs <= 0) {
+        clearTimeout(state.timer);
+        state.timer = null;
+      } else {
+        return;
+      }
+    }
+    state.timer = setTimeout(() => {
+      state.timer = null;
+      void runTaskDispatcher(state);
+    }, Math.max(0, delayMs));
+  };
+
+  const reconcileTaskDispatcherAssignment = async (
+    state: TaskDispatcherState,
+    workerId: string,
+    status: 'pending' | 'completed',
+  ): Promise<void> => {
+    const assignment = state.activeAssignments.get(workerId);
+    if (!assignment) {
+      return;
+    }
+
+    state.activeAssignments.delete(workerId);
+    taskDispatcherByWorkerId.delete(workerId);
+    try {
+      getTaskManager(state.record.teamName).releaseLease(
+        assignment.taskId,
+        state.record.owner,
+        status,
+      );
+    } catch {
+      // Non-fatal — the task may already have been released manually.
+    }
+    syncTaskDispatcherRecord(state);
+    if (state.record.status === 'draining' && state.activeAssignments.size === 0) {
+      markTaskDispatcherStopped(state);
+      return;
+    }
+    if (state.record.status === 'running') {
+      scheduleTaskDispatcherRun(state, 0);
+    }
+  };
+
+  const runTaskDispatcher = async (state: TaskDispatcherState): Promise<void> => {
+    if (state.disposed || state.record.status === 'stopped' || state.running) {
+      return;
+    }
+
+    state.running = true;
+    try {
+      const heartbeatNow = new Date();
+      for (const assignment of [...state.activeAssignments.values()]) {
+        try {
+          getTaskManager(state.record.teamName).heartbeat(
+            assignment.taskId,
+            state.record.owner,
+            state.record.leaseMs,
+            heartbeatNow,
+          );
+        } catch {
+          state.activeAssignments.delete(assignment.workerId);
+          taskDispatcherByWorkerId.delete(assignment.workerId);
+        }
+      }
+      syncTaskDispatcherRecord(state);
+
+      if (state.record.status === 'draining') {
+        if (state.activeAssignments.size === 0) {
+          markTaskDispatcherStopped(state);
+        }
+        return;
+      }
+
+      while (
+        !state.disposed &&
+        state.record.status === 'running' &&
+        state.activeAssignments.size < state.record.maxConcurrentWorkers
+      ) {
+        const dispatched = await queryObj.dispatchNextTask({
+          owner: state.record.owner,
+          teamName: state.record.teamName,
+          leaseMs: state.record.leaseMs,
+          workerType: state.record.workerType,
+          ...(state.name ? { name: state.name } : {}),
+          ...(state.prompt ? { prompt: state.prompt } : {}),
+          ...(state.model ? { model: state.model } : {}),
+          ...(state.maxTurns !== undefined ? { maxTurns: state.maxTurns } : {}),
+          ...(state.mode ? { mode: state.mode } : {}),
+          ...(state.cwd ? { cwd: state.cwd } : {}),
+          ...(state.isolation ? { isolation: state.isolation } : {}),
+        });
+        if (!dispatched) {
+          break;
+        }
+
+        state.activeAssignments.set(dispatched.worker.workerId, {
+          taskId: dispatched.task.id,
+          workerId: dispatched.worker.workerId,
+        });
+        taskDispatcherByWorkerId.set(dispatched.worker.workerId, {
+          dispatcherId: state.record.dispatcherId,
+          taskId: dispatched.task.id,
+        });
+        state.record.lastDispatchAt = new Date().toISOString();
+        syncTaskDispatcherRecord(state);
+      }
+    } finally {
+      state.running = false;
+      if (state.disposed || state.record.status === 'stopped') {
+        return;
+      }
+      if (state.rerunRequested) {
+        state.rerunRequested = false;
+        scheduleTaskDispatcherRun(state, 0);
+        return;
+      }
+      if (state.record.status === 'draining' && state.activeAssignments.size === 0) {
+        markTaskDispatcherStopped(state);
+        return;
+      }
+      scheduleTaskDispatcherRun(state, state.record.pollIntervalMs);
+    }
+  };
+
+  const handleTaskDispatcherOrchestrationEvent = (event: SDKOrchestrationEvent): void => {
+    if (event.kind !== 'worker_lifecycle' || !event.workerId) {
+      return;
+    }
+
+    const assignment = taskDispatcherByWorkerId.get(event.workerId);
+    if (!assignment) {
+      return;
+    }
+
+    const state = taskDispatchers.get(assignment.dispatcherId);
+    if (!state) {
+      taskDispatcherByWorkerId.delete(event.workerId);
+      return;
+    }
+
+    const lifecycleType = event.raw.type;
+    if (lifecycleType === 'completed') {
+      void reconcileTaskDispatcherAssignment(state, event.workerId, 'completed');
+      return;
+    }
+    if (lifecycleType === 'failed' || lifecycleType === 'shutdown') {
+      void reconcileTaskDispatcherAssignment(state, event.workerId, 'pending');
+    }
+  };
+
+  function cleanupTaskDispatchers(releaseActiveTasks: boolean): void {
+    for (const state of taskDispatchers.values()) {
+      state.disposed = true;
+      if (state.timer) {
+        clearTimeout(state.timer);
+        state.timer = null;
+      }
+
+      if (releaseActiveTasks) {
+        for (const assignment of state.activeAssignments.values()) {
+          taskDispatcherByWorkerId.delete(assignment.workerId);
+          try {
+            getTaskManager(state.record.teamName).releaseLease(
+              assignment.taskId,
+              state.record.owner,
+              'pending',
+            );
+          } catch {
+            // Non-fatal — tasks may already be released.
+          }
+        }
+      }
+
+      state.activeAssignments.clear();
+      syncTaskDispatcherRecord(state);
+      markTaskDispatcherStopped(state);
+    }
+  }
 
   queryObj.interrupt = async () => {
     abortQuery(true);
@@ -2488,6 +2730,7 @@ export function query(
   const emitStandaloneOrchestrationEvent = (event: SubagentStreamEvent): void => {
     const orchestrationEvent = convertSubagentEventToOrchestrationEvent(undefined, sessionId, event);
     if (!orchestrationEvent) return;
+    handleTaskDispatcherOrchestrationEvent(orchestrationEvent);
     for (const subscriber of orchestrationSubscribers) {
       subscriber.push(orchestrationEvent);
     }
@@ -2803,6 +3046,96 @@ export function query(
       getTaskManager(teamName).releaseLease(claimed.id, owner, 'pending');
       throw error;
     }
+  };
+
+  queryObj.startTaskDispatcher = async (input: TaskDispatcherStartInput): Promise<TaskDispatcherRecord> => {
+    const owner = normalizeOptionalString(input.owner);
+    if (!owner) {
+      throw new Error('startTaskDispatcher requires a non-empty owner.');
+    }
+
+    const teamName = resolveTaskTeamName(input.teamName);
+    const dispatcherId = normalizeOptionalString(input.dispatcherId) ?? randomUUID();
+    const existing = taskDispatchers.get(dispatcherId);
+    if (existing && existing.record.status !== 'stopped') {
+      throw new Error(`Task dispatcher already exists: ${dispatcherId}`);
+    }
+
+    const pollIntervalMs = Math.max(25, input.pollIntervalMs ?? DEFAULT_TASK_DISPATCHER_POLL_INTERVAL_MS);
+    const maxConcurrentWorkers = Math.max(1, Math.trunc(input.maxConcurrentWorkers ?? 1));
+    const leaseMs = input.leaseMs ?? DEFAULT_TASK_LEASE_MS;
+    const startedAt = new Date().toISOString();
+    const state: TaskDispatcherState = {
+      record: {
+        dispatcherId,
+        owner,
+        teamName,
+        workerType: input.workerType === 'verifier' ? 'verifier' : 'worker',
+        status: 'running',
+        pollIntervalMs,
+        leaseMs,
+        maxConcurrentWorkers,
+        activeTaskIds: [],
+        activeWorkerIds: [],
+        startedAt,
+      },
+      ...(normalizeOptionalString(input.prompt) ? { prompt: normalizeOptionalString(input.prompt) } : {}),
+      ...(normalizeOptionalString(input.name) ? { name: normalizeOptionalString(input.name) } : {}),
+      ...(normalizeOptionalString(input.model) ? { model: normalizeOptionalString(input.model) } : {}),
+      ...(input.maxTurns !== undefined ? { maxTurns: input.maxTurns } : {}),
+      ...(normalizeOptionalString(input.mode) ? { mode: normalizeOptionalString(input.mode) } : {}),
+      ...(normalizeOptionalString(input.cwd) ? { cwd: normalizeOptionalString(input.cwd) } : {}),
+      ...(input.isolation ? { isolation: input.isolation } : {}),
+      timer: null,
+      running: false,
+      rerunRequested: false,
+      disposed: false,
+      activeAssignments: new Map(),
+    };
+    taskDispatchers.set(dispatcherId, state);
+    syncTaskDispatcherRecord(state);
+    scheduleTaskDispatcherRun(state, 0);
+    return cloneTaskDispatcherRecord(state.record);
+  };
+
+  queryObj.listTaskDispatchers = async (options?: TaskDispatcherListOptions) => {
+    const teamName = normalizeOptionalString(options?.teamName);
+    const status = options?.status;
+    return [...taskDispatchers.values()]
+      .map((state) => syncTaskDispatcherRecord(state))
+      .filter((record) => (!teamName || record.teamName === teamName) && (!status || record.status === status))
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt))
+      .map((record) => cloneTaskDispatcherRecord(record));
+  };
+
+  queryObj.stopTaskDispatcher = async (dispatcherId: string): Promise<TaskDispatcherStopResult> => {
+    const normalizedDispatcherId = normalizeOptionalString(dispatcherId);
+    if (!normalizedDispatcherId) {
+      throw new Error('dispatcherId is required to stop a task dispatcher.');
+    }
+
+    const state = taskDispatchers.get(normalizedDispatcherId);
+    if (!state) {
+      return { success: false, dispatcher: null };
+    }
+
+    if (state.record.status === 'stopped') {
+      return {
+        success: false,
+        dispatcher: cloneTaskDispatcherRecord(syncTaskDispatcherRecord(state)),
+      };
+    }
+
+    state.record.status = state.activeAssignments.size > 0 ? 'draining' : 'stopped';
+    if (state.record.status === 'stopped') {
+      markTaskDispatcherStopped(state);
+    } else {
+      scheduleTaskDispatcherRun(state, 0);
+    }
+    return {
+      success: true,
+      dispatcher: cloneTaskDispatcherRecord(syncTaskDispatcherRecord(state)),
+    };
   };
 
   queryObj.listBackgroundTasks = async () => {
