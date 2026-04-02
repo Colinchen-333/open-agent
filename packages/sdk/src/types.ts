@@ -428,6 +428,23 @@ export interface TaskReleaseOptions {
   status?: 'pending' | 'completed';
 }
 
+export interface TaskDispatchInput extends TaskClaimOptions {
+  owner: string;
+  workerType?: 'worker' | 'verifier';
+  name?: string;
+  prompt?: string;
+  model?: string;
+  maxTurns?: number;
+  mode?: string;
+  cwd?: string;
+  isolation?: 'worktree';
+}
+
+export interface TaskDispatchResult {
+  task: TaskRecord;
+  worker: WorkerRecord;
+}
+
 export interface TeamMemberRecord {
   name: string;
   agentId: string;
@@ -720,6 +737,8 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   heartbeatTask(taskId: string, owner: string, options?: TaskClaimOptions): Promise<TaskRecord>;
   /** Release a claimed task back to pending or mark it completed. */
   releaseTask(taskId: string, owner: string, options?: TaskReleaseOptions): Promise<TaskRecord>;
+  /** Claim the next available task and launch a worker in one orchestration step. */
+  dispatchNextTask(input: TaskDispatchInput): Promise<TaskDispatchResult | null>;
   /** Return structured details for a specific background task, if found. */
   getBackgroundTask(taskId: string, options?: { block?: boolean; timeout?: number }): Promise<BackgroundTaskInspection | null>;
   /**
@@ -883,6 +902,8 @@ export interface Session {
   heartbeatTask(taskId: string, owner: string, options?: TaskClaimOptions): Promise<TaskRecord>;
   /** Release a claimed task back to pending or mark it completed. */
   releaseTask(taskId: string, owner: string, options?: TaskReleaseOptions): Promise<TaskRecord>;
+  /** Claim the next available task and launch a worker in one orchestration step. */
+  dispatchNextTask(input: TaskDispatchInput): Promise<TaskDispatchResult | null>;
   /** Return visible background bash/agent tasks for the current runtime. */
   listBackgroundTasks(): Promise<BackgroundTaskSummary[]>;
   /** Return structured details for a specific background task, if found. */

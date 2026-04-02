@@ -57,6 +57,8 @@ import type {
   TaskCreateInput,
   TaskUpdateInput,
   TaskClaimOptions,
+  TaskDispatchInput,
+  TaskDispatchResult,
   TaskReleaseOptions,
   TaskRecord,
   WorkerListOptions,
@@ -511,6 +513,17 @@ export function query(
     ...(task.metadata ? { metadata: JSON.parse(JSON.stringify(task.metadata)) } : {}),
     teamName,
   });
+  const buildTaskDispatchPrompt = (task: TaskItem): string => {
+    const subject = normalizeOptionalString(task.subject);
+    const activeForm = normalizeOptionalString(task.activeForm);
+    const description = normalizeOptionalString(task.description);
+    const lines = [
+      subject ? `Task: ${subject}` : undefined,
+      activeForm ? `Active form: ${activeForm}` : undefined,
+      description && description !== subject ? description : undefined,
+    ].filter((line): line is string => Boolean(line));
+    return lines.join('\n\n') || 'Work on the claimed task.';
+  };
   const toWorkerRecord = (session: AgentSession): WorkerRecord => ({
     workerId: session.agentId,
     workerType: session.agentType,
@@ -2738,6 +2751,58 @@ export function query(
       options?.status ?? 'pending',
     );
     return toTaskRecord(task, teamName);
+  };
+
+  queryObj.dispatchNextTask = async (input: TaskDispatchInput): Promise<TaskDispatchResult | null> => {
+    const owner = normalizeOptionalString(input.owner);
+    if (!owner) {
+      throw new Error('dispatchNextTask requires a non-empty owner.');
+    }
+
+    const teamName = resolveTaskTeamName(input.teamName);
+    const claimed = getTaskManager(teamName).claimNext(owner, {
+      leaseMs: input.leaseMs,
+      now: input.now,
+    });
+    if (!claimed) {
+      return null;
+    }
+
+    const taskRecord = toTaskRecord(claimed, teamName);
+    const workerPrompt = normalizeOptionalString(input.prompt)
+      ?? buildTaskDispatchPrompt(claimed);
+
+    try {
+      const worker = input.workerType === 'verifier'
+        ? await queryObj.launchVerifier({
+            teamName,
+            name: input.name ?? claimed.subject,
+            prompt: workerPrompt,
+            ...(input.model ? { model: input.model } : {}),
+            ...(input.maxTurns !== undefined ? { maxTurns: input.maxTurns } : {}),
+            ...(input.mode ? { mode: input.mode } : {}),
+            ...(input.cwd ? { cwd: input.cwd } : {}),
+            ...(input.isolation ? { isolation: input.isolation } : {}),
+          })
+        : await queryObj.launchWorker({
+            teamName,
+            name: input.name ?? claimed.subject,
+            prompt: workerPrompt,
+            ...(input.model ? { model: input.model } : {}),
+            ...(input.maxTurns !== undefined ? { maxTurns: input.maxTurns } : {}),
+            ...(input.mode ? { mode: input.mode } : {}),
+            ...(input.cwd ? { cwd: input.cwd } : {}),
+            ...(input.isolation ? { isolation: input.isolation } : {}),
+          });
+
+      return {
+        task: taskRecord,
+        worker,
+      };
+    } catch (error) {
+      getTaskManager(teamName).releaseLease(claimed.id, owner, 'pending');
+      throw error;
+    }
   };
 
   queryObj.listBackgroundTasks = async () => {

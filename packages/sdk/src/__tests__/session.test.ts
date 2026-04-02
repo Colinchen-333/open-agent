@@ -124,6 +124,7 @@ describe('createSession()', () => {
     expect(typeof session.respondToTeamApproval).toBe('function');
     expect(typeof session.listBackgroundTasks).toBe('function');
     expect(typeof session.getBackgroundTask).toBe('function');
+    expect(typeof session.dispatchNextTask).toBe('function');
     expect(typeof session.stopTask).toBe('function');
     expect(typeof session.streamInput).toBe('function');
     expect(typeof session.reconnectMcpServer).toBe('function');
