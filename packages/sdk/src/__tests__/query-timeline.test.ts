@@ -266,6 +266,8 @@ describe('query() timeline control plane', () => {
 
       const transcriptDir = dirname(sessionMgr.getTranscriptPath(temp.cwd, sessionId));
       rmSync(join(transcriptDir, `${sessionId}.jsonl`), { force: true });
+      rmSync(join(transcriptDir, `${sessionId}.dispatchers.json`), { force: true });
+      rmSync(join(transcriptDir, `${sessionId}.orchestration-timeline.json`), { force: true });
 
       const reader = query('timeline dispatcher snapshot reader', {
         cwd: temp.cwd,
@@ -594,6 +596,8 @@ describe('query() timeline control plane', () => {
       rmSync(join(process.env.HOME!, '.open-agent', 'agent-sessions'), { recursive: true, force: true });
       const transcriptDir = dirname(sessionMgr.getTranscriptPath(temp.cwd, sessionId));
       rmSync(join(transcriptDir, `${sessionId}.jsonl`), { force: true });
+      rmSync(join(transcriptDir, `${sessionId}.workers.json`), { force: true });
+      rmSync(join(transcriptDir, `${sessionId}.orchestration-timeline.json`), { force: true });
 
       const reader = query('timeline orchestration ledger reader', {
         cwd: temp.cwd,

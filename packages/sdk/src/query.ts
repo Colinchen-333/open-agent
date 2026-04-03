@@ -4097,8 +4097,68 @@ export function query(
   const getOrchestrationTimelineLedgerPath = () => sessionMgr
     ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.orchestration-timeline.json`)
     : join(cwd, '.open-agent', 'orchestration-ledgers', `${sessionId}.timeline.json`);
+  const getUnifiedOrchestrationLedgerPath = () => sessionMgr
+    ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.orchestration.json`)
+    : join(cwd, '.open-agent', 'orchestration-ledgers', `${sessionId}.orchestration.json`);
+
+  const readUnifiedOrchestrationLedger = (): PersistedOrchestrationLedgerFile | null => {
+    const ledgerPath = getUnifiedOrchestrationLedgerPath();
+    if (!existsSync(ledgerPath)) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(readFileSync(ledgerPath, 'utf-8')) as PersistedOrchestrationLedgerFile;
+      if (!parsed || parsed.version !== 1) {
+        return null;
+      }
+      return {
+        version: 1,
+        tasks: Array.isArray(parsed.tasks) ? parsed.tasks.map((item) => JSON.parse(JSON.stringify(item)) as TaskRecord) : [],
+        workers: Array.isArray(parsed.workers) ? parsed.workers.map((item) => JSON.parse(JSON.stringify(item)) as WorkerRecord) : [],
+        dispatchers: Array.isArray(parsed.dispatchers)
+          ? parsed.dispatchers.map((item) => cloneTaskDispatcherRecord(item))
+          : [],
+        timelineItems: Array.isArray(parsed.timelineItems)
+          ? parsed.timelineItems.map((item) => JSON.parse(JSON.stringify(item)) as SDKTimelineItem)
+          : [],
+        dispatcherDiagnoses: Array.isArray(parsed.dispatcherDiagnoses)
+          ? parsed.dispatcherDiagnoses.map((item) => JSON.parse(JSON.stringify(item)) as TaskDispatcherHealthReport)
+          : [],
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  const writeUnifiedOrchestrationLedger = (
+    updater: (current: PersistedOrchestrationLedgerFile) => PersistedOrchestrationLedgerFile,
+  ): void => {
+    try {
+      const ledgerPath = getUnifiedOrchestrationLedgerPath();
+      mkdirSync(dirname(ledgerPath), { recursive: true });
+      const current = readUnifiedOrchestrationLedger() ?? {
+        version: 1 as const,
+        tasks: [],
+        workers: [],
+        dispatchers: [],
+        timelineItems: [],
+        dispatcherDiagnoses: [],
+      };
+      const next = updater(current);
+      writeFileSync(ledgerPath, JSON.stringify(next, null, 2));
+    } catch {
+      // Non-fatal: unified orchestration durability should not break query execution.
+    }
+  };
 
   const readPersistedOrchestrationTimelineLedgerItems = (): SDKTimelineItem[] => {
+    const unified = readUnifiedOrchestrationLedger();
+    if (unified) {
+      return unified.timelineItems
+        .filter((item) => item.kind === 'worker_lifecycle' || item.kind === 'task_dispatcher' || item.kind === 'task_notification')
+        .map((item) => JSON.parse(JSON.stringify(item)) as SDKTimelineItem)
+        .sort((left, right) => compareTimelineTimestamps(left.timestamp, right.timestamp));
+    }
     const ledgerPath = getOrchestrationTimelineLedgerPath();
     if (!existsSync(ledgerPath)) {
       return [];
@@ -4125,6 +4185,20 @@ export function query(
     if (item.kind !== 'worker_lifecycle' && item.kind !== 'task_dispatcher' && item.kind !== 'task_notification') {
       return;
     }
+    writeUnifiedOrchestrationLedger((current) => {
+      const merged = new Map<string, SDKTimelineItem>(
+        current.timelineItems.map((entry) => [
+          entry.cursor ?? entry.timelineId ?? `${entry.kind}:${entry.timestamp}:${entry.sessionId}`,
+          JSON.parse(JSON.stringify(entry)) as SDKTimelineItem,
+        ]),
+      );
+      const key = item.cursor ?? item.timelineId ?? `${item.kind}:${item.timestamp}:${item.sessionId}`;
+      merged.set(key, JSON.parse(JSON.stringify(item)) as SDKTimelineItem);
+      return {
+        ...current,
+        timelineItems: sortTimelineItems([...merged.values()]),
+      };
+    });
     try {
       const ledgerPath = getOrchestrationTimelineLedgerPath();
       mkdirSync(dirname(ledgerPath), { recursive: true });
@@ -4146,6 +4220,12 @@ export function query(
   };
 
   const readPersistedTaskLedgerRecords = (): TaskRecord[] => {
+    const unified = readUnifiedOrchestrationLedger();
+    if (unified) {
+      return unified.tasks
+        .map((record) => JSON.parse(JSON.stringify(record)) as TaskRecord)
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    }
     const ledgerPath = getTaskLedgerPath();
     if (!existsSync(ledgerPath)) {
       return [];
@@ -4165,6 +4245,16 @@ export function query(
   };
 
   const persistTaskLedgerRecord = (record: TaskRecord): void => {
+    writeUnifiedOrchestrationLedger((current) => {
+      const merged = new Map<string, TaskRecord>(
+        current.tasks.map((entry) => [entry.id, JSON.parse(JSON.stringify(entry)) as TaskRecord]),
+      );
+      merged.set(record.id, JSON.parse(JSON.stringify(record)) as TaskRecord);
+      return {
+        ...current,
+        tasks: [...merged.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+      };
+    });
     try {
       const ledgerPath = getTaskLedgerPath();
       mkdirSync(dirname(ledgerPath), { recursive: true });
@@ -4182,6 +4272,12 @@ export function query(
   };
 
   const readPersistedWorkerLedgerRecords = (): WorkerRecord[] => {
+    const unified = readUnifiedOrchestrationLedger();
+    if (unified) {
+      return unified.workers
+        .map((record) => JSON.parse(JSON.stringify(record)) as WorkerRecord)
+        .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+    }
     const ledgerPath = getWorkerLedgerPath();
     if (!existsSync(ledgerPath)) {
       return [];
@@ -4201,6 +4297,16 @@ export function query(
   };
 
   const persistWorkerLedgerRecord = (record: WorkerRecord): void => {
+    writeUnifiedOrchestrationLedger((current) => {
+      const merged = new Map<string, WorkerRecord>(
+        current.workers.map((entry) => [entry.workerId, JSON.parse(JSON.stringify(entry)) as WorkerRecord]),
+      );
+      merged.set(record.workerId, JSON.parse(JSON.stringify(record)) as WorkerRecord);
+      return {
+        ...current,
+        workers: [...merged.values()].sort((left, right) => left.startedAt.localeCompare(right.startedAt)),
+      };
+    });
     try {
       const ledgerPath = getWorkerLedgerPath();
       mkdirSync(dirname(ledgerPath), { recursive: true });
@@ -4218,6 +4324,15 @@ export function query(
   };
 
   const readTaskDispatcherLedgerRecords = (): TaskDispatcherRecord[] => {
+    const unified = readUnifiedOrchestrationLedger();
+    if (unified) {
+      return unified.dispatchers
+        .map((record) => ({
+          ...cloneTaskDispatcherRecord(record),
+          source: 'ledger' as const,
+        }))
+        .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+    }
     const ledgerPath = getTaskDispatcherLedgerPath();
     if (!existsSync(ledgerPath)) {
       return [];
@@ -4240,6 +4355,19 @@ export function query(
   };
 
   const persistTaskDispatcherLedgerRecord = (record: TaskDispatcherRecord): void => {
+    writeUnifiedOrchestrationLedger((current) => {
+      const merged = new Map<string, TaskDispatcherRecord>(
+        current.dispatchers.map((entry) => [entry.dispatcherId, cloneTaskDispatcherRecord(entry)]),
+      );
+      merged.set(record.dispatcherId, {
+        ...cloneTaskDispatcherRecord(record),
+        source: 'ledger',
+      });
+      return {
+        ...current,
+        dispatchers: [...merged.values()].sort((left, right) => left.startedAt.localeCompare(right.startedAt)),
+      };
+    });
     try {
       const ledgerPath = getTaskDispatcherLedgerPath();
       mkdirSync(dirname(ledgerPath), { recursive: true });
@@ -4262,6 +4390,12 @@ export function query(
   };
 
   const readPersistedTaskDispatcherDiagnoses = (): TaskDispatcherHealthReport[] => {
+    const unified = readUnifiedOrchestrationLedger();
+    if (unified) {
+      return unified.dispatcherDiagnoses
+        .map((entry) => JSON.parse(JSON.stringify(entry)) as TaskDispatcherHealthReport)
+        .sort((left, right) => left.observedAt.localeCompare(right.observedAt));
+    }
     const ledgerPath = getTaskDispatcherDiagnosisLedgerPath();
     if (!existsSync(ledgerPath)) {
       return [];
@@ -4281,6 +4415,16 @@ export function query(
   };
 
   const persistTaskDispatcherDiagnosisReport = (report: TaskDispatcherHealthReport): void => {
+    writeUnifiedOrchestrationLedger((current) => {
+      const merged = new Map<string, TaskDispatcherHealthReport>(
+        current.dispatcherDiagnoses.map((entry) => [entry.dispatcherId, JSON.parse(JSON.stringify(entry)) as TaskDispatcherHealthReport]),
+      );
+      merged.set(report.dispatcherId, JSON.parse(JSON.stringify(report)) as TaskDispatcherHealthReport);
+      return {
+        ...current,
+        dispatcherDiagnoses: [...merged.values()].sort((left, right) => left.observedAt.localeCompare(right.observedAt)),
+      };
+    });
     try {
       const ledgerPath = getTaskDispatcherDiagnosisLedgerPath();
       mkdirSync(dirname(ledgerPath), { recursive: true });
@@ -6301,6 +6445,15 @@ interface PersistedTaskDispatcherEventMessage {
 interface PersistedOrchestrationTimelineLedgerFile {
   version: 1;
   items: SDKTimelineItem[];
+}
+
+interface PersistedOrchestrationLedgerFile {
+  version: 1;
+  tasks: TaskRecord[];
+  workers: WorkerRecord[];
+  dispatchers: TaskDispatcherRecord[];
+  timelineItems: SDKTimelineItem[];
+  dispatcherDiagnoses: TaskDispatcherHealthReport[];
 }
 
 interface PersistedTaskDispatcherLedgerFile {

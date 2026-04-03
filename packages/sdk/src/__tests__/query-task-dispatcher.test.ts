@@ -556,6 +556,9 @@ describe('query() task dispatcher control plane', () => {
 
       const transcriptDir = dirname(sessionMgr.getTranscriptPath(temp.cwd, sessionId));
       expect(() => rmSync(join(transcriptDir, `${sessionId}.jsonl`), { force: true })).not.toThrow();
+      expect(() => rmSync(join(transcriptDir, `${sessionId}.tasks.json`), { force: true })).not.toThrow();
+      expect(() => rmSync(join(transcriptDir, `${sessionId}.workers.json`), { force: true })).not.toThrow();
+      expect(() => rmSync(join(transcriptDir, `${sessionId}.dispatchers.json`), { force: true })).not.toThrow();
 
       const reader = query('orchestration ledger reader', {
         cwd: temp.cwd,
