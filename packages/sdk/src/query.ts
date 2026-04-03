@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
-import { existsSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import type {
   SDKMessage,
   SDKUserMessage,
@@ -2341,6 +2341,7 @@ export function query(
     state.record.activeTaskIds = activeAssignments.map((assignment) => assignment.taskId);
     state.record.activeWorkerIds = activeAssignments.map((assignment) => assignment.workerId);
     upsertDispatcherStoreRecord(state.record);
+    persistTaskDispatcherLedgerRecord(state.record);
     return state.record;
   };
 
@@ -3728,46 +3729,99 @@ export function query(
     return cloneTaskDispatcherRecord(state.record);
   };
 
-  const readPersistedTaskDispatcherRecords = (): TaskDispatcherRecord[] => {
-    if (!sessionMgr) {
+  const getTaskDispatcherLedgerPath = () => sessionMgr
+    ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.dispatchers.json`)
+    : join(cwd, '.open-agent', 'dispatcher-ledgers', `${sessionId}.json`);
+
+  const readTaskDispatcherLedgerRecords = (): TaskDispatcherRecord[] => {
+    const ledgerPath = getTaskDispatcherLedgerPath();
+    if (!existsSync(ledgerPath)) {
       return [];
     }
-    let transcriptEntries: unknown[] = [];
     try {
-      transcriptEntries = sessionMgr.readTranscript(transcriptCwd, sessionId);
-    } catch {
-      transcriptEntries = [];
-    }
-
-    const records = new Map<string, TaskDispatcherRecord>();
-    for (const event of extractTimelineDispatcherEventsFromTranscriptEntries(transcriptEntries)) {
-      const dispatcherEvent = event.dispatcherEvent;
-      if (!dispatcherEvent || !event.dispatcherId || !event.teamName) {
-        continue;
+      const parsed = JSON.parse(readFileSync(ledgerPath, 'utf-8')) as PersistedTaskDispatcherLedgerFile;
+      if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.dispatchers)) {
+        return [];
       }
-      const previous = records.get(event.dispatcherId);
-      records.set(event.dispatcherId, {
-        dispatcherId: event.dispatcherId,
-        owner: dispatcherEvent.owner,
-        teamName: event.teamName,
-        source: 'transcript',
-        workerType: dispatcherEvent.workerType,
-        status: dispatcherEvent.status,
-        pollIntervalMs: dispatcherEvent.pollIntervalMs,
-        leaseMs: dispatcherEvent.leaseMs,
-        maxConcurrentWorkers: dispatcherEvent.maxConcurrentWorkers,
-        activeTaskIds: [...dispatcherEvent.activeTaskIds],
-        activeWorkerIds: [...dispatcherEvent.activeWorkerIds],
-        activeAssignments: [...dispatcherEvent.activeAssignments],
-        startedAt: previous?.startedAt ?? dispatcherEvent.startedAt ?? dispatcherEvent.timestamp,
-        updatedAt: dispatcherEvent.updatedAt ?? dispatcherEvent.timestamp,
-        ...(dispatcherEvent.lastDispatchAt || previous?.lastDispatchAt
-          ? { lastDispatchAt: dispatcherEvent.lastDispatchAt ?? previous?.lastDispatchAt }
-          : {}),
-        ...(dispatcherEvent.stoppedAt || previous?.stoppedAt
-          ? { stoppedAt: dispatcherEvent.stoppedAt ?? previous?.stoppedAt }
-          : {}),
+      return parsed.dispatchers
+        .filter((record): record is TaskDispatcherRecord => Boolean(record && typeof record === 'object' && typeof record.dispatcherId === 'string'))
+        .map((record) => ({
+          ...cloneTaskDispatcherRecord(record),
+          source: 'ledger' as const,
+        }))
+        .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+    } catch {
+      return [];
+    }
+  };
+
+  const persistTaskDispatcherLedgerRecord = (record: TaskDispatcherRecord): void => {
+    try {
+      const ledgerPath = getTaskDispatcherLedgerPath();
+      mkdirSync(dirname(ledgerPath), { recursive: true });
+      const existing = readTaskDispatcherLedgerRecords();
+      const merged = new Map<string, TaskDispatcherRecord>(
+        existing.map((entry) => [entry.dispatcherId, cloneTaskDispatcherRecord(entry)]),
+      );
+      merged.set(record.dispatcherId, {
+        ...cloneTaskDispatcherRecord(record),
+        source: 'ledger',
       });
+      const next: PersistedTaskDispatcherLedgerFile = {
+        version: 1,
+        dispatchers: [...merged.values()].sort((left, right) => left.startedAt.localeCompare(right.startedAt)),
+      };
+      writeFileSync(ledgerPath, JSON.stringify(next, null, 2));
+    } catch {
+      // Non-fatal: durable ledger write failures should not break dispatcher execution.
+    }
+  };
+
+  const readPersistedTaskDispatcherRecords = (): TaskDispatcherRecord[] => {
+    const records = new Map<string, TaskDispatcherRecord>();
+    for (const record of readTaskDispatcherLedgerRecords()) {
+      records.set(record.dispatcherId, cloneTaskDispatcherRecord(record));
+    }
+    if (sessionMgr) {
+      let transcriptEntries: unknown[] = [];
+      try {
+        transcriptEntries = sessionMgr.readTranscript(transcriptCwd, sessionId);
+      } catch {
+        transcriptEntries = [];
+      }
+
+      for (const event of extractTimelineDispatcherEventsFromTranscriptEntries(transcriptEntries)) {
+        const dispatcherEvent = event.dispatcherEvent;
+        if (!dispatcherEvent || !event.dispatcherId || !event.teamName) {
+          continue;
+        }
+        if (records.has(event.dispatcherId)) {
+          continue;
+        }
+        const previous = records.get(event.dispatcherId);
+        records.set(event.dispatcherId, {
+          dispatcherId: event.dispatcherId,
+          owner: dispatcherEvent.owner,
+          teamName: event.teamName,
+          source: 'transcript',
+          workerType: dispatcherEvent.workerType,
+          status: dispatcherEvent.status,
+          pollIntervalMs: dispatcherEvent.pollIntervalMs,
+          leaseMs: dispatcherEvent.leaseMs,
+          maxConcurrentWorkers: dispatcherEvent.maxConcurrentWorkers,
+          activeTaskIds: [...dispatcherEvent.activeTaskIds],
+          activeWorkerIds: [...dispatcherEvent.activeWorkerIds],
+          activeAssignments: [...dispatcherEvent.activeAssignments],
+          startedAt: previous?.startedAt ?? dispatcherEvent.startedAt ?? dispatcherEvent.timestamp,
+          updatedAt: dispatcherEvent.updatedAt ?? dispatcherEvent.timestamp,
+          ...(dispatcherEvent.lastDispatchAt || previous?.lastDispatchAt
+            ? { lastDispatchAt: dispatcherEvent.lastDispatchAt ?? previous?.lastDispatchAt }
+            : {}),
+          ...(dispatcherEvent.stoppedAt || previous?.stoppedAt
+            ? { stoppedAt: dispatcherEvent.stoppedAt ?? previous?.stoppedAt }
+            : {}),
+        });
+      }
     }
 
     return [...records.values()].sort((left, right) => left.startedAt.localeCompare(right.startedAt));
@@ -5483,6 +5537,11 @@ interface PersistedTaskDispatcherEventMessage {
   team_name: string;
   timestamp: string;
   event: SDKTaskDispatcherEvent;
+}
+
+interface PersistedTaskDispatcherLedgerFile {
+  version: 1;
+  dispatchers: TaskDispatcherRecord[];
 }
 
 export function __internal_collectPendingTaskNotifications(params: {

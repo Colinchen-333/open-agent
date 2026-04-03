@@ -315,7 +315,7 @@ describe('query() task dispatcher control plane', () => {
     }
   });
 
-  it('rebuilds dispatcher ledger from transcript and reports structured health findings', async () => {
+  it('rebuilds dispatcher ledger from durable storage and reports structured health findings', async () => {
     const temp = makeTempHome('open-agent-sdk-task-dispatcher-health-');
     const teamName = `dispatcher-team-${Date.now()}`;
     const sessionId = randomUUID();
@@ -372,12 +372,12 @@ describe('query() task dispatcher control plane', () => {
       } as any);
 
       const recovered = await reader.getTaskDispatcher(dispatcher.dispatcherId);
-      expect(recovered?.source).toBe('transcript');
+      expect(recovered?.source).toBe('ledger');
       expect(recovered?.status).toBe('draining');
       expect(recovered?.activeAssignments).toHaveLength(1);
       expect(recovered?.activeAssignments[0]?.taskId).toBe(task.id);
       expect((await reader.listTaskDispatchers()).some((item) =>
-        item.dispatcherId === dispatcher.dispatcherId && item.source === 'transcript',
+        item.dispatcherId === dispatcher.dispatcherId && item.source === 'ledger',
       )).toBe(true);
 
       const health = await reader.inspectTaskDispatcherHealth(dispatcher.dispatcherId, {
@@ -386,7 +386,7 @@ describe('query() task dispatcher control plane', () => {
         drainingTimeoutMs: 1,
       });
       expect(health?.healthy).toBe(false);
-      expect(health?.source).toBe('transcript');
+      expect(health?.source).toBe('ledger');
       expect(health?.findings.map((item) => item.code)).toEqual(expect.arrayContaining([
         'lease_expired',
         'stuck_assignment',

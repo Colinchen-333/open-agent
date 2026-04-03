@@ -551,7 +551,7 @@ describe('createSession()', () => {
     session.close();
   });
 
-  it('restores dispatcher ledger through stable session transcript persistence', async () => {
+  it('restores dispatcher ledger through stable durable persistence', async () => {
     const temp = makeTempHome('open-agent-sdk-session-dispatcher-ledger-');
     const teamName = `alpha-team-${Date.now()}`;
 
@@ -600,7 +600,7 @@ describe('createSession()', () => {
 
       await expect(resumed.getTaskDispatcher(dispatcher.dispatcherId)).resolves.toMatchObject({
         dispatcherId: dispatcher.dispatcherId,
-        source: 'transcript',
+        source: 'ledger',
         status: 'draining',
       });
       const recoveredHealth = await resumed.inspectTaskDispatcherHealth(dispatcher.dispatcherId, {
