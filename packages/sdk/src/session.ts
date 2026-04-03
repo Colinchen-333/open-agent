@@ -131,7 +131,9 @@ type SessionControlMethods = Pick<
   | 'heartbeatTask'
   | 'releaseTask'
   | 'startTaskDispatcher'
+  | 'getTaskDispatcher'
   | 'listTaskDispatchers'
+  | 'requeueTaskDispatcherAssignment'
   | 'stopTaskDispatcher'
   | 'listBackgroundTasks'
   | 'getBackgroundTask'
@@ -424,7 +426,9 @@ function _buildSession(
     releaseTask: (...args) => q.releaseTask(...args),
     dispatchNextTask: (...args) => q.dispatchNextTask(...args),
     startTaskDispatcher: (...args) => q.startTaskDispatcher(...args),
+    getTaskDispatcher: (...args) => q.getTaskDispatcher(...args),
     listTaskDispatchers: (...args) => q.listTaskDispatchers(...args),
+    requeueTaskDispatcherAssignment: (...args) => q.requeueTaskDispatcherAssignment(...args),
     stopTaskDispatcher: (...args) => q.stopTaskDispatcher(...args),
     listBackgroundTasks: (...args) => q.listBackgroundTasks(...args),
     getBackgroundTask: (...args) => q.getBackgroundTask(...args),
@@ -681,7 +685,9 @@ export function unstable_v2_createSession(
     releaseTask: (...args) => q.releaseTask(...args),
     dispatchNextTask: (...args) => q.dispatchNextTask(...args),
     startTaskDispatcher: (...args) => q.startTaskDispatcher(...args),
+    getTaskDispatcher: (...args) => q.getTaskDispatcher(...args),
     listTaskDispatchers: (...args) => q.listTaskDispatchers(...args),
+    requeueTaskDispatcherAssignment: (...args) => q.requeueTaskDispatcherAssignment(...args),
     stopTaskDispatcher: (...args) => q.stopTaskDispatcher(...args),
     listBackgroundTasks: (...args) => q.listBackgroundTasks(...args),
     getBackgroundTask: (...args) => q.getBackgroundTask(...args),

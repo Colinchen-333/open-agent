@@ -400,6 +400,10 @@ describe('query() timeline control plane', () => {
         && item.orchestrationEvent?.dispatcherEvent?.type === 'dispatched',
       );
       expect(dispatchedItem?.orchestrationEvent?.dispatcherEvent?.workerId).toBeTruthy();
+      expect(dispatchedItem?.orchestrationEvent?.dispatcherEvent?.activeAssignments).toHaveLength(1);
+      expect(dispatchedItem?.orchestrationEvent?.dispatcherEvent?.activeAssignments[0]?.taskId).toBe(
+        dispatchedItem?.orchestrationEvent?.dispatcherEvent?.taskId,
+      );
       expect(dispatchedItem?.taskNotification).toBeUndefined();
 
       await expect(q.stopTaskDispatcher(dispatcher.dispatcherId)).resolves.toMatchObject({
@@ -412,6 +416,7 @@ describe('query() timeline control plane', () => {
         && item.orchestrationEvent?.dispatcherEvent?.type === 'stopped',
       );
       expect(stoppedItem?.orchestrationEvent?.dispatcherEvent?.status).toBe('stopped');
+      expect(stoppedItem?.orchestrationEvent?.dispatcherEvent?.activeAssignments).toEqual([]);
       expect(stoppedItem?.orchestrationEvent?.dispatcherEvent?.followUps).toHaveLength(1);
       expect(stoppedItem?.orchestrationEvent?.dispatcherEvent?.followUps[0]?.scaffold.action?.tool).toBe('TaskDispatcher');
       expect(stoppedItem?.orchestrationEvent?.dispatcherEvent?.followUps[0]?.scaffold.action?.arguments['action']).toBe('start');

@@ -451,6 +451,15 @@ export interface TaskDispatcherStartInput extends TaskDispatchInput {
   maxConcurrentWorkers?: number;
 }
 
+export interface TaskDispatcherAssignmentRecord {
+  taskId: string;
+  workerId: string;
+  claimedAt?: string;
+  lastHeartbeatAt?: string;
+  leaseExpiresAt?: string;
+  attempts?: number;
+}
+
 export interface TaskDispatcherRecord {
   dispatcherId: string;
   owner: string;
@@ -462,6 +471,7 @@ export interface TaskDispatcherRecord {
   maxConcurrentWorkers: number;
   activeTaskIds: string[];
   activeWorkerIds: string[];
+  activeAssignments: TaskDispatcherAssignmentRecord[];
   startedAt: string;
   stoppedAt?: string;
   lastDispatchAt?: string;
@@ -475,6 +485,20 @@ export interface TaskDispatcherListOptions {
 export interface TaskDispatcherStopResult {
   success: boolean;
   dispatcher: TaskDispatcherRecord | null;
+}
+
+export interface TaskDispatcherRequeueInput {
+  dispatcherId: string;
+  workerId?: string;
+  taskId?: string;
+  stopWorker?: boolean;
+}
+
+export interface TaskDispatcherRequeueResult {
+  success: boolean;
+  dispatcher: TaskDispatcherRecord | null;
+  task: TaskRecord | null;
+  workerStop?: { success: boolean };
 }
 
 export interface TeamMemberRecord {
@@ -628,6 +652,7 @@ export interface SDKTaskDispatcherEvent {
   taskStatus?: TaskRecord['status'];
   activeTaskIds: string[];
   activeWorkerIds: string[];
+  activeAssignments: TaskDispatcherAssignmentRecord[];
   followUps: WorkerFollowUpSuggestion[];
 }
 
@@ -813,8 +838,12 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   dispatchNextTask(input: TaskDispatchInput): Promise<TaskDispatchResult | null>;
   /** Start a background dispatcher loop that continuously claims and dispatches tasks. */
   startTaskDispatcher(input: TaskDispatcherStartInput): Promise<TaskDispatcherRecord>;
+  /** Return a single live task dispatcher tracked by this query handle. */
+  getTaskDispatcher(dispatcherId: string): Promise<TaskDispatcherRecord | null>;
   /** List live task dispatchers tracked by this query handle. */
   listTaskDispatchers(options?: TaskDispatcherListOptions): Promise<TaskDispatcherRecord[]>;
+  /** Force one active dispatcher assignment back to pending, optionally stopping its worker first. */
+  requeueTaskDispatcherAssignment(input: TaskDispatcherRequeueInput): Promise<TaskDispatcherRequeueResult>;
   /** Stop a running task dispatcher. Active workers are drained before final stop. */
   stopTaskDispatcher(dispatcherId: string): Promise<TaskDispatcherStopResult>;
   /** Return structured details for a specific background task, if found. */
@@ -984,8 +1013,12 @@ export interface Session {
   dispatchNextTask(input: TaskDispatchInput): Promise<TaskDispatchResult | null>;
   /** Start a background dispatcher loop that continuously claims and dispatches tasks. */
   startTaskDispatcher(input: TaskDispatcherStartInput): Promise<TaskDispatcherRecord>;
+  /** Return a single live task dispatcher tracked by this query handle. */
+  getTaskDispatcher(dispatcherId: string): Promise<TaskDispatcherRecord | null>;
   /** List live task dispatchers tracked by this query handle. */
   listTaskDispatchers(options?: TaskDispatcherListOptions): Promise<TaskDispatcherRecord[]>;
+  /** Force one active dispatcher assignment back to pending, optionally stopping its worker first. */
+  requeueTaskDispatcherAssignment(input: TaskDispatcherRequeueInput): Promise<TaskDispatcherRequeueResult>;
   /** Stop a running task dispatcher. Active workers are drained before final stop. */
   stopTaskDispatcher(dispatcherId: string): Promise<TaskDispatcherStopResult>;
   /** Return visible background bash/agent tasks for the current runtime. */

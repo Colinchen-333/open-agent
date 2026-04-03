@@ -286,11 +286,20 @@ describe('query().subscribeOrchestrationEvents()', () => {
       expect(dispatched.value.dispatcherEvent?.type).toBe('dispatched');
       expect(dispatched.value.dispatcherEvent?.taskId).toBeTruthy();
       expect(dispatched.value.dispatcherEvent?.workerId).toBeTruthy();
+      expect(dispatched.value.dispatcherEvent?.activeAssignments).toHaveLength(1);
+      expect(dispatched.value.dispatcherEvent?.activeAssignments[0]?.taskId).toBe(
+        dispatched.value.dispatcherEvent?.taskId,
+      );
+      expect(dispatched.value.dispatcherEvent?.activeAssignments[0]?.workerId).toBe(
+        dispatched.value.dispatcherEvent?.workerId,
+      );
+      expect(dispatched.value.dispatcherEvent?.activeAssignments[0]?.leaseExpiresAt).toBeTruthy();
 
       expect(settled.done).toBe(false);
       expect(settled.value.kind).toBe('task_dispatcher');
       expect(settled.value.dispatcherEvent?.type).toBe('task_completed');
       expect(settled.value.dispatcherEvent?.taskStatus).toBe('completed');
+      expect(settled.value.dispatcherEvent?.activeAssignments).toEqual([]);
 
       await expect(q.stopTaskDispatcher(dispatcher.dispatcherId)).resolves.toMatchObject({
         success: true,

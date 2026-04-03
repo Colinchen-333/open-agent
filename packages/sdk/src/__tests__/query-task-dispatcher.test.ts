@@ -145,9 +145,10 @@ describe('query() task dispatcher control plane', () => {
       const idleDispatcher = await waitForDispatcher(
         q,
         dispatcher.dispatcherId,
-        (item) => item.status === 'running' && item.activeTaskIds.length === 0,
+        (item) => item.status === 'running' && item.activeAssignments.length === 0,
       );
       expect(idleDispatcher.lastDispatchAt).toBeTruthy();
+      expect(idleDispatcher.activeAssignments).toEqual([]);
 
       await expect(q.stopTaskDispatcher(dispatcher.dispatcherId)).resolves.toMatchObject({
         success: true,
@@ -192,9 +193,20 @@ describe('query() task dispatcher control plane', () => {
       const activeDispatcher = await waitForDispatcher(
         q,
         dispatcher.dispatcherId,
-        (item) => item.status === 'running' && item.activeWorkerIds.length === 1,
+        (item) => item.status === 'running' && item.activeAssignments.length === 1,
       );
       expect(activeDispatcher.activeTaskIds).toEqual([task.id]);
+      expect(activeDispatcher.activeAssignments).toHaveLength(1);
+      expect(activeDispatcher.activeAssignments[0]?.taskId).toBe(task.id);
+      expect(activeDispatcher.activeAssignments[0]?.workerId).toBe(activeDispatcher.activeWorkerIds[0]);
+      expect(activeDispatcher.activeAssignments[0]?.claimedAt).toBeTruthy();
+      expect(activeDispatcher.activeAssignments[0]?.lastHeartbeatAt).toBeTruthy();
+      expect(activeDispatcher.activeAssignments[0]?.leaseExpiresAt).toBeTruthy();
+      expect(activeDispatcher.activeAssignments[0]?.attempts).toBe(1);
+
+      const inspectedDispatcher = await q.getTaskDispatcher(dispatcher.dispatcherId);
+      expect(inspectedDispatcher?.dispatcherId).toBe(dispatcher.dispatcherId);
+      expect(inspectedDispatcher?.activeAssignments).toEqual(activeDispatcher.activeAssignments);
 
       await expect(q.stopTaskDispatcher(dispatcher.dispatcherId)).resolves.toMatchObject({
         success: true,
@@ -216,6 +228,84 @@ describe('query() task dispatcher control plane', () => {
       ).resolves.toMatchObject({
         activeTaskIds: [],
         activeWorkerIds: [],
+        activeAssignments: [],
+      });
+
+      q.close();
+    } finally {
+      temp.cleanup();
+    }
+  });
+
+  it('inspects active assignments and can force them back to pending', async () => {
+    const temp = makeTempHome('open-agent-sdk-task-dispatcher-requeue-');
+    const teamName = `dispatcher-team-${Date.now()}`;
+    const controlledFailure = makeControlledFailureProvider();
+
+    try {
+      const q = query('dispatcher requeue', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: controlledFailure.provider,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+      } as any);
+
+      await q.createTeam({ name: teamName, setActive: true });
+      const task = await q.createTask({
+        teamName,
+        subject: 'Recover stuck assignment',
+        description: 'Force the active assignment back to pending.',
+        priority: 1,
+      });
+
+      const dispatcher = await q.startTaskDispatcher({
+        dispatcherId: `dispatcher-${Date.now()}`,
+        owner: 'dispatcher-owner',
+        teamName,
+        pollIntervalMs: 25,
+        leaseMs: 500,
+      });
+
+      const activeDispatcher = await waitForDispatcher(
+        q,
+        dispatcher.dispatcherId,
+        (item) => item.status === 'running' && item.activeAssignments.length === 1,
+      );
+      const assignment = activeDispatcher.activeAssignments[0]!;
+      expect(assignment.taskId).toBe(task.id);
+      expect(assignment.workerId).toBeTruthy();
+      expect(assignment.claimedAt).toBeTruthy();
+      expect(assignment.leaseExpiresAt).toBeTruthy();
+
+      await expect(q.stopTaskDispatcher(dispatcher.dispatcherId)).resolves.toMatchObject({
+        success: true,
+        dispatcher: { status: 'draining' },
+      });
+
+      const requeued = await q.requeueTaskDispatcherAssignment({
+        dispatcherId: dispatcher.dispatcherId,
+        taskId: task.id,
+      });
+      expect(requeued.success).toBe(true);
+      expect(requeued.workerStop?.success).toBe(true);
+      expect(requeued.task?.status).toBe('pending');
+      expect(requeued.task?.lease).toBeUndefined();
+      expect(requeued.dispatcher?.status).toBe('stopped');
+      expect(requeued.dispatcher?.activeAssignments).toEqual([]);
+
+      const persistedTask = await waitForTask(
+        q,
+        task.id,
+        teamName,
+        (item) => item.status === 'pending' && !item.owner && !item.lease,
+      );
+      expect(persistedTask.status).toBe('pending');
+
+      await expect(q.getTaskDispatcher(dispatcher.dispatcherId)).resolves.toMatchObject({
+        dispatcherId: dispatcher.dispatcherId,
+        status: 'stopped',
+        activeAssignments: [],
       });
 
       q.close();

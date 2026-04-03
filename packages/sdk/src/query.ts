@@ -61,6 +61,8 @@ import type {
   TaskDispatchResult,
   TaskDispatcherListOptions,
   TaskDispatcherRecord,
+  TaskDispatcherRequeueInput,
+  TaskDispatcherRequeueResult,
   TaskDispatcherStartInput,
   TaskDispatcherStopResult,
   TaskReleaseOptions,
@@ -537,6 +539,10 @@ export function query(
   interface TaskDispatcherAssignment {
     taskId: string;
     workerId: string;
+    claimedAt?: string;
+    lastHeartbeatAt?: string;
+    leaseExpiresAt?: string;
+    attempts?: number;
   }
 
   interface TaskDispatcherState {
@@ -2020,6 +2026,7 @@ export function query(
       ...(overrides.taskId ? { taskId: overrides.taskId } : {}),
       ...(overrides.workerId ? { workerId: overrides.workerId } : {}),
       ...(overrides.taskStatus ? { taskStatus: overrides.taskStatus } : {}),
+      activeAssignments: [...record.activeAssignments],
     };
     const raw: SDKTaskDispatcherEvent = {
       ...rawBase,
@@ -2058,8 +2065,17 @@ export function query(
   };
 
   const syncTaskDispatcherRecord = (state: TaskDispatcherState): TaskDispatcherRecord => {
-    state.record.activeTaskIds = [...state.activeAssignments.values()].map((assignment) => assignment.taskId);
-    state.record.activeWorkerIds = [...state.activeAssignments.values()].map((assignment) => assignment.workerId);
+    const activeAssignments = [...state.activeAssignments.values()].map((assignment) => ({
+      taskId: assignment.taskId,
+      workerId: assignment.workerId,
+      ...(assignment.claimedAt ? { claimedAt: assignment.claimedAt } : {}),
+      ...(assignment.lastHeartbeatAt ? { lastHeartbeatAt: assignment.lastHeartbeatAt } : {}),
+      ...(assignment.leaseExpiresAt ? { leaseExpiresAt: assignment.leaseExpiresAt } : {}),
+      ...(assignment.attempts !== undefined ? { attempts: assignment.attempts } : {}),
+    }));
+    state.record.activeAssignments = activeAssignments;
+    state.record.activeTaskIds = activeAssignments.map((assignment) => assignment.taskId);
+    state.record.activeWorkerIds = activeAssignments.map((assignment) => assignment.workerId);
     return state.record;
   };
 
@@ -2149,12 +2165,15 @@ export function query(
       const heartbeatNow = new Date();
       for (const assignment of [...state.activeAssignments.values()]) {
         try {
-          getTaskManager(state.record.teamName).heartbeat(
+          const renewedTask = getTaskManager(state.record.teamName).heartbeat(
             assignment.taskId,
             state.record.owner,
             state.record.leaseMs,
             heartbeatNow,
           );
+          assignment.lastHeartbeatAt = heartbeatNow.toISOString();
+          assignment.leaseExpiresAt = renewedTask.lease?.expiresAt;
+          assignment.attempts = renewedTask.lease?.attempts;
         } catch {
           state.activeAssignments.delete(assignment.workerId);
           taskDispatcherByWorkerId.delete(assignment.workerId);
@@ -2194,6 +2213,10 @@ export function query(
         state.activeAssignments.set(dispatched.worker.workerId, {
           taskId: dispatched.task.id,
           workerId: dispatched.worker.workerId,
+          claimedAt: dispatched.task.lease?.claimedAt,
+          lastHeartbeatAt: dispatched.task.lease?.claimedAt,
+          leaseExpiresAt: dispatched.task.lease?.expiresAt,
+          attempts: dispatched.task.lease?.attempts,
         });
         taskDispatcherByWorkerId.set(dispatched.worker.workerId, {
           dispatcherId: state.record.dispatcherId,
@@ -3319,6 +3342,7 @@ export function query(
         maxConcurrentWorkers,
         activeTaskIds: [],
         activeWorkerIds: [],
+        activeAssignments: [],
         startedAt,
       },
       ...(normalizeOptionalString(input.prompt) ? { prompt: normalizeOptionalString(input.prompt) } : {}),
@@ -3349,6 +3373,90 @@ export function query(
       .filter((record) => (!teamName || record.teamName === teamName) && (!status || record.status === status))
       .sort((left, right) => left.startedAt.localeCompare(right.startedAt))
       .map((record) => cloneTaskDispatcherRecord(record));
+  };
+
+  queryObj.getTaskDispatcher = async (dispatcherId: string) => {
+    const normalizedDispatcherId = normalizeOptionalString(dispatcherId);
+    if (!normalizedDispatcherId) {
+      throw new Error('dispatcherId is required to inspect a task dispatcher.');
+    }
+    const state = taskDispatchers.get(normalizedDispatcherId);
+    if (!state) {
+      return null;
+    }
+    return cloneTaskDispatcherRecord(syncTaskDispatcherRecord(state));
+  };
+
+  queryObj.requeueTaskDispatcherAssignment = async (
+    input: TaskDispatcherRequeueInput,
+  ): Promise<TaskDispatcherRequeueResult> => {
+    const dispatcherId = normalizeOptionalString(input.dispatcherId);
+    if (!dispatcherId) {
+      throw new Error('dispatcherId is required to requeue a task dispatcher assignment.');
+    }
+
+    const state = taskDispatchers.get(dispatcherId);
+    if (!state) {
+      return { success: false, dispatcher: null, task: null };
+    }
+    const readTaskRecord = (taskIdToRead: string): TaskRecord | null => {
+      const task = getTaskManager(state.record.teamName).get(taskIdToRead);
+      return task ? toTaskRecord(task, state.record.teamName) : null;
+    };
+
+    const workerId = normalizeOptionalString(input.workerId);
+    const taskId = normalizeOptionalString(input.taskId);
+    if (!workerId && !taskId) {
+      throw new Error('workerId or taskId is required to requeue a task dispatcher assignment.');
+    }
+
+    const assignment = workerId
+      ? state.activeAssignments.get(workerId) ?? null
+      : [...state.activeAssignments.values()].find((item) => item.taskId === taskId) ?? null;
+    if (!assignment) {
+      return {
+        success: false,
+        dispatcher: cloneTaskDispatcherRecord(syncTaskDispatcherRecord(state)),
+        task: taskId ? readTaskRecord(taskId) : null,
+      };
+    }
+
+    const workerStop = input.stopWorker === false ? undefined : await queryObj.stopWorker(assignment.workerId);
+    state.activeAssignments.delete(assignment.workerId);
+    taskDispatcherByWorkerId.delete(assignment.workerId);
+
+    let taskRecord: TaskRecord | null = null;
+    try {
+      taskRecord = toTaskRecord(
+        getTaskManager(state.record.teamName).releaseLease(
+          assignment.taskId,
+          state.record.owner,
+          'pending',
+        ),
+        state.record.teamName,
+      );
+    } catch {
+      taskRecord = readTaskRecord(assignment.taskId);
+    }
+
+    syncTaskDispatcherRecord(state);
+    emitTaskDispatcherOrchestrationEvent(state, 'task_requeued', {
+      taskId: assignment.taskId,
+      workerId: assignment.workerId,
+      taskStatus: 'pending',
+    });
+    if (state.record.status === 'draining' && state.activeAssignments.size === 0) {
+      markTaskDispatcherStopped(state);
+    } else if (state.record.status === 'running') {
+      scheduleTaskDispatcherRun(state, 0);
+    }
+
+    return {
+      success: true,
+      dispatcher: cloneTaskDispatcherRecord(syncTaskDispatcherRecord(state)),
+      task: taskRecord,
+      ...(workerStop ? { workerStop } : {}),
+    };
   };
 
   queryObj.stopTaskDispatcher = async (dispatcherId: string): Promise<TaskDispatcherStopResult> => {
@@ -4541,12 +4649,24 @@ function extractTimelineDispatcherEventsFromTranscriptEntries(
     }
 
     const dispatcherEvent = JSON.parse(JSON.stringify(rawEvent)) as SDKTaskDispatcherEvent;
-    const normalizedDispatcherEvent = Array.isArray(dispatcherEvent.followUps)
-      ? dispatcherEvent
-      : {
-          ...dispatcherEvent,
-          followUps: buildTaskDispatcherFollowUps(dispatcherEvent as Omit<SDKTaskDispatcherEvent, 'followUps'>),
-        };
+    const fallbackActiveAssignments = Array.isArray(dispatcherEvent.activeAssignments)
+      ? dispatcherEvent.activeAssignments
+      : (Array.isArray(dispatcherEvent.activeTaskIds) ? dispatcherEvent.activeTaskIds : []).map((taskId, index) => ({
+          taskId,
+          workerId: Array.isArray(dispatcherEvent.activeWorkerIds)
+            ? (dispatcherEvent.activeWorkerIds[index] ?? `unknown-worker-${index}`)
+            : `unknown-worker-${index}`,
+        }));
+    const normalizedDispatcherEvent = {
+      ...dispatcherEvent,
+      activeAssignments: fallbackActiveAssignments,
+      followUps: Array.isArray(dispatcherEvent.followUps)
+        ? dispatcherEvent.followUps
+        : buildTaskDispatcherFollowUps({
+            ...(dispatcherEvent as Omit<SDKTaskDispatcherEvent, 'followUps'>),
+            activeAssignments: fallbackActiveAssignments,
+          }),
+    };
     events.push({
       kind: 'task_dispatcher',
       sessionId,
