@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { describe, expect, it, beforeAll, afterAll } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
@@ -29,15 +29,22 @@ describe('sandbox-adapter', () => {
       dangerouslyDisableSandbox: true,
     });
     expect(policy.enforce).toBe(false);
+    expect(policy.executionEngine).toBe('none');
+    expect(policy.enforcedFeatures).toEqual({
+      network: false,
+      writePaths: false,
+      readPaths: false,
+    });
     expect(policy.bypassRequested).toBe(true);
     expect(policy.bypassAllowed).toBe(true);
   });
 
-  it('maps allow/deny write paths to absolute paths', () => {
+  it('maps read/write sandbox paths to absolute paths', () => {
     const policy = buildBashSandboxPolicy({
       sandbox: {
         enabled: true,
         filesystem: {
+          denyRead: ['./blocked'],
           allowWrite: ['./allowed'],
           denyWrite: ['./blocked'],
         },
@@ -46,6 +53,13 @@ describe('sandbox-adapter', () => {
     });
 
     expect(policy.enforce).toBe(true);
+    expect(policy.executionEngine).toBe(process.platform === 'darwin' ? 'darwin-sandbox-exec' : 'none');
+    expect(policy.enforcedFeatures).toEqual({
+      network: false,
+      writePaths: process.platform === 'darwin',
+      readPaths: false,
+    });
+    expect(policy.denyReadPaths).toEqual([join(tmpDir, 'blocked')]);
     expect(policy.allowWritePaths).toEqual([join(tmpDir, 'allowed')]);
     expect(policy.denyWritePaths).toEqual([join(tmpDir, 'blocked')]);
   });
@@ -112,11 +126,11 @@ describe('sandbox preflight via Bash tool', () => {
     });
 
     const result = await bash.execute({
-      command: 'echo "$OPEN_AGENT_SANDBOX|$OPEN_AGENT_SANDBOX_NETWORK_DISABLED"',
+      command: 'echo "$OPEN_AGENT_SANDBOX|$OPEN_AGENT_SANDBOX_NETWORK_DISABLED|$OPEN_AGENT_SANDBOX_EXECUTION_ENGINE|$OPEN_AGENT_SANDBOX_ENFORCED_FEATURES"',
       [BASH_SANDBOX_POLICY_FIELD]: policy,
     }, ctx());
 
-    expect(result).toContain('1|1');
+    expect(result).toContain(`1|1|${policy.executionEngine}|network`);
   });
 
   it('blocks network commands when network is disabled', async () => {
@@ -212,5 +226,24 @@ describe('sandbox preflight via Bash tool', () => {
     expect(result).not.toContain('write-allowed');
     expect(result).toContain('exit code');
     expect(() => readFileSync(blockedPath, 'utf-8')).toThrow();
+  });
+
+  it('surfaces denyRead as policy metadata without claiming execution enforcement', async () => {
+    const blockedPath = join(tmpDir, 'blocked', 'secret.txt');
+    mkdirSync(join(tmpDir, 'blocked'), { recursive: true });
+    writeFileSync(blockedPath, 'top-secret', 'utf-8');
+
+    const policy = buildBashSandboxPolicy({
+      sandbox: {
+        enabled: true,
+        filesystem: {
+          denyRead: [join(tmpDir, 'blocked')],
+        },
+      },
+      cwd: tmpDir,
+    });
+
+    expect(policy.denyReadPaths).toEqual([join(tmpDir, 'blocked')]);
+    expect(policy.enforcedFeatures.readPaths).toBe(false);
   });
 });

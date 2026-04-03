@@ -438,6 +438,9 @@ export class PermissionEngine {
 
     // Sandbox: auto-allow only non-destructive Bash if explicitly enabled.
     if (this.sandbox.autoAllowBashIfSandboxed && request.toolName === 'Bash') {
+      if (Array.isArray(fs?.denyRead) && fs.denyRead.length > 0) {
+        return null;
+      }
       const cmd = String((inp?.command ?? ''));
       const classification = classifyBashCommand(cmd);
       if (classification.level === 'read-only' || classification.level === 'workspace-write') {

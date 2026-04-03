@@ -61,7 +61,14 @@ export interface SandboxConfig {
 
 export interface BashSandboxExecutionPolicy {
   enforce: boolean;
+  executionEngine: 'none' | 'darwin-sandbox-exec';
+  enforcedFeatures: {
+    network: boolean;
+    writePaths: boolean;
+    readPaths: boolean;
+  };
   allowWritePaths: string[];
+  denyReadPaths: string[];
   denyWritePaths: string[];
   networkDisabled: boolean;
   bypassRequested: boolean;

@@ -405,6 +405,22 @@ describe('PermissionEngine', () => {
 
       expect(engine.evaluate(req('Bash', { command: 'curl https://example.com' })).behavior).toBe('ask');
     });
+
+    it('does not auto-allow bash when denyRead sandbox rules are configured', () => {
+      const engine = new PermissionEngine({
+        mode: 'default',
+        sandbox: {
+          enabled: true,
+          autoAllowBashIfSandboxed: true,
+          filesystem: { denyRead: ['/secret'] },
+        },
+      });
+
+      expect(engine.evaluate(req('Bash', { command: 'cat /tmp/example.txt' })).behavior).toBe('allow');
+      expect(engine.evaluate(req('Bash', {
+        command: `python3 -c "print(open('/secret/data.txt').read())"`,
+      })).behavior).toBe('ask');
+    });
   });
 
   // ---------------------------------------------------------------------------

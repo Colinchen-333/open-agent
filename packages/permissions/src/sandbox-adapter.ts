@@ -1,3 +1,4 @@
+import { existsSync } from 'fs';
 import { isAbsolute, resolve } from 'path';
 import type { BashSandboxExecutionPolicy, SandboxConfig } from './types.js';
 
@@ -15,11 +16,19 @@ export interface BuildBashSandboxPolicyInput {
 export function buildBashSandboxPolicy(input: BuildBashSandboxPolicyInput): BashSandboxExecutionPolicy {
   const sandbox = input.sandbox;
   const bypassRequested = input.dangerouslyDisableSandbox === true;
+  const executionEngine = resolveBashSandboxExecutionEngine();
 
   if (!sandbox?.enabled) {
     return {
       enforce: false,
+      executionEngine: 'none',
+      enforcedFeatures: {
+        network: false,
+        writePaths: false,
+        readPaths: false,
+      },
       allowWritePaths: [],
+      denyReadPaths: [],
       denyWritePaths: [],
       networkDisabled: false,
       bypassRequested,
@@ -28,8 +37,17 @@ export function buildBashSandboxPolicy(input: BuildBashSandboxPolicyInput): Bash
   }
 
   const allowWritePaths = normalizePaths(sandbox.filesystem?.allowWrite, input.cwd);
+  const denyReadPaths = normalizePaths(sandbox.filesystem?.denyRead, input.cwd);
   const denyWritePaths = normalizePaths(sandbox.filesystem?.denyWrite, input.cwd);
   const networkDisabled = isNetworkDisabled(sandbox.network);
+  const enforcedFeatures = {
+    network: executionEngine === 'darwin-sandbox-exec' && networkDisabled,
+    writePaths: executionEngine === 'darwin-sandbox-exec' && (allowWritePaths.length > 0 || denyWritePaths.length > 0),
+    // `sandbox-exec` does not provide a reliable partial read allow/deny model while also
+    // keeping general command execution usable, so we only expose read restrictions as
+    // policy metadata for now instead of pretending they are execution-enforced.
+    readPaths: false,
+  };
 
   const bypassAllowed = bypassRequested && (
     input.bypassApproved === true || input.permissionBehavior === 'allow'
@@ -37,7 +55,10 @@ export function buildBashSandboxPolicy(input: BuildBashSandboxPolicyInput): Bash
 
   return {
     enforce: true,
+    executionEngine,
+    enforcedFeatures,
     allowWritePaths,
+    denyReadPaths,
     denyWritePaths,
     networkDisabled,
     bypassRequested,
@@ -55,7 +76,13 @@ export function isBashSandboxExecutionPolicy(value: unknown): value is BashSandb
   const candidate = value as Partial<BashSandboxExecutionPolicy>;
   return (
     typeof candidate.enforce === 'boolean' &&
+    (candidate.executionEngine === 'none' || candidate.executionEngine === 'darwin-sandbox-exec') &&
+    !!candidate.enforcedFeatures &&
+    typeof candidate.enforcedFeatures.network === 'boolean' &&
+    typeof candidate.enforcedFeatures.writePaths === 'boolean' &&
+    typeof candidate.enforcedFeatures.readPaths === 'boolean' &&
     Array.isArray(candidate.allowWritePaths) &&
+    Array.isArray(candidate.denyReadPaths) &&
     Array.isArray(candidate.denyWritePaths) &&
     typeof candidate.networkDisabled === 'boolean' &&
     typeof candidate.bypassRequested === 'boolean' &&
@@ -84,4 +111,11 @@ function isNetworkDisabled(network: SandboxConfig['network'] | undefined): boole
     return true;
   }
   return false;
+}
+
+function resolveBashSandboxExecutionEngine(): BashSandboxExecutionPolicy['executionEngine'] {
+  if (process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec')) {
+    return 'darwin-sandbox-exec';
+  }
+  return 'none';
 }

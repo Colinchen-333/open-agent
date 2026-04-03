@@ -27,7 +27,14 @@ const persistentCwdBySession = new Map<string, string>();
 
 interface BashSandboxExecutionPolicy {
   enforce: boolean;
+  executionEngine: 'none' | 'darwin-sandbox-exec';
+  enforcedFeatures: {
+    network: boolean;
+    writePaths: boolean;
+    readPaths: boolean;
+  };
   allowWritePaths: string[];
+  denyReadPaths: string[];
   denyWritePaths: string[];
   networkDisabled: boolean;
   bypassRequested: boolean;
@@ -284,8 +291,17 @@ function readSandboxPolicy(
   if (typeof policy.enforce !== 'boolean') return undefined;
   return {
     enforce: policy.enforce,
+    executionEngine: policy.executionEngine === 'darwin-sandbox-exec' ? 'darwin-sandbox-exec' : 'none',
+    enforcedFeatures: {
+      network: policy.enforcedFeatures?.network === true,
+      writePaths: policy.enforcedFeatures?.writePaths === true,
+      readPaths: policy.enforcedFeatures?.readPaths === true,
+    },
     allowWritePaths: Array.isArray(policy.allowWritePaths)
       ? policy.allowWritePaths.filter((path): path is string => typeof path === 'string')
+      : [],
+    denyReadPaths: Array.isArray(policy.denyReadPaths)
+      ? policy.denyReadPaths.filter((path): path is string => typeof path === 'string')
       : [],
     denyWritePaths: Array.isArray(policy.denyWritePaths)
       ? policy.denyWritePaths.filter((path): path is string => typeof path === 'string')
@@ -336,8 +352,15 @@ function buildSandboxEnv(policy: BashSandboxExecutionPolicy | undefined): Record
   if (!policy) return {};
   return {
     OPEN_AGENT_SANDBOX: policy.enforce ? '1' : '0',
+    OPEN_AGENT_SANDBOX_EXECUTION_ENGINE: policy.executionEngine,
+    OPEN_AGENT_SANDBOX_ENFORCED_FEATURES: [
+      policy.enforcedFeatures.network ? 'network' : '',
+      policy.enforcedFeatures.writePaths ? 'write-paths' : '',
+      policy.enforcedFeatures.readPaths ? 'read-paths' : '',
+    ].filter(Boolean).join(','),
     OPEN_AGENT_SANDBOX_NETWORK_DISABLED: policy.networkDisabled ? '1' : '0',
     OPEN_AGENT_SANDBOX_ALLOW_WRITE_PATHS: policy.allowWritePaths.join(':'),
+    OPEN_AGENT_SANDBOX_DENY_READ_PATHS: policy.denyReadPaths.join(':'),
     OPEN_AGENT_SANDBOX_DENY_WRITE_PATHS: policy.denyWritePaths.join(':'),
     OPEN_AGENT_SANDBOX_BYPASS_REQUESTED: policy.bypassRequested ? '1' : '0',
     OPEN_AGENT_SANDBOX_BYPASS_ALLOWED: policy.bypassAllowed ? '1' : '0',
@@ -348,7 +371,7 @@ function wrapWithSandboxExec(
   command: string[],
   policy: BashSandboxExecutionPolicy | undefined,
 ): { command: string; args: string[] } {
-  if (!policy?.enforce || policy.bypassRequested || process.platform !== 'darwin') {
+  if (!policy?.enforce || policy.bypassRequested || policy.executionEngine !== 'darwin-sandbox-exec') {
     return { command: command[0]!, args: command.slice(1) };
   }
   if (!existsSync(DARWIN_SANDBOX_EXEC)) {
