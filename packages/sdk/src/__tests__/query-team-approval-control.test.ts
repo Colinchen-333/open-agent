@@ -21,6 +21,7 @@ describe('query() team approval control plane', () => {
         content: 'Approve the planned refactor.',
         summary: 'plan approval',
       });
+      expect(request.messageId).toBeTruthy();
       expect(request.requestId).toBeTruthy();
 
       const pending = await q.listPendingTeamApprovals({
@@ -94,6 +95,7 @@ describe('query() team approval control plane', () => {
         content: 'Please stop after the current task.',
         summary: 'shutdown worker-2',
       });
+      expect(request.messageId).toBeTruthy();
 
       const pending = await q.listPendingTeamApprovals({
         teamName,

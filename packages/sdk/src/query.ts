@@ -520,6 +520,37 @@ export function query(
     }
     return null;
   };
+  const readTeamInboxFromStore = (
+    teamName: string,
+    memberName: string,
+    options: {
+      unreadOnly?: boolean;
+      after?: string;
+      limit?: number;
+    } = {},
+  ): TeamMessageRecord[] => {
+    const snapshot = appStore.getState().inboxes[teamName]?.[memberName];
+    if (!snapshot) {
+      return [];
+    }
+    return snapshot.messages
+      .filter((message) => !options.unreadOnly || !message.readAt)
+      .filter((message) => !options.after || message.messageId > options.after)
+      .slice(0, options.limit ?? Number.POSITIVE_INFINITY)
+      .map((message) => ({
+        messageId: message.messageId,
+        teamName,
+        type: message.type as TeamMessageRecord['type'],
+        from: message.from,
+        ...(message.to ? { to: message.to } : {}),
+        content: message.content,
+        ...(message.summary ? { summary: message.summary } : {}),
+        timestamp: message.timestamp,
+        ...(message.readAt ? { readAt: message.readAt } : {}),
+        ...(message.requestId ? { requestId: message.requestId } : {}),
+        ...(typeof message.approve === 'boolean' ? { approve: message.approve } : {}),
+      }));
+  };
   const isTeamApprovalRequestType = (type: TeamMessage['type']): type is TeamApprovalRecord['requestType'] =>
     type === 'shutdown_request' || type === 'plan_approval_request';
   const toTeamApprovalRecord = (
@@ -2753,6 +2784,15 @@ export function query(
 
   queryObj.readTeamInbox = async (options: TeamInboxOptions) => {
     const teamName = resolveTeamName(options?.teamName);
+    const useStoreOnly = options?.consume === false && options?.acknowledge !== true;
+    if (useStoreOnly) {
+      syncTeamInboxMemberSnapshot(teamName, options.memberName);
+      return readTeamInboxFromStore(teamName, options.memberName, {
+        unreadOnly: options?.unreadOnly,
+        after: options?.after,
+        limit: options?.limit,
+      });
+    }
     const entries = sdkTeamManager.readInboxEntries(teamName, options.memberName, {
       consume: options?.consume !== false,
       acknowledge: options?.acknowledge,
@@ -2777,9 +2817,7 @@ export function query(
 
   queryObj.listPendingTeamApprovals = async (options: TeamApprovalListOptions) => {
     const teamName = resolveTeamName(options?.teamName);
-    if (!appStore.getState().inboxes[teamName]?.[options.memberName]) {
-      syncTeamInboxMemberSnapshot(teamName, options.memberName);
-    }
+    syncTeamInboxMemberSnapshot(teamName, options.memberName);
     const approvals = appStore.getState().approvals[teamName]?.[options.memberName] ?? [];
     return approvals
       .filter((entry) => !options?.unreadOnly || !entry.readAt)
@@ -2841,9 +2879,7 @@ export function query(
 
   queryObj.getTeamInboxCount = async (memberName: string, options?: { teamName?: string }) => {
     const teamName = resolveTeamName(options?.teamName);
-    if (!appStore.getState().inboxes[teamName]?.[memberName]) {
-      syncTeamInboxMemberSnapshot(teamName, memberName);
-    }
+    syncTeamInboxMemberSnapshot(teamName, memberName);
     return appStore.getState().inboxes[teamName]?.[memberName]?.unreadCount ?? 0;
   };
 
