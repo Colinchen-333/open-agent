@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'bun:test';
 import {
+  appendTimelineControlPlane,
   createDefaultAppState,
+  removeDispatcherControlPlane,
   setActiveTeamControlPlane,
   syncMcpServerState,
   syncRuntimeControlPlane,
   syncSessionControlPlane,
   syncToolRegistryState,
+  upsertDispatcherControlPlane,
 } from '../index.js';
 
 describe('state control plane helpers', () => {
@@ -90,5 +93,41 @@ describe('state control plane helpers', () => {
       dynamicTools: 1,
     });
     expect(withTeam.activeTeamName).toBe('alpha');
+  });
+
+  it('upserts dispatchers and dedupes timeline items by key', () => {
+    const state = createDefaultAppState();
+    const withDispatcher = upsertDispatcherControlPlane(state, {
+      dispatcherId: 'dispatcher-1',
+      teamName: 'alpha',
+      status: 'running',
+      startedAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      payload: { dispatcherId: 'dispatcher-1' },
+    });
+    const withTimeline = appendTimelineControlPlane(withDispatcher, {
+      key: 'dispatcher:dispatcher-1:2026-01-01T00:00:00.000Z',
+      kind: 'task_dispatcher',
+      sessionId: 'session-1',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      cursor: 'dispatcher:dispatcher-1:2026-01-01T00:00:00.000Z',
+      timelineId: 'dispatcher:dispatcher-1:2026-01-01T00:00:00.000Z',
+      payload: { type: 'started' },
+    });
+    const deduped = appendTimelineControlPlane(withTimeline, {
+      key: 'dispatcher:dispatcher-1:2026-01-01T00:00:00.000Z',
+      kind: 'task_dispatcher',
+      sessionId: 'session-1',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      cursor: 'dispatcher:dispatcher-1:2026-01-01T00:00:00.000Z',
+      timelineId: 'dispatcher:dispatcher-1:2026-01-01T00:00:00.000Z',
+      payload: { type: 'started-again' },
+    });
+    const removed = removeDispatcherControlPlane(deduped, 'dispatcher-1');
+
+    expect(withDispatcher.dispatchers['dispatcher-1']?.teamName).toBe('alpha');
+    expect(deduped.timeline).toHaveLength(1);
+    expect(deduped.timeline[0]?.payload).toEqual({ type: 'started-again' });
+    expect(removed.dispatchers['dispatcher-1']).toBeUndefined();
   });
 });

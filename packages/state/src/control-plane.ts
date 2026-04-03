@@ -2,10 +2,12 @@ import type { ToolDefinition } from '@open-agent/tools';
 import type { ThinkingConfig } from '@open-agent/core';
 import type {
   AppState,
+  DispatcherControlPlaneState,
   McpServerStatus,
   RuntimeDiagnosticState,
   RuntimeHookState,
   RuntimePluginState,
+  TimelineControlPlaneItemState,
 } from './app-state.js';
 
 export interface RuntimeControlPlaneSnapshotInput {
@@ -92,5 +94,51 @@ export function setActiveTeamControlPlane(
   return {
     ...state,
     activeTeamName,
+  };
+}
+
+export function upsertDispatcherControlPlane(
+  state: AppState,
+  dispatcher: DispatcherControlPlaneState,
+): AppState {
+  return {
+    ...state,
+    dispatchers: {
+      ...state.dispatchers,
+      [dispatcher.dispatcherId]: {
+        ...dispatcher,
+      },
+    },
+  };
+}
+
+export function removeDispatcherControlPlane(
+  state: AppState,
+  dispatcherId: string,
+): AppState {
+  if (!(dispatcherId in state.dispatchers)) {
+    return state;
+  }
+  const next = { ...state.dispatchers };
+  delete next[dispatcherId];
+  return {
+    ...state,
+    dispatchers: next,
+  };
+}
+
+export function appendTimelineControlPlane(
+  state: AppState,
+  item: TimelineControlPlaneItemState,
+  limit = 200,
+): AppState {
+  const dedupeKey = item.key;
+  const filtered = state.timeline.filter((entry) => entry.key !== dedupeKey);
+  const nextTimeline = [...filtered, {
+    ...item,
+  }];
+  return {
+    ...state,
+    timeline: nextTimeline.slice(-limit),
   };
 }

@@ -16,12 +16,14 @@ import type {
 import { ConversationLoop, SessionManager, buildSystemPrompt, FileCheckpoint, isGitRepository, buildTaskOrchestrationTemplates, loadPromptContext, buildCoordinatorContext } from '@open-agent/core';
 import {
   createStore,
+  appendTimelineControlPlane,
   createDefaultAppState,
   setActiveTeamControlPlane,
   syncMcpServerState,
   syncRuntimeControlPlane,
   syncSessionControlPlane,
   syncToolRegistryState,
+  upsertDispatcherControlPlane,
 } from '@open-agent/state';
 import type { AppState } from '@open-agent/state';
 import { AgentLoader, AgentExecutor, TeamManager, TaskManager } from '@open-agent/agents';
@@ -1569,6 +1571,36 @@ export function query(
 
   syncAppRuntimeControlPlane();
 
+  const upsertDispatcherStoreRecord = (record: TaskDispatcherRecord) => {
+    appStore.setState((prev) => upsertDispatcherControlPlane(prev, {
+      dispatcherId: record.dispatcherId,
+      teamName: record.teamName,
+      status: record.status,
+      startedAt: record.startedAt,
+      updatedAt: record.updatedAt,
+      payload: cloneTaskDispatcherRecord(record),
+    }));
+  };
+
+  const appendTimelineStoreItem = (item: SDKTimelineItem) => {
+    const key = item.cursor ?? item.timelineId ?? `${item.kind}:${item.timestamp}:${item.sessionId}`;
+    appStore.setState((prev) => appendTimelineControlPlane(prev, {
+      key,
+      kind: item.kind,
+      sessionId: item.sessionId,
+      timestamp: item.timestamp,
+      ...(item.cursor ? { cursor: item.cursor } : {}),
+      ...(item.timelineId ? { timelineId: item.timelineId } : {}),
+      payload: JSON.parse(JSON.stringify(item)),
+    }));
+  };
+
+  const readTimelineStoreItems = (teamName?: string): SDKTimelineItem[] => (
+    appStore.getState().timeline
+      .map((entry) => entry.payload as SDKTimelineItem)
+      .filter((item) => !teamName || item.teamName === teamName)
+  );
+
   const loop = new ConversationLoop({
     provider,
     tools: new Map(toolRegistry.list().map((t) => [t.name, t])),
@@ -2157,6 +2189,7 @@ export function query(
       dispatcherEvent: raw,
       raw,
     };
+    appendTimelineStoreItem(toTimelineOrchestrationItem(event));
     if (sessionMgr) {
       try {
         const transcriptMessage: PersistedTaskDispatcherEventMessage = {
@@ -2190,6 +2223,7 @@ export function query(
     state.record.activeAssignments = activeAssignments;
     state.record.activeTaskIds = activeAssignments.map((assignment) => assignment.taskId);
     state.record.activeWorkerIds = activeAssignments.map((assignment) => assignment.workerId);
+    upsertDispatcherStoreRecord(state.record);
     return state.record;
   };
 
@@ -2721,6 +2755,12 @@ export function query(
     }
     if (options.includeOrchestration === true) {
       items.push(
+        ...readTimelineStoreItems(options.teamName)
+          .filter((item) => item.kind !== 'team_message' && item.kind !== 'task_notification')
+          .filter((item) => !options.after || (item.cursor ?? item.timestamp) > options.after)
+          .slice(0, options.limit ?? Number.POSITIVE_INFINITY),
+      );
+      items.push(
         ...extractTimelineDispatcherEventsFromTranscriptEntries(
           transcriptEntries,
           options.orchestrationTypes,
@@ -2739,7 +2779,7 @@ export function query(
           .slice(0, options.limit ?? Number.POSITIVE_INFINITY),
       );
     }
-    return sortTimelineItems(items);
+    return sortTimelineItems(dedupeTimelineItems(items));
   };
 
   queryObj.subscribeOrchestrationEvents = (
@@ -3571,6 +3611,9 @@ export function query(
     const teamName = normalizeOptionalString(options?.teamName);
     const status = options?.status;
     const merged = new Map<string, TaskDispatcherRecord>();
+    for (const record of Object.values(appStore.getState().dispatchers)) {
+      merged.set(record.dispatcherId, cloneTaskDispatcherRecord(record.payload as TaskDispatcherRecord));
+    }
     for (const record of readPersistedTaskDispatcherRecords()) {
       merged.set(record.dispatcherId, cloneTaskDispatcherRecord(record));
     }
@@ -3588,11 +3631,7 @@ export function query(
     if (!normalizedDispatcherId) {
       throw new Error('dispatcherId is required to inspect a task dispatcher.');
     }
-    const state = taskDispatchers.get(normalizedDispatcherId);
-    if (!state) {
-      return readPersistedTaskDispatcherRecords().find((record) => record.dispatcherId === normalizedDispatcherId) ?? null;
-    }
-    return cloneTaskDispatcherRecord(syncTaskDispatcherRecord(state));
+    return (await queryObj.listTaskDispatchers()).find((record) => record.dispatcherId === normalizedDispatcherId) ?? null;
   };
 
   queryObj.inspectTaskDispatcherHealth = async (
@@ -5213,6 +5252,17 @@ function buildTimelineTaskNotificationFromOrchestrationEvent(
 
 function sortTimelineItems(items: SDKTimelineItem[]): SDKTimelineItem[] {
   return [...items].sort((left, right) => compareTimelineTimestamps(left.timestamp, right.timestamp));
+}
+
+function dedupeTimelineItems(items: SDKTimelineItem[]): SDKTimelineItem[] {
+  const deduped = new Map<string, SDKTimelineItem>();
+  for (const item of items) {
+    const key = item.cursor
+      ?? item.timelineId
+      ?? `${item.kind}:${item.timestamp}:${item.sessionId}:${item.teamName ?? ''}:${item.workerId ?? ''}`;
+    deduped.set(key, item);
+  }
+  return [...deduped.values()];
 }
 
 function buildTaskNotificationFingerprint(input: {

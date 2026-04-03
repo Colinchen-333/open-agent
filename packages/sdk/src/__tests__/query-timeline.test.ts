@@ -252,12 +252,16 @@ describe('query() timeline control plane', () => {
         item.kind === 'task_dispatcher'
         && item.orchestrationEvent?.dispatcherId === dispatcher.dispatcherId,
       );
+      const dispatcherTimelineIds = dispatcherItems
+        .map((item) => item.timelineId)
+        .filter((value): value is string => typeof value === 'string');
 
       expect(dispatcherItems.some((item) => item.orchestrationEvent?.dispatcherEvent?.type === 'started')).toBe(true);
       expect(dispatcherItems.some((item) => item.orchestrationEvent?.dispatcherEvent?.type === 'dispatched')).toBe(true);
       expect(dispatcherItems.some((item) => item.orchestrationEvent?.dispatcherEvent?.type === 'task_completed')).toBe(true);
       expect(dispatcherItems.some((item) => item.orchestrationEvent?.dispatcherEvent?.type === 'stopped')).toBe(true);
       expect(dispatcherItems.every((item) => item.timelineId?.includes(dispatcher.dispatcherId))).toBe(true);
+      expect(new Set(dispatcherTimelineIds).size).toBe(dispatcherTimelineIds.length);
 
       const dispatchedItem = dispatcherItems.find((item) =>
         item.orchestrationEvent?.dispatcherEvent?.type === 'dispatched'

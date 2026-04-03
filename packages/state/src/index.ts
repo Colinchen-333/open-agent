@@ -50,6 +50,8 @@ export {
   type RuntimeDiagnosticState,
   type RuntimeCapabilitySummaryState,
   type RuntimeControlPlaneState,
+  type DispatcherControlPlaneState,
+  type TimelineControlPlaneItemState,
   createDefaultAppState,
 } from './app-state.js';
 
@@ -59,5 +61,8 @@ export {
   syncMcpServerState,
   syncRuntimeControlPlane,
   setActiveTeamControlPlane,
+  upsertDispatcherControlPlane,
+  removeDispatcherControlPlane,
+  appendTimelineControlPlane,
   type RuntimeControlPlaneSnapshotInput,
 } from './control-plane.js';

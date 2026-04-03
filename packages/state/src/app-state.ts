@@ -89,6 +89,25 @@ export interface RuntimeControlPlaneState {
   capabilitySummary: RuntimeCapabilitySummaryState;
 }
 
+export interface DispatcherControlPlaneState {
+  dispatcherId: string;
+  teamName: string;
+  status: string;
+  startedAt: string;
+  updatedAt: string;
+  payload: unknown;
+}
+
+export interface TimelineControlPlaneItemState {
+  key: string;
+  kind: string;
+  sessionId: string;
+  timestamp: string;
+  cursor?: string;
+  timelineId?: string;
+  payload: unknown;
+}
+
 export interface AppState {
   // Session
   sessionId: string;
@@ -115,6 +134,8 @@ export interface AppState {
 
   // Runtime control plane
   runtime: RuntimeControlPlaneState;
+  dispatchers: Record<string, DispatcherControlPlaneState>;
+  timeline: TimelineControlPlaneItemState[];
 
   // Settings
   thinkingConfig: ThinkingConfig;
@@ -151,6 +172,8 @@ export function createDefaultAppState(overrides: Partial<AppState> = {}): AppSta
         dynamicTools: 0,
       },
     },
+    dispatchers: {},
+    timeline: [],
     thinkingConfig: { type: 'adaptive' },
     verbose: false,
     ...overrides,
