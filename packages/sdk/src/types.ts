@@ -613,11 +613,22 @@ export interface SDKTaskDispatcherEvent {
   workerType: 'worker' | 'verifier';
   status: TaskDispatcherRecord['status'];
   timestamp: string;
+  pollIntervalMs: number;
+  leaseMs: number;
+  maxConcurrentWorkers: number;
+  name?: string;
+  prompt?: string;
+  model?: string;
+  maxTurns?: number;
+  mode?: string;
+  cwd?: string;
+  isolation?: 'worktree';
   taskId?: string;
   workerId?: string;
   taskStatus?: TaskRecord['status'];
   activeTaskIds: string[];
   activeWorkerIds: string[];
+  followUps: WorkerFollowUpSuggestion[];
 }
 
 export type SDKOrchestrationEventKind = 'worker_lifecycle' | 'worker_tool' | 'task_dispatcher';
@@ -696,10 +707,12 @@ export type FollowUpExecutable =
   | NonNullable<SDKPromptSuggestionMessage['scaffold']>;
 
 export interface FollowUpExecutionResult {
-  kind: 'worker' | 'team_message';
+  kind: 'worker' | 'team_message' | 'task_dispatcher';
   followUpKind: NonNullable<SDKPromptSuggestionMessage['scaffold']>['kind'];
   worker?: WorkerRecord;
   teamMessage?: TeamMessageRecord;
+  dispatcher?: TaskDispatcherRecord;
+  dispatcherStop?: TaskDispatcherStopResult;
 }
 
 /**

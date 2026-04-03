@@ -435,7 +435,7 @@ export interface SDKPromptSuggestionMessage {
     resume_task_id?: string;
     task_status?: TaskNotificationStatus;
     action?: {
-      tool: 'Task' | 'SendMessage';
+      tool: 'Task' | 'SendMessage' | 'TaskDispatcher';
       arguments: Record<string, unknown>;
     };
   };

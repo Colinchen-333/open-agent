@@ -276,6 +276,10 @@ describe('query().subscribeOrchestrationEvents()', () => {
       expect(started.value.kind).toBe('task_dispatcher');
       expect(started.value.dispatcherId).toBe(dispatcher.dispatcherId);
       expect(started.value.dispatcherEvent?.type).toBe('started');
+      expect(started.value.dispatcherEvent?.followUps).toHaveLength(1);
+      expect(started.value.dispatcherEvent?.followUps[0]?.scaffold.kind).toBe('generic_followup');
+      expect(started.value.dispatcherEvent?.followUps[0]?.scaffold.action?.tool).toBe('TaskDispatcher');
+      expect(started.value.dispatcherEvent?.followUps[0]?.scaffold.action?.arguments['action']).toBe('stop');
 
       expect(dispatched.done).toBe(false);
       expect(dispatched.value.kind).toBe('task_dispatcher');
@@ -295,6 +299,10 @@ describe('query().subscribeOrchestrationEvents()', () => {
       expect(stopped.done).toBe(false);
       expect(stopped.value.dispatcherEvent?.type).toBe('stopped');
       expect(stopped.value.dispatcherEvent?.status).toBe('stopped');
+      expect(stopped.value.dispatcherEvent?.followUps).toHaveLength(1);
+      expect(stopped.value.dispatcherEvent?.followUps[0]?.scaffold.kind).toBe('generic_followup');
+      expect(stopped.value.dispatcherEvent?.followUps[0]?.scaffold.action?.tool).toBe('TaskDispatcher');
+      expect(stopped.value.dispatcherEvent?.followUps[0]?.scaffold.action?.arguments['action']).toBe('start');
 
       await iterator.return?.();
       q.close();

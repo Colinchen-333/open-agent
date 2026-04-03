@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { homedir, tmpdir } from 'os';
 import { join } from 'path';
 import type { ChatOptions, LLMProvider, Message, StreamEvent } from '@open-agent/providers';
-import type { Query, WorkerRecord } from '../types.js';
+import type { Query, WorkerRecord, TaskDispatcherRecord } from '../types.js';
 import { query } from '../query.js';
 
 function makeTempHome(prefix: string): { cwd: string; cleanup(): void } {
@@ -94,6 +94,22 @@ async function waitForWorkerStatus(
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
+}
+
+async function waitForDispatcher(
+  q: Query,
+  dispatcherId: string,
+  predicate: (dispatcher: TaskDispatcherRecord) => boolean,
+): Promise<TaskDispatcherRecord> {
+  const timeoutAt = Date.now() + 2_000;
+  while (Date.now() < timeoutAt) {
+    const dispatcher = (await q.listTaskDispatchers()).find((item) => item.dispatcherId === dispatcherId);
+    if (dispatcher && predicate(dispatcher)) {
+      return dispatcher;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for dispatcher ${dispatcherId}`);
 }
 
 describe('query() follow-up dispatcher', () => {
@@ -198,6 +214,72 @@ describe('query() follow-up dispatcher', () => {
       const inbox = await q.readTeamInbox({ teamName, memberName: 'alice', consume: true });
       expect(inbox).toHaveLength(1);
       expect(inbox[0]?.content).toBe('Continue from the partial worker result.');
+      q.close();
+    } finally {
+      temp.cleanup();
+    }
+  });
+
+  it('executes TaskDispatcher scaffolds through the same follow-up entrypoint', async () => {
+    const temp = makeTempHome('open-agent-sdk-follow-up-dispatcher-');
+
+    try {
+      const q = query('follow-up dispatcher', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeStaticProvider(),
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+      });
+
+      const teamName = `alpha-team-${Date.now()}`;
+      await q.createTeam({ name: teamName, setActive: true });
+      await q.createTask({
+        teamName,
+        subject: 'Dispatch with follow-up',
+        description: 'Use follow-up to manage dispatcher lifecycle.',
+        priority: 10,
+      });
+
+      const started = await q.executeFollowUp({
+        kind: 'generic_followup',
+        action: {
+          tool: 'TaskDispatcher',
+          arguments: {
+            action: 'start',
+            dispatcher_id: `dispatcher-${Date.now()}`,
+            owner: 'dispatcher-owner',
+            team_name: teamName,
+            poll_interval_ms: 25,
+            lease_ms: 500,
+            max_concurrent_workers: 1,
+          },
+        },
+      });
+      expect(started.kind).toBe('task_dispatcher');
+      expect(started.dispatcher?.status).toBe('running');
+
+      const activeDispatcher = await waitForDispatcher(
+        q,
+        started.dispatcher!.dispatcherId,
+        (dispatcher) => dispatcher.status === 'running' && Boolean(dispatcher.lastDispatchAt),
+      );
+      expect(activeDispatcher.teamName).toBe(teamName);
+
+      const stopped = await q.executeFollowUp({
+        kind: 'generic_followup',
+        action: {
+          tool: 'TaskDispatcher',
+          arguments: {
+            action: 'stop',
+            dispatcher_id: started.dispatcher!.dispatcherId,
+          },
+        },
+      });
+      expect(stopped.kind).toBe('task_dispatcher');
+      expect(stopped.dispatcherStop?.success).toBe(true);
+      expect(stopped.dispatcher?.dispatcherId).toBe(started.dispatcher!.dispatcherId);
+
       q.close();
     } finally {
       temp.cleanup();

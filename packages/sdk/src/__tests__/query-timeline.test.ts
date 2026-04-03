@@ -258,6 +258,26 @@ describe('query() timeline control plane', () => {
       expect(dispatcherItems.some((item) => item.orchestrationEvent?.dispatcherEvent?.type === 'task_completed')).toBe(true);
       expect(dispatcherItems.some((item) => item.orchestrationEvent?.dispatcherEvent?.type === 'stopped')).toBe(true);
       expect(dispatcherItems.every((item) => item.timelineId?.includes(dispatcher.dispatcherId))).toBe(true);
+
+      const stoppedItem = dispatcherItems.find((item) =>
+        item.orchestrationEvent?.dispatcherEvent?.type === 'stopped'
+      );
+      expect(stoppedItem?.orchestrationEvent?.dispatcherEvent?.followUps).toHaveLength(1);
+      expect(stoppedItem?.orchestrationEvent?.dispatcherEvent?.followUps[0]?.scaffold.action?.tool).toBe('TaskDispatcher');
+      expect(stoppedItem?.orchestrationEvent?.dispatcherEvent?.followUps[0]?.scaffold.action?.arguments['action']).toBe('start');
+
+      const restarted = await q.executeFollowUp(
+        stoppedItem!.orchestrationEvent!.dispatcherEvent!.followUps[0]!,
+      );
+      expect(restarted.kind).toBe('task_dispatcher');
+      expect(restarted.dispatcher?.dispatcherId).toBe(dispatcher.dispatcherId);
+      await waitForDispatcher(
+        q,
+        dispatcher.dispatcherId,
+        (item) => item.status === 'running',
+      );
+      await q.stopTaskDispatcher(dispatcher.dispatcherId);
+      await waitForDispatcher(q, dispatcher.dispatcherId, (item) => item.status === 'stopped');
       q.close();
     } finally {
       temp.cleanup();
@@ -370,6 +390,9 @@ describe('query() timeline control plane', () => {
         && item.orchestrationEvent?.dispatcherEvent?.type === 'started',
       );
       expect(startedItem?.timelineId).toContain(dispatcher.dispatcherId);
+      expect(startedItem?.orchestrationEvent?.dispatcherEvent?.followUps).toHaveLength(1);
+      expect(startedItem?.orchestrationEvent?.dispatcherEvent?.followUps[0]?.scaffold.action?.tool).toBe('TaskDispatcher');
+      expect(startedItem?.orchestrationEvent?.dispatcherEvent?.followUps[0]?.scaffold.action?.arguments['action']).toBe('stop');
 
       const dispatchedItem = await readTimelineItem(iterator, (item) =>
         item.kind === 'task_dispatcher'
@@ -389,6 +412,9 @@ describe('query() timeline control plane', () => {
         && item.orchestrationEvent?.dispatcherEvent?.type === 'stopped',
       );
       expect(stoppedItem?.orchestrationEvent?.dispatcherEvent?.status).toBe('stopped');
+      expect(stoppedItem?.orchestrationEvent?.dispatcherEvent?.followUps).toHaveLength(1);
+      expect(stoppedItem?.orchestrationEvent?.dispatcherEvent?.followUps[0]?.scaffold.action?.tool).toBe('TaskDispatcher');
+      expect(stoppedItem?.orchestrationEvent?.dispatcherEvent?.followUps[0]?.scaffold.action?.arguments['action']).toBe('start');
 
       await iterator.return?.();
       q.close();

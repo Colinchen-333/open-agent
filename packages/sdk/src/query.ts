@@ -1916,13 +1916,88 @@ export function query(
     }
   };
 
+  const buildTaskDispatcherFollowUps = (
+    event: Omit<SDKTaskDispatcherEvent, 'followUps'>,
+  ): WorkerFollowUpSuggestion[] => {
+    const isChinese = /中文|chinese|zh/i.test(responseLanguage ?? '');
+    const build = (zh: string, en: string) => (isChinese ? zh : en);
+    const followUps: WorkerFollowUpSuggestion[] = [];
+
+    const buildStartAction = (): NonNullable<NonNullable<SDKPromptSuggestionMessage['scaffold']>['action']> => ({
+      tool: 'TaskDispatcher',
+      arguments: {
+        action: 'start',
+        dispatcher_id: event.dispatcherId,
+        owner: event.owner,
+        team_name: event.teamName,
+        worker_type: event.workerType,
+        poll_interval_ms: event.pollIntervalMs,
+        lease_ms: event.leaseMs,
+        max_concurrent_workers: event.maxConcurrentWorkers,
+        ...(event.name ? { name: event.name } : {}),
+        ...(event.prompt ? { prompt: event.prompt } : {}),
+        ...(event.model ? { model: event.model } : {}),
+        ...(event.maxTurns !== undefined ? { max_turns: event.maxTurns } : {}),
+        ...(event.mode ? { mode: event.mode } : {}),
+        ...(event.cwd ? { cwd: event.cwd } : {}),
+        ...(event.isolation ? { isolation: event.isolation } : {}),
+      },
+    });
+
+    const buildStopAction = (): NonNullable<NonNullable<SDKPromptSuggestionMessage['scaffold']>['action']> => ({
+      tool: 'TaskDispatcher',
+      arguments: {
+        action: 'stop',
+        dispatcher_id: event.dispatcherId,
+      },
+    });
+
+    if (event.type === 'stopped' || event.type === 'task_requeued') {
+      followUps.push({
+        suggestion: build(
+          `重新启动调度器 \`${event.dispatcherId}\`，继续处理 ${event.teamName} 队列`,
+          `Restart dispatcher \`${event.dispatcherId}\` and continue draining the ${event.teamName} queue`,
+        ),
+        scaffold: {
+          kind: 'generic_followup',
+          title: build('恢复调度器', 'Resume dispatcher'),
+          prompt: build(
+            `恢复调度器 ${event.dispatcherId} 并继续处理队列`,
+            `Resume dispatcher ${event.dispatcherId} and continue processing the queue`,
+          ),
+          action: buildStartAction(),
+        },
+      });
+    }
+
+    if (event.status === 'running' && (event.type === 'started' || event.type === 'dispatched' || event.type === 'task_completed')) {
+      followUps.push({
+        suggestion: build(
+          `停止调度器 \`${event.dispatcherId}\`，阻止继续派发新任务`,
+          `Stop dispatcher \`${event.dispatcherId}\` to prevent more tasks from being claimed`,
+        ),
+        scaffold: {
+          kind: 'generic_followup',
+          title: build('停止调度器', 'Stop dispatcher'),
+          prompt: build(
+            `停止调度器 ${event.dispatcherId}`,
+            `Stop dispatcher ${event.dispatcherId}`,
+          ),
+          action: buildStopAction(),
+        },
+      });
+    }
+
+    return followUps;
+  };
+
   const emitTaskDispatcherOrchestrationEvent = (
     state: TaskDispatcherState,
     type: SDKTaskDispatcherEvent['type'],
     overrides: Partial<Pick<SDKTaskDispatcherEvent, 'taskId' | 'workerId' | 'taskStatus' | 'timestamp'>> = {},
   ): void => {
     const record = syncTaskDispatcherRecord(state);
-    const raw: SDKTaskDispatcherEvent = {
+    const rawBase: Omit<SDKTaskDispatcherEvent, 'followUps'> = {
       type,
       dispatcherId: record.dispatcherId,
       owner: record.owner,
@@ -1930,11 +2005,25 @@ export function query(
       workerType: record.workerType,
       status: record.status,
       timestamp: overrides.timestamp ?? new Date().toISOString(),
+      pollIntervalMs: record.pollIntervalMs,
+      leaseMs: record.leaseMs,
+      maxConcurrentWorkers: record.maxConcurrentWorkers,
+      ...(state.name ? { name: state.name } : {}),
+      ...(state.prompt ? { prompt: state.prompt } : {}),
+      ...(state.model ? { model: state.model } : {}),
+      ...(state.maxTurns !== undefined ? { maxTurns: state.maxTurns } : {}),
+      ...(state.mode ? { mode: state.mode } : {}),
+      ...(state.cwd ? { cwd: state.cwd } : {}),
+      ...(state.isolation ? { isolation: state.isolation } : {}),
       activeTaskIds: [...record.activeTaskIds],
       activeWorkerIds: [...record.activeWorkerIds],
       ...(overrides.taskId ? { taskId: overrides.taskId } : {}),
       ...(overrides.workerId ? { workerId: overrides.workerId } : {}),
       ...(overrides.taskStatus ? { taskStatus: overrides.taskStatus } : {}),
+    };
+    const raw: SDKTaskDispatcherEvent = {
+      ...rawBase,
+      followUps: buildTaskDispatcherFollowUps(rawBase),
     };
     const event: SDKOrchestrationEvent = {
       kind: 'task_dispatcher',
@@ -2816,6 +2905,65 @@ export function query(
           ...(normalizeOptionalString(action.arguments['requestId']) ? { requestId: normalizeOptionalString(action.arguments['requestId']) } : {}),
         }),
       };
+    }
+
+    if (action.tool === 'TaskDispatcher') {
+      const dispatcherAction = normalizeOptionalString(action.arguments['action']);
+      if (!dispatcherAction) {
+        throw new Error('TaskDispatcher follow-up action is missing an action.');
+      }
+
+      if (dispatcherAction === 'start') {
+        const owner = normalizeOptionalString(action.arguments['owner']);
+        if (!owner) {
+          throw new Error('TaskDispatcher start follow-up action is missing an owner.');
+        }
+        const dispatcher = await queryObj.startTaskDispatcher({
+          owner,
+          ...(normalizeOptionalString(action.arguments['dispatcher_id']) ? { dispatcherId: normalizeOptionalString(action.arguments['dispatcher_id']) } : {}),
+          ...(normalizeOptionalString(action.arguments['team_name']) ? { teamName: normalizeOptionalString(action.arguments['team_name']) } : {}),
+          ...(normalizeOptionalString(action.arguments['worker_type']) === 'verifier' ? { workerType: 'verifier' as const } : {}),
+          ...(normalizeOptionalString(action.arguments['name']) ? { name: normalizeOptionalString(action.arguments['name']) } : {}),
+          ...(normalizeOptionalString(action.arguments['prompt']) ? { prompt: normalizeOptionalString(action.arguments['prompt']) } : {}),
+          ...(normalizeOptionalString(action.arguments['model']) ? { model: normalizeOptionalString(action.arguments['model']) } : {}),
+          ...(normalizeOptionalString(action.arguments['mode']) ? { mode: normalizeOptionalString(action.arguments['mode']) } : {}),
+          ...(normalizeOptionalString(action.arguments['cwd']) ? { cwd: normalizeOptionalString(action.arguments['cwd']) } : {}),
+          ...(action.arguments['isolation'] === 'worktree' ? { isolation: 'worktree' as const } : {}),
+          ...(normalizeIntegerField(action.arguments['max_turns']) !== undefined
+            ? { maxTurns: normalizeIntegerField(action.arguments['max_turns'])! }
+            : {}),
+          ...(normalizeIntegerField(action.arguments['poll_interval_ms']) !== undefined
+            ? { pollIntervalMs: normalizeIntegerField(action.arguments['poll_interval_ms'])! }
+            : {}),
+          ...(normalizeIntegerField(action.arguments['lease_ms']) !== undefined
+            ? { leaseMs: normalizeIntegerField(action.arguments['lease_ms'])! }
+            : {}),
+          ...(normalizeIntegerField(action.arguments['max_concurrent_workers']) !== undefined
+            ? { maxConcurrentWorkers: normalizeIntegerField(action.arguments['max_concurrent_workers'])! }
+            : {}),
+        });
+        return {
+          kind: 'task_dispatcher',
+          followUpKind: scaffold.kind,
+          dispatcher,
+        };
+      }
+
+      if (dispatcherAction === 'stop') {
+        const dispatcherId = normalizeOptionalString(action.arguments['dispatcher_id']);
+        if (!dispatcherId) {
+          throw new Error('TaskDispatcher stop follow-up action is missing a dispatcher_id.');
+        }
+        const dispatcherStop = await queryObj.stopTaskDispatcher(dispatcherId);
+        return {
+          kind: 'task_dispatcher',
+          followUpKind: scaffold.kind,
+          ...(dispatcherStop.dispatcher ? { dispatcher: dispatcherStop.dispatcher } : {}),
+          dispatcherStop,
+        };
+      }
+
+      throw new Error(`Unsupported TaskDispatcher follow-up action: ${dispatcherAction}`);
     }
 
     throw new Error(`Unsupported follow-up action tool: ${String((action as { tool?: unknown }).tool)}`);
@@ -4393,20 +4541,26 @@ function extractTimelineDispatcherEventsFromTranscriptEntries(
     }
 
     const dispatcherEvent = JSON.parse(JSON.stringify(rawEvent)) as SDKTaskDispatcherEvent;
+    const normalizedDispatcherEvent = Array.isArray(dispatcherEvent.followUps)
+      ? dispatcherEvent
+      : {
+          ...dispatcherEvent,
+          followUps: buildTaskDispatcherFollowUps(dispatcherEvent as Omit<SDKTaskDispatcherEvent, 'followUps'>),
+        };
     events.push({
       kind: 'task_dispatcher',
       sessionId,
       parentToolCallId: `sdk-dispatcher:${dispatcherId}`,
       dispatcherId,
       teamName,
-      ...(normalizeOptionalString((dispatcherEvent as Record<string, unknown>).workerId)
-        ? { workerId: normalizeOptionalString((dispatcherEvent as Record<string, unknown>).workerId) }
+      ...(normalizeOptionalString((normalizedDispatcherEvent as Record<string, unknown>).workerId)
+        ? { workerId: normalizeOptionalString((normalizedDispatcherEvent as Record<string, unknown>).workerId) }
         : {}),
-      ...(normalizeOptionalString((dispatcherEvent as Record<string, unknown>).taskId)
-        ? { taskId: normalizeOptionalString((dispatcherEvent as Record<string, unknown>).taskId) }
+      ...(normalizeOptionalString((normalizedDispatcherEvent as Record<string, unknown>).taskId)
+        ? { taskId: normalizeOptionalString((normalizedDispatcherEvent as Record<string, unknown>).taskId) }
         : {}),
-      dispatcherEvent,
-      raw: dispatcherEvent,
+      dispatcherEvent: normalizedDispatcherEvent,
+      raw: normalizedDispatcherEvent,
     });
   }
 
