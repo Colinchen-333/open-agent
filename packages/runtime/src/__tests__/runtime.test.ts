@@ -291,4 +291,51 @@ describe('OpenAgentRuntime MCP wiring', () => {
     expect(registry.get('echo')?.description).toBe('base echo');
     expect(await registry.get('echo')!.execute({}, {} as any)).toBe('base');
   });
+
+  it('includes plugin, hook, and diagnostic summaries in runtime snapshots', async () => {
+    const registry = new ToolRegistry();
+    const runtime = new OpenAgentRuntime({
+      cwd: '/tmp',
+      toolRegistry: registry,
+      plugins: [{
+        name: 'review-kit',
+        path: '/tmp/review-kit',
+        version: '1.2.3',
+        enabled: true,
+        agentCount: 2,
+        skillCount: 1,
+        commandCount: 1,
+        mcpServerCount: 0,
+        hookEventCount: 2,
+        hookCount: 3,
+      }],
+      hooks: [{
+        event: 'PreToolUse',
+        count: 2,
+        sources: ['review-kit'],
+      }],
+      diagnostics: [{
+        code: 'plugin_agent_collision',
+        message: 'Plugin agent "reviewer" overrides an earlier plugin agent definition.',
+        severity: 'warning',
+        source: 'plugin',
+      }],
+    });
+
+    await runtime.initialize();
+    const snapshot = runtime.buildSnapshot();
+    expect(snapshot.plugins).toHaveLength(1);
+    expect(snapshot.plugins[0]?.name).toBe('review-kit');
+    expect(snapshot.hooks).toEqual([{
+      event: 'PreToolUse',
+      count: 2,
+      sources: ['review-kit'],
+    }]);
+    expect(snapshot.diagnostics).toEqual([{
+      code: 'plugin_agent_collision',
+      message: 'Plugin agent "reviewer" overrides an earlier plugin agent definition.',
+      severity: 'warning',
+      source: 'plugin',
+    }]);
+  });
 });

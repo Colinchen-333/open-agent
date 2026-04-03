@@ -21,6 +21,7 @@ import type {
 import type { SandboxConfig } from '@open-agent/permissions';
 import type { LLMProvider } from '@open-agent/providers';
 import type { CapabilitySnapshot } from '@open-agent/runtime';
+import type { PluginConfig } from '@open-agent/plugins';
 import type { SkillCatalogEntry } from '@open-agent/skills';
 
 export type PermissionRuleValue = {
@@ -201,7 +202,7 @@ export interface QueryOptions {
   extraArgs?: Record<string, string | null>;
   betas?: string[];
   onElicitation?: unknown;
-  plugins?: unknown[];
+  plugins?: PluginConfig[];
   resumeSessionAt?: string;
   sandbox?: SandboxConfig;
   /** Server-side tools executed by the API provider (e.g. Anthropic native web search). */

@@ -9,6 +9,7 @@ import type {
   AccountInfo,
   McpServerStatusConfig,
   AgentDefinition,
+  HookEvent,
   SDKTaskNotificationMessage,
   SDKPromptSuggestionMessage,
 } from '@open-agent/core';
@@ -47,6 +48,9 @@ import {
 import type { SandboxConfig, SettingsFile, BashSandboxExecutionPolicy } from '@open-agent/permissions';
 import { HookExecutor } from '@open-agent/hooks';
 import { OpenAgentRuntime } from '@open-agent/runtime';
+import type { RuntimeDiagnostic, RuntimeHookSummary, RuntimePluginSummary } from '@open-agent/runtime';
+import { PluginLoader } from '@open-agent/plugins';
+import type { LoadedPlugin } from '@open-agent/plugins';
 import type {
   QueryOptions,
   Query,
@@ -190,7 +194,11 @@ export function query(
     : null;
   const shouldPersist = options.persistSession !== false;
   const sharedSessionManager = options.sessionManager ?? null;
-  const availableAgents = loadAvailableAgents(cwd, options.agents);
+  const pluginRuntime = loadConfiguredPlugins(cwd, options.plugins);
+  const availableAgents = loadAvailableAgents(cwd, {
+    ...pluginRuntime.agents,
+    ...(options.agents ?? {}),
+  });
   const selectedAgent = resolveSelectedAgent(options.agent, availableAgents);
   const supportedAgentInfos = buildAgentInfoList(availableAgents);
   const selectedAgentModel = resolveAgentModel(selectedAgent?.model);
@@ -345,12 +353,17 @@ export function query(
     availableAgents,
     skillDirectories: options.skillDirectories,
     includePluginSkills: options.includePluginSkills,
+    plugins: pluginRuntime.plugins,
+    hooks: pluginRuntime.hooks,
+    diagnostics: pluginRuntime.diagnostics,
     mcp: {
       shouldRegisterTool: (toolName) => isToolAllowedByPolicy(toolName),
       restoreTool: (toolName) => baseTools.get(toolName),
     },
   });
-  const runtimeReadyPromise = runtime.initialize();
+  const runtimeReadyPromise = runtime.initialize().then(() => {
+    registerConfiguredPluginSkills(runtime, pluginRuntime.loadedPlugins, options.includePluginSkills);
+  });
   void runtimeReadyPromise.catch(() => {});
   runtime.registerSkillTool();
   runtime.registerMcpResourceTools();
@@ -999,9 +1012,14 @@ export function query(
   // Hooks — wire from QueryOptions
   // ------------------------------------------------------------------
   let hookExecutor: InstanceType<typeof HookExecutor> | undefined;
-  if (options.hooks) {
+  const configuredHooks = mergeHookConfigs(
+    loadedSettings?.hooks as Partial<Record<HookEvent, any[]>> | undefined,
+    pluginRuntime.hookConfig,
+    options.hooks,
+  );
+  if (configuredHooks && Object.keys(configuredHooks).length > 0) {
     hookExecutor = new HookExecutor();
-    hookExecutor.loadFromConfig(options.hooks);
+    hookExecutor.loadFromConfig(configuredHooks);
   }
   // Adapt HookExecutor to LoopHookExecutor interface (loose → strict input type).
   const loopHookExecutor = hookExecutor
@@ -1045,10 +1063,15 @@ export function query(
   // MCP servers — connect and discover tools
   // ------------------------------------------------------------------
   const mcpManager = runtime.getMcpManager();
-  let hasConfiguredMcpServers = Boolean(options.mcpServers && Object.keys(options.mcpServers).length > 0);
+  const configuredMcpServers = mergeMcpServerConfigs(
+    loadedSettings?.mcpServers as Record<string, McpServerConfig> | undefined,
+    pluginRuntime.mcpServers,
+    options.mcpServers,
+  );
+  let hasConfiguredMcpServers = Object.keys(configuredMcpServers).length > 0;
   let mcpReadyPromise = runtime.waitForMcpReady();
-  if (options.mcpServers && Object.keys(options.mcpServers).length > 0) {
-    void runtime.setMcpServers(options.mcpServers);
+  if (hasConfiguredMcpServers) {
+    void runtime.setMcpServers(configuredMcpServers);
     mcpReadyPromise = runtime.waitForMcpReady();
   }
 
@@ -1102,6 +1125,20 @@ export function query(
           ...(options.agent ? { agent: options.agent } : {}),
           ...(options.resumeSessionAt ? { resumeSessionAt: options.resumeSessionAt } : {}),
           ...buildResumeMetadata(options, effectiveResumeSessionId),
+          ...(pluginRuntime.plugins.length > 0 ? {
+            plugins: pluginRuntime.plugins.map((plugin) => ({
+              name: plugin.name,
+              path: plugin.path,
+            })),
+          } : {}),
+          ...(pluginRuntime.diagnostics.length > 0 ? {
+            runtimeDiagnostics: pluginRuntime.diagnostics.map((entry) => ({
+              code: entry.code,
+              message: entry.message,
+              severity: entry.severity,
+              ...(entry.source ? { source: entry.source } : {}),
+            })),
+          } : {}),
           ...(
             (!sessionExistedBeforeQuery || options.forkSession)
               ? buildPromptSessionMetadata(
@@ -2400,7 +2437,7 @@ export function query(
     }
   };
 
-  queryObj.supportedCommands = async () => getDefaultSlashCommands();
+  queryObj.supportedCommands = async () => getDefaultSlashCommands(pluginRuntime.commands);
 
   queryObj.supportedAgents = async () => supportedAgentInfos.map((agent) => ({ ...agent }));
 
@@ -3958,6 +3995,193 @@ export function query(
 // Helpers
 // --------------------------------------------------------------------------
 
+type LoadedPluginRuntime = {
+  loadedPlugins: LoadedPlugin[];
+  plugins: RuntimePluginSummary[];
+  hooks: RuntimeHookSummary[];
+  diagnostics: RuntimeDiagnostic[];
+  hookConfig: Partial<Record<HookEvent, any[]>>;
+  commands: SlashCommand[];
+  agents: Record<string, AgentDefinition>;
+  mcpServers: Record<string, McpServerConfig>;
+};
+
+function loadConfiguredPlugins(
+  cwd: string,
+  pluginConfigs?: Array<{ type: 'local'; path: string }>,
+): LoadedPluginRuntime {
+  if (!Array.isArray(pluginConfigs) || pluginConfigs.length === 0) {
+    return {
+      loadedPlugins: [],
+      plugins: [],
+      hooks: [],
+      diagnostics: [],
+      hookConfig: {},
+      commands: [],
+      agents: {},
+      mcpServers: {},
+    };
+  }
+
+  const loader = new PluginLoader();
+  const diagnostics: RuntimeDiagnostic[] = [];
+  const hookSources = new Map<string, Set<string>>();
+  const hookConfig: Partial<Record<HookEvent, any[]>> = {};
+  const commands: SlashCommand[] = [];
+  const agents: Record<string, AgentDefinition> = {};
+  const mcpServers: Record<string, McpServerConfig> = {};
+  const loadedPlugins: LoadedPlugin[] = [];
+  const pluginSummaries: RuntimePluginSummary[] = [];
+  const commandNames = new Set<string>();
+
+  for (const pluginConfig of pluginConfigs) {
+    const plugin = loader.loadPlugin(resolvePluginPath(cwd, pluginConfig.path));
+    if (!plugin) {
+      diagnostics.push({
+        code: 'plugin_load_failed',
+        message: `Failed to load plugin from ${pluginConfig.path}`,
+        severity: 'warning',
+        source: 'plugin',
+      });
+      continue;
+    }
+
+    loadedPlugins.push(plugin);
+    const manifest = plugin.manifest;
+    let hookCount = 0;
+    for (const [event, entries] of Object.entries(manifest.hooks ?? {}) as [HookEvent, any[]][]) {
+      if (!Array.isArray(entries) || entries.length === 0) continue;
+      hookCount += entries.length;
+      hookConfig[event] = [...(hookConfig[event] ?? []), ...entries];
+      const sourceSet = hookSources.get(event) ?? new Set<string>();
+      sourceSet.add(manifest.name);
+      hookSources.set(event, sourceSet);
+    }
+
+    for (const [name, definition] of Object.entries(manifest.agents ?? {})) {
+      if (agents[name]) {
+        diagnostics.push({
+          code: 'plugin_agent_collision',
+          message: `Plugin agent "${name}" from ${manifest.name} overrides an earlier plugin agent definition.`,
+          severity: 'warning',
+          source: 'agent',
+        });
+      }
+      agents[name] = definition;
+    }
+
+    for (const [name, config] of Object.entries(manifest.mcpServers ?? {})) {
+      if (mcpServers[name]) {
+        diagnostics.push({
+          code: 'plugin_mcp_collision',
+          message: `Plugin MCP server "${name}" from ${manifest.name} overrides an earlier plugin MCP configuration.`,
+          severity: 'warning',
+          source: 'plugin',
+        });
+      }
+      mcpServers[name] = config;
+    }
+
+    for (const command of manifest.commands ?? []) {
+      const slashName = command.name.startsWith('/') ? command.name : `/${command.name}`;
+      if (commandNames.has(slashName)) {
+        diagnostics.push({
+          code: 'plugin_command_collision',
+          message: `Plugin command "${slashName}" from ${manifest.name} duplicates an existing plugin command name.`,
+          severity: 'warning',
+          source: 'plugin',
+        });
+        continue;
+      }
+      commandNames.add(slashName);
+      commands.push({
+        name: slashName,
+        description: command.description,
+        argumentHint: command.argumentHint ?? '',
+      });
+    }
+
+    pluginSummaries.push({
+      name: manifest.name,
+      path: plugin.path,
+      version: manifest.version,
+      enabled: plugin.enabled,
+      agentCount: Object.keys(manifest.agents ?? {}).length,
+      skillCount: manifest.skills?.length ?? 0,
+      commandCount: manifest.commands?.length ?? 0,
+      mcpServerCount: Object.keys(manifest.mcpServers ?? {}).length,
+      hookEventCount: Object.keys(manifest.hooks ?? {}).length,
+      hookCount,
+    });
+  }
+
+  const hooks: RuntimeHookSummary[] = Object.entries(hookConfig).map(([event, entries]) => ({
+    event,
+    count: entries.length,
+    sources: [...(hookSources.get(event as HookEvent) ?? new Set<string>())].sort(),
+  }));
+
+  return {
+    loadedPlugins,
+    plugins: pluginSummaries.sort((a, b) => a.name.localeCompare(b.name)),
+    hooks: hooks.sort((a, b) => a.event.localeCompare(b.event)),
+    diagnostics,
+    hookConfig,
+    commands,
+    agents,
+    mcpServers,
+  };
+}
+
+function resolvePluginPath(cwd: string, pluginPath: string): string {
+  if (pluginPath.startsWith('/')) {
+    return pluginPath;
+  }
+  return join(cwd, pluginPath);
+}
+
+function registerConfiguredPluginSkills(
+  runtime: OpenAgentRuntime,
+  loadedPlugins: LoadedPlugin[],
+  includePluginSkills: boolean | undefined,
+): void {
+  if (includePluginSkills === false) return;
+
+  for (const plugin of loadedPlugins) {
+    for (const skill of plugin.manifest.skills ?? []) {
+      runtime.skillRegistry.register({
+        name: skill.name,
+        description: skill.description,
+        prompt: skill.prompt,
+        source: 'plugin',
+        sourceLabel: `plugin:${plugin.manifest.name}`,
+        allowedTools: skill.allowedTools,
+        activationKeywords: skill.activationKeywords,
+      });
+    }
+  }
+}
+
+function mergeHookConfigs(
+  ...configs: Array<Partial<Record<HookEvent, any[]>> | undefined>
+): Partial<Record<HookEvent, any[]>> {
+  const merged: Partial<Record<HookEvent, any[]>> = {};
+  for (const config of configs) {
+    if (!config) continue;
+    for (const [event, hooks] of Object.entries(config) as [HookEvent, any[]][]) {
+      if (!Array.isArray(hooks) || hooks.length === 0) continue;
+      merged[event] = [...(merged[event] ?? []), ...hooks];
+    }
+  }
+  return merged;
+}
+
+function mergeMcpServerConfigs(
+  ...configs: Array<Record<string, McpServerConfig> | undefined>
+): Record<string, McpServerConfig> {
+  return Object.assign({}, ...configs.filter((config): config is Record<string, McpServerConfig> => Boolean(config)));
+}
+
 function loadAvailableAgents(
   cwd: string,
   overrides?: Record<string, AgentDefinition>,
@@ -5059,7 +5283,6 @@ function assertUnsupportedOptions(options: QueryOptions): void {
   const unsupportedKeys: Array<keyof QueryOptions> = [
     'betas',
     'onElicitation',
-    'plugins',
     'debugFile',
     'spawnClaudeCodeProcess',
   ];
@@ -5456,8 +5679,8 @@ function guessProviderFromModel(
  * Returns the standard slash commands supported by the open-agent REPL.
  * Defined inline to keep the SDK self-contained (no dependency on @open-agent/cli).
  */
-function getDefaultSlashCommands(): SlashCommand[] {
-  return [
+function getDefaultSlashCommands(extraCommands: SlashCommand[] = []): SlashCommand[] {
+  const defaults: SlashCommand[] = [
     { name: '/help', description: 'Show available commands', argumentHint: '' },
     { name: '/model', description: 'Show or change the current model', argumentHint: '[model_name]' },
     { name: '/compact', description: 'Compact conversation history', argumentHint: '' },
@@ -5481,5 +5704,17 @@ function getDefaultSlashCommands(): SlashCommand[] {
     { name: '/clear', description: 'Clear the terminal', argumentHint: '' },
     { name: '/exit', description: 'Exit the REPL', argumentHint: '' },
     { name: '/quit', description: 'Exit the REPL', argumentHint: '' },
+  ];
+  if (extraCommands.length === 0) {
+    return defaults;
+  }
+  const seen = new Set(defaults.map((command) => command.name));
+  return [
+    ...defaults,
+    ...extraCommands.filter((command) => {
+      if (seen.has(command.name)) return false;
+      seen.add(command.name);
+      return true;
+    }),
   ];
 }

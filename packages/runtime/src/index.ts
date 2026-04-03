@@ -57,12 +57,41 @@ export interface CapabilitySnapshot {
   };
 }
 
+export interface RuntimePluginSummary {
+  name: string;
+  path: string;
+  version: string;
+  enabled: boolean;
+  agentCount: number;
+  skillCount: number;
+  commandCount: number;
+  mcpServerCount: number;
+  hookEventCount: number;
+  hookCount: number;
+}
+
+export interface RuntimeHookSummary {
+  event: string;
+  count: number;
+  sources: string[];
+}
+
+export interface RuntimeDiagnostic {
+  code: string;
+  message: string;
+  severity: 'info' | 'warning' | 'error';
+  source?: 'plugin' | 'hook' | 'agent' | 'runtime';
+}
+
 export interface RuntimeSnapshot {
   tools: string[];
   agents: { name: string; description: string; model?: string }[];
   skills: SkillCatalogEntry[];
   mcpServers: { name: string; status: string }[];
   capabilitySnapshot: CapabilitySnapshot;
+  plugins: RuntimePluginSummary[];
+  hooks: RuntimeHookSummary[];
+  diagnostics: RuntimeDiagnostic[];
 }
 
 export interface RuntimeMcpOptions {
@@ -77,6 +106,9 @@ export interface OpenAgentRuntimeOptions extends SkillRegistryOptions {
   toolRegistry: ToolRegistry;
   availableAgents?: Map<string, AgentDefinition>;
   mcpManager?: McpManager;
+  plugins?: RuntimePluginSummary[];
+  hooks?: RuntimeHookSummary[];
+  diagnostics?: RuntimeDiagnostic[];
   mcp?: RuntimeMcpOptions;
 }
 
@@ -252,6 +284,12 @@ export class OpenAgentRuntime {
         status: status.status,
       })),
       capabilitySnapshot,
+      plugins: this.options.plugins ? this.options.plugins.map((plugin) => ({ ...plugin })) : [],
+      hooks: this.options.hooks ? this.options.hooks.map((hook) => ({
+        ...hook,
+        sources: [...hook.sources],
+      })) : [],
+      diagnostics: this.options.diagnostics ? this.options.diagnostics.map((entry) => ({ ...entry })) : [],
     };
   }
 

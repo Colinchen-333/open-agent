@@ -22,6 +22,7 @@
     "@open-agent/permissions": "workspace:*",
     "@open-agent/hooks": "workspace:*",
     "@open-agent/mcp": "workspace:*",
+    "@open-agent/plugins": "workspace:*",
     "@open-agent/runtime": "workspace:*",
     "@open-agent/skills": "workspace:*",
     "@open-agent/state": "workspace:*"

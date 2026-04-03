@@ -30,6 +30,13 @@ export interface SessionInfo {
   forkedFromSessionId?: string;
   resumeSource?: 'new' | 'continue' | 'resume' | 'resume_at' | 'fork';
   resumeSessionAt?: string;
+  plugins?: { name: string; path: string }[];
+  runtimeDiagnostics?: Array<{
+    code: string;
+    message: string;
+    severity: 'info' | 'warning' | 'error';
+    source?: string;
+  }>;
 }
 
 export interface SessionCreateMetadata {
@@ -44,6 +51,13 @@ export interface SessionCreateMetadata {
   forkedFromSessionId?: string;
   resumeSource?: 'new' | 'continue' | 'resume' | 'resume_at' | 'fork';
   resumeSessionAt?: string;
+  plugins?: { name: string; path: string }[];
+  runtimeDiagnostics?: Array<{
+    code: string;
+    message: string;
+    severity: 'info' | 'warning' | 'error';
+    source?: string;
+  }>;
 }
 
 export interface SessionUpdate {
@@ -59,6 +73,13 @@ export interface SessionUpdate {
   forkedFromSessionId?: string;
   resumeSource?: 'new' | 'continue' | 'resume' | 'resume_at' | 'fork';
   resumeSessionAt?: string;
+  plugins?: { name: string; path: string }[];
+  runtimeDiagnostics?: Array<{
+    code: string;
+    message: string;
+    severity: 'info' | 'warning' | 'error';
+    source?: string;
+  }>;
 }
 
 /**
@@ -191,6 +212,32 @@ export class SessionManager {
     assignString('forkedFromSessionId', update.forkedFromSessionId);
     assignString('resumeSessionAt', update.resumeSessionAt);
     assignString('model', (update as SessionUpdate).model);
+    if (Array.isArray(update.plugins)) {
+      next.plugins = update.plugins
+        .filter((plugin): plugin is { name: string; path: string } =>
+          Boolean(plugin)
+          && typeof plugin.name === 'string'
+          && plugin.name.trim().length > 0
+          && typeof plugin.path === 'string'
+          && plugin.path.trim().length > 0)
+        .map((plugin) => ({ name: plugin.name, path: plugin.path }));
+    }
+    if (Array.isArray(update.runtimeDiagnostics)) {
+      next.runtimeDiagnostics = update.runtimeDiagnostics
+        .filter((entry): entry is NonNullable<SessionInfo['runtimeDiagnostics']>[number] =>
+          Boolean(entry)
+          && typeof entry.code === 'string'
+          && entry.code.trim().length > 0
+          && typeof entry.message === 'string'
+          && entry.message.trim().length > 0
+          && (entry.severity === 'info' || entry.severity === 'warning' || entry.severity === 'error'))
+        .map((entry) => ({
+          code: entry.code,
+          message: entry.message,
+          severity: entry.severity,
+          ...(typeof entry.source === 'string' && entry.source.trim().length > 0 ? { source: entry.source } : {}),
+        }));
+    }
 
     const resumeSource = update.resumeSource;
     if (

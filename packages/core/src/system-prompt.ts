@@ -31,6 +31,26 @@ export interface SystemPromptOptions {
     agents?: { name: string; description: string; model?: string }[];
     skills?: { name: string; description: string; source?: string }[];
     mcpServers?: { name: string; status: string }[];
+    plugins?: Array<{
+      name: string;
+      version: string;
+      agentCount: number;
+      skillCount: number;
+      commandCount: number;
+      mcpServerCount: number;
+      hookCount: number;
+    }>;
+    hooks?: Array<{
+      event: string;
+      count: number;
+      sources: string[];
+    }>;
+    diagnostics?: Array<{
+      code: string;
+      message: string;
+      severity: 'info' | 'warning' | 'error';
+      source?: string;
+    }>;
     capabilitySnapshot?: {
       summary: {
         accessCounts: {
@@ -525,6 +545,27 @@ function buildRuntimeContextSection(
     }
   }
 
+  if (snapshot.plugins && snapshot.plugins.length > 0) {
+    lines.push('## Plugins');
+    for (const plugin of snapshot.plugins) {
+      const parts = [
+        `${plugin.agentCount} agents`,
+        `${plugin.skillCount} skills`,
+        `${plugin.commandCount} commands`,
+        `${plugin.mcpServerCount} MCP servers`,
+        `${plugin.hookCount} hooks`,
+      ];
+      lines.push(`- **${plugin.name}** v${plugin.version}: ${parts.join(', ')}`);
+    }
+  }
+
+  if (snapshot.hooks && snapshot.hooks.length > 0) {
+    lines.push('## Hook surface');
+    for (const hook of snapshot.hooks) {
+      lines.push(`- **${hook.event}**: ${hook.count} hooks${hook.sources.length > 0 ? ` (${hook.sources.join(', ')})` : ''}`);
+    }
+  }
+
   if (snapshot.capabilitySnapshot) {
     const capabilityLines: string[] = [];
     const summary = snapshot.capabilitySnapshot.summary;
@@ -548,6 +589,14 @@ function buildRuntimeContextSection(
     if (capabilityLines.length > 0) {
       lines.push('## Tool capability layers');
       lines.push(...capabilityLines);
+    }
+  }
+
+  if (snapshot.diagnostics && snapshot.diagnostics.length > 0) {
+    lines.push('## Runtime diagnostics');
+    for (const diagnostic of snapshot.diagnostics.slice(0, 8)) {
+      const prefix = diagnostic.source ? `[${diagnostic.source}] ` : '';
+      lines.push(`- **${diagnostic.severity}** ${prefix}${diagnostic.message}`);
     }
   }
 

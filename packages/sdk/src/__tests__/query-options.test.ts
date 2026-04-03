@@ -14,6 +14,44 @@ import {
 } from '../query.js';
 import type { QueryOptions, PermissionUpdate } from '../types.js';
 
+function createPluginFixture() {
+  const pluginDir = mkdtempSync(join(tmpdir(), 'open-agent-plugin-fixture-'));
+  mkdirSync(join(pluginDir, 'skills'), { recursive: true });
+  mkdirSync(join(pluginDir, 'commands'), { recursive: true });
+  mkdirSync(join(pluginDir, 'agents'), { recursive: true });
+  mkdirSync(join(pluginDir, 'hooks'), { recursive: true });
+
+  writeFileSync(join(pluginDir, 'plugin.json'), JSON.stringify({
+    name: 'review-kit',
+    version: '1.0.0',
+    description: 'Plugin test fixture',
+    hooks: {
+      PreToolUse: [
+        { command: 'echo pre-tool', timeout: 5 },
+      ],
+    },
+  }, null, 2));
+  writeFileSync(join(pluginDir, 'skills', 'review.md'), `---
+name: review-plugin
+description: Review via plugin
+---
+Use this plugin skill when reviewing changes.`);
+  writeFileSync(join(pluginDir, 'commands', 'review.md'), `---
+name: review-plugin
+description: Review command from plugin
+argument-hint: [target]
+---
+Review plugin command body.`);
+  writeFileSync(join(pluginDir, 'agents', 'reviewer.md'), `---
+description: Reviewer from plugin
+model: sonnet
+tools: Read,Write
+---
+You are the plugin reviewer agent.`);
+
+  return pluginDir;
+}
+
 // ---------------------------------------------------------------------------
 // Tests for new QueryOptions fields:
 //   - canUseTool: callback is called, returning false denies
@@ -727,7 +765,6 @@ describe('QueryOptions unsupported official placeholders', () => {
     const unsupported: Array<{ key: string; option: Partial<QueryOptions> }> = [
       { key: 'betas', option: { betas: ['x-test-beta'] } },
       { key: 'onElicitation', option: { onElicitation: {} } },
-      { key: 'plugins', option: { plugins: [] } },
       { key: 'debugFile', option: { debugFile: '/tmp/debug.log' } },
       { key: 'spawnClaudeCodeProcess', option: { spawnClaudeCodeProcess: {} } },
     ];
@@ -740,6 +777,33 @@ describe('QueryOptions unsupported official placeholders', () => {
         }),
       ).toThrow(new RegExp(`Option \"${key}\".*not supported yet`, 'i'));
     }
+  });
+
+  it('accepts plugins and wires plugin agents, skills, commands, and session metadata', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-plugin-query-'));
+    const pluginDir = createPluginFixture();
+    const q = query('test plugin runtime wiring', {
+      cwd,
+      model: 'claude-sonnet-4-6',
+      plugins: [{ type: 'local', path: pluginDir }],
+    });
+
+    const [agents, skills, commands, info] = await Promise.all([
+      q.supportedAgents(),
+      q.supportedSkills(),
+      q.supportedCommands(),
+      q.sessionInfo(),
+    ]);
+
+    expect(agents.some((agent) => agent.name === 'reviewer')).toBe(true);
+    expect(skills.some((skill) => skill.name === 'review-plugin')).toBe(true);
+    expect(commands.some((command) => command.name === '/review-plugin')).toBe(true);
+    expect(info?.plugins).toEqual([{
+      name: 'review-kit',
+      path: pluginDir,
+    }]);
+    expect(info?.runtimeDiagnostics).toBeUndefined();
+    q.close();
   });
 });
 
