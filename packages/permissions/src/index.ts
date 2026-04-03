@@ -4,6 +4,7 @@
 export type { PermissionMode, PermissionBehavior } from '@open-agent/core';
 export * from './types';
 export * from './bash-policy';
+export * from './sandbox-adapter';
 export { PermissionEngine } from './engine';
 export { SettingsLoader } from './settings-loader';
 export type { SettingsFile, SettingsPermissions } from './settings-loader';

@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
-import { closeSync, openSync, readFileSync } from 'fs';
+import { closeSync, existsSync, openSync, readFileSync } from 'fs';
 import { spawn } from 'child_process';
+import { resolve, sep } from 'path';
 import type { ToolDefinition, ToolContext, BashInput } from './types.js';
 import { getBackgroundTasks } from './task-management.js';
 import {
@@ -17,10 +18,24 @@ const MAX_TIMEOUT_MS = 600_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_BACKGROUND_TASKS = 100;
 const BACKGROUND_TASK_TTL_MS = 30 * 60 * 1000; // 30 minutes
+// Keep in sync with @open-agent/permissions/sandbox-adapter.ts
+const BASH_SANDBOX_POLICY_FIELD = '__openAgentBashSandboxPolicy';
 
 // Persistent CWD state across consecutive Bash calls, keyed by sessionId
 // to prevent multi-session conflicts.
 const persistentCwdBySession = new Map<string, string>();
+
+interface BashSandboxExecutionPolicy {
+  enforce: boolean;
+  allowWritePaths: string[];
+  denyWritePaths: string[];
+  networkDisabled: boolean;
+  bypassRequested: boolean;
+  bypassAllowed: boolean;
+  reason?: string;
+}
+
+const DARWIN_SANDBOX_EXEC = '/usr/bin/sandbox-exec';
 
 /** Prune completed background tasks older than TTL or exceeding max count. */
 function pruneBackgroundTasks(tasks: Map<string, { status: string; startTime: number }>): void {
@@ -82,15 +97,28 @@ export function createBashTool(): ToolDefinition {
       required: ['command'],
     },
 
-    async execute(input: BashInput & { dangerouslyDisableSandbox?: boolean }, ctx: ToolContext): Promise<string> {
+    async execute(
+      input: BashInput & { dangerouslyDisableSandbox?: boolean; [key: string]: unknown },
+      ctx: ToolContext,
+    ): Promise<string> {
       const timeout = Math.min(input.timeout ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
 
       // Determine effective working directory (persistent across calls, per session)
       const effectiveCwd = persistentCwdBySession.get(ctx.sessionId) ?? ctx.cwd;
+      const sandboxPolicy = readSandboxPolicy(input);
+      const preflightViolation = validateBashPreflight(input.command, effectiveCwd, sandboxPolicy);
+      if (preflightViolation) {
+        throw new Error(preflightViolation);
+      }
+      const sandboxEnv = buildSandboxEnv(sandboxPolicy);
 
       // Use a UUID-based sentinel to avoid collisions with command output
       const CWD_SENTINEL = `___CWD_${randomUUID()}___`;
       const wrappedCommand = `cd "${effectiveCwd}" && ${input.command} ; echo "${CWD_SENTINEL}" ; pwd`;
+      const sandboxedCommand = wrapWithSandboxExec(
+        ['bash', '-lc', wrappedCommand],
+        sandboxPolicy,
+      );
 
       // Handle background execution
       if (input.run_in_background) {
@@ -103,9 +131,9 @@ export function createBashTool(): ToolDefinition {
         pruneBackgroundTasks(backgroundTasks);
 
         const outputFd = openSync(outputFile, 'a');
-        const child = spawn('bash', ['-lc', wrappedCommand], {
+        const child = spawn(sandboxedCommand.command, sandboxedCommand.args, {
           cwd: effectiveCwd,
-          env: { ...process.env, TERM: 'dumb' },
+          env: { ...process.env, TERM: 'dumb', ...sandboxEnv },
           detached: true,
           stdio: ['ignore', outputFd, outputFd],
         });
@@ -143,9 +171,9 @@ export function createBashTool(): ToolDefinition {
       }
 
       // Foreground execution
-      const proc = await spawnProcess(['bash', '-c', wrappedCommand], {
+      const proc = await spawnProcess([sandboxedCommand.command, ...sandboxedCommand.args], {
         cwd: effectiveCwd,
-        env: { TERM: 'dumb' },
+        env: { TERM: 'dumb', ...sandboxEnv },
       });
 
       let killed = false;
@@ -245,4 +273,251 @@ function truncate(s: string): string {
     );
   }
   return s;
+}
+
+function readSandboxPolicy(
+  input: BashInput & { [key: string]: unknown },
+): BashSandboxExecutionPolicy | undefined {
+  const raw = input[BASH_SANDBOX_POLICY_FIELD];
+  if (!raw || typeof raw !== 'object') return undefined;
+  const policy = raw as Partial<BashSandboxExecutionPolicy>;
+  if (typeof policy.enforce !== 'boolean') return undefined;
+  return {
+    enforce: policy.enforce,
+    allowWritePaths: Array.isArray(policy.allowWritePaths)
+      ? policy.allowWritePaths.filter((path): path is string => typeof path === 'string')
+      : [],
+    denyWritePaths: Array.isArray(policy.denyWritePaths)
+      ? policy.denyWritePaths.filter((path): path is string => typeof path === 'string')
+      : [],
+    networkDisabled: policy.networkDisabled === true,
+    bypassRequested: policy.bypassRequested === true,
+    bypassAllowed: policy.bypassAllowed === true,
+    ...(typeof policy.reason === 'string' ? { reason: policy.reason } : {}),
+  };
+}
+
+function validateBashPreflight(
+  command: string,
+  cwd: string,
+  policy: BashSandboxExecutionPolicy | undefined,
+): string | null {
+  if (!policy?.enforce) return null;
+
+  if (policy.bypassRequested) {
+    if (policy.bypassAllowed) return null;
+    return policy.reason ?? 'Sandbox bypass requested but not explicitly approved.';
+  }
+
+  if (policy.networkDisabled && usesNetwork(command)) {
+    return 'Sandbox policy blocked command: network access is disabled.';
+  }
+
+  const hasPathRules = policy.allowWritePaths.length > 0 || policy.denyWritePaths.length > 0;
+  if (!hasPathRules) return null;
+
+  const writeTargets = extractWriteTargets(command, cwd);
+  for (const target of writeTargets) {
+    if (policy.denyWritePaths.some((denied) => isPathInside(target, denied))) {
+      return `Sandbox policy blocked write to denied path: ${target}`;
+    }
+    if (
+      policy.allowWritePaths.length > 0 &&
+      !policy.allowWritePaths.some((allowed) => isPathInside(target, allowed))
+    ) {
+      return `Sandbox policy blocked write outside allowed paths: ${target}`;
+    }
+  }
+
+  return null;
+}
+
+function buildSandboxEnv(policy: BashSandboxExecutionPolicy | undefined): Record<string, string> {
+  if (!policy) return {};
+  return {
+    OPEN_AGENT_SANDBOX: policy.enforce ? '1' : '0',
+    OPEN_AGENT_SANDBOX_NETWORK_DISABLED: policy.networkDisabled ? '1' : '0',
+    OPEN_AGENT_SANDBOX_ALLOW_WRITE_PATHS: policy.allowWritePaths.join(':'),
+    OPEN_AGENT_SANDBOX_DENY_WRITE_PATHS: policy.denyWritePaths.join(':'),
+    OPEN_AGENT_SANDBOX_BYPASS_REQUESTED: policy.bypassRequested ? '1' : '0',
+    OPEN_AGENT_SANDBOX_BYPASS_ALLOWED: policy.bypassAllowed ? '1' : '0',
+  };
+}
+
+function wrapWithSandboxExec(
+  command: string[],
+  policy: BashSandboxExecutionPolicy | undefined,
+): { command: string; args: string[] } {
+  if (!policy?.enforce || policy.bypassRequested || process.platform !== 'darwin') {
+    return { command: command[0]!, args: command.slice(1) };
+  }
+  if (!existsSync(DARWIN_SANDBOX_EXEC)) {
+    return { command: command[0]!, args: command.slice(1) };
+  }
+
+  const profile = buildDarwinSandboxProfile(policy);
+  return {
+    command: DARWIN_SANDBOX_EXEC,
+    args: ['-p', profile, ...command],
+  };
+}
+
+function buildDarwinSandboxProfile(policy: BashSandboxExecutionPolicy): string {
+  const rules = [
+    '(version 1)',
+    '(allow default)',
+  ];
+
+  if (policy.networkDisabled) {
+    rules.push('(deny network*)');
+  }
+
+  if (policy.allowWritePaths.length > 0) {
+    rules.push('(deny file-write*)');
+    for (const allowedPath of policy.allowWritePaths) {
+      rules.push(`(allow file-write* (subpath "${escapeSandboxString(allowedPath)}"))`);
+    }
+  }
+
+  for (const deniedPath of policy.denyWritePaths) {
+    rules.push(`(deny file-write* (subpath "${escapeSandboxString(deniedPath)}"))`);
+  }
+
+  return rules.join('\n');
+}
+
+function escapeSandboxString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function usesNetwork(command: string): boolean {
+  const directNetwork = /\b(curl|wget|ssh|scp|sftp|nc|ncat|telnet|ping|ftp|rsync)\b/i;
+  const gitRemote = /\bgit\s+(clone|fetch|pull|push|ls-remote|remote|submodule)\b/i;
+  const urlLike = /\b(?:https?|ftp):\/\//i;
+  return directNetwork.test(command) || gitRemote.test(command) || urlLike.test(command);
+}
+
+function extractWriteTargets(command: string, cwd: string): string[] {
+  const candidates = new Set<string>();
+  const segments = command.split(/(?:&&|\|\||;|\n)/).map((segment) => segment.trim()).filter(Boolean);
+
+  for (const segment of segments) {
+    const tokens = tokenizeShell(segment);
+    if (tokens.length === 0) continue;
+
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i];
+      if (isRedirectionToken(token)) {
+        const next = tokens[i + 1];
+        if (next) addWriteTarget(candidates, next, cwd);
+        continue;
+      }
+      const inlineRedirect = extractInlineRedirectTarget(token);
+      if (inlineRedirect) addWriteTarget(candidates, inlineRedirect, cwd);
+      if (/^of=/.test(token)) {
+        addWriteTarget(candidates, token.slice(3), cwd);
+      }
+    }
+
+    const commandName = stripWrappingQuotes(tokens[0]);
+    const args = tokens.slice(1);
+    switch (commandName) {
+      case 'touch':
+      case 'mkdir':
+      case 'rm':
+      case 'rmdir':
+      case 'truncate':
+      case 'chmod':
+      case 'chown':
+        for (const arg of args) {
+          if (isOptionToken(arg)) continue;
+          addWriteTarget(candidates, arg, cwd);
+        }
+        break;
+      case 'tee':
+        for (const arg of args) {
+          if (isOptionToken(arg) || arg === '-') continue;
+          addWriteTarget(candidates, arg, cwd);
+        }
+        break;
+      case 'cp':
+      case 'mv':
+      case 'install':
+      case 'ln': {
+        const targets = args.filter((arg) => !isOptionToken(arg));
+        const destination = targets[targets.length - 1];
+        if (destination) addWriteTarget(candidates, destination, cwd);
+        break;
+      }
+      case 'sed': {
+        const hasInPlace = args.some((arg) => /^-i($|['"])/.test(arg) || arg === '--in-place');
+        if (hasInPlace) {
+          for (const arg of args) {
+            if (isOptionToken(arg)) continue;
+            addWriteTarget(candidates, arg, cwd);
+          }
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  return [...candidates];
+}
+
+function tokenizeShell(segment: string): string[] {
+  const matches = segment.match(/"[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*'|[^\s]+/g);
+  return matches ?? [];
+}
+
+function addWriteTarget(targets: Set<string>, raw: string, cwd: string): void {
+  const cleaned = stripWrappingQuotes(raw.trim());
+  if (!cleaned || cleaned === '-') return;
+  if (
+    cleaned.includes('$') ||
+    cleaned.includes('*') ||
+    cleaned.includes('?') ||
+    cleaned.includes('[') ||
+    cleaned.includes('`')
+  ) {
+    return;
+  }
+  const normalized = resolve(cwd, cleaned);
+  targets.add(normalized);
+}
+
+function stripWrappingQuotes(token: string): string {
+  if (token.length < 2) return token;
+  if (
+    (token.startsWith('"') && token.endsWith('"')) ||
+    (token.startsWith('\'') && token.endsWith('\''))
+  ) {
+    return token.slice(1, -1);
+  }
+  return token;
+}
+
+function isRedirectionToken(token: string): boolean {
+  return /^(?:\d?>>?|&>|2>|1>)$/.test(token);
+}
+
+function extractInlineRedirectTarget(token: string): string | null {
+  const match = token.match(/^(?:\d?>>?|&>)(.+)$/);
+  if (!match) return null;
+  return match[1];
+}
+
+function isOptionToken(token: string): boolean {
+  return token.startsWith('-');
+}
+
+function isPathInside(candidatePath: string, basePath: string): boolean {
+  const normalizedCandidate = resolve(candidatePath);
+  const normalizedBase = resolve(basePath);
+  return (
+    normalizedCandidate === normalizedBase ||
+    normalizedCandidate.startsWith(normalizedBase.endsWith(sep) ? normalizedBase : `${normalizedBase}${sep}`)
+  );
 }
