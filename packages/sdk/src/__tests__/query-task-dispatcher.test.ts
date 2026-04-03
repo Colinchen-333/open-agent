@@ -425,4 +425,69 @@ describe('query() task dispatcher control plane', () => {
       temp.cleanup();
     }
   });
+
+  it('builds a unified orchestration control-plane snapshot from task, worker, and dispatcher state', async () => {
+    const temp = makeTempHome('open-agent-sdk-orchestration-control-plane-');
+    const teamName = `dispatcher-team-${Date.now()}`;
+    const controlledFailure = makeControlledFailureProvider();
+
+    try {
+      const q = query('orchestration snapshot', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: controlledFailure.provider,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+      } as any);
+
+      await q.createTeam({ name: teamName, setActive: true });
+      const task = await q.createTask({
+        teamName,
+        subject: 'Snapshot task',
+        description: 'Validate unified orchestration control plane.',
+        priority: 3,
+      });
+      const dispatcher = await q.startTaskDispatcher({
+        dispatcherId: `dispatcher-${Date.now()}`,
+        owner: 'dispatcher-owner',
+        teamName,
+        pollIntervalMs: 25,
+        leaseMs: 500,
+      });
+
+      const runningDispatcher = await waitForDispatcher(
+        q,
+        dispatcher.dispatcherId,
+        (item) => item.status === 'running' && item.activeAssignments.length === 1,
+      );
+      const workerId = runningDispatcher.activeAssignments[0]!.workerId;
+
+      const snapshot = await q.readOrchestrationControlPlane({ teamName });
+      expect(snapshot.activeTeamName).toBe(teamName);
+      expect(snapshot.tasks).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: task.id, teamName }),
+      ]));
+      expect(snapshot.workers).toEqual(expect.arrayContaining([
+        expect.objectContaining({ workerId, teamName }),
+      ]));
+      expect(snapshot.dispatchers).toEqual(expect.arrayContaining([
+        expect.objectContaining({ dispatcherId: dispatcher.dispatcherId, teamName }),
+      ]));
+
+      const report = await q.inspectTaskDispatcherHealth(dispatcher.dispatcherId, {
+        now: new Date(Date.now() + 2_000),
+      });
+      expect(report).not.toBeNull();
+
+      const snapshotWithDiagnosis = await q.readOrchestrationControlPlane({ teamName });
+      expect(snapshotWithDiagnosis.dispatcherDiagnoses).toEqual(expect.arrayContaining([
+        expect.objectContaining({ dispatcherId: dispatcher.dispatcherId }),
+      ]));
+
+      q.close();
+    } finally {
+      controlledFailure.releaseFailure();
+      temp.cleanup();
+    }
+  });
 });

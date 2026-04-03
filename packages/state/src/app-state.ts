@@ -16,12 +16,21 @@ export interface TaskItem {
   description: string;
   status: 'pending' | 'in_progress' | 'completed' | 'deleted';
   owner?: string;
+  priority?: number;
   activeForm?: string;
   blocks?: string[];
   blockedBy?: string[];
+  lease?: {
+    owner: string;
+    claimedAt: string;
+    expiresAt: string;
+    attempts: number;
+  };
+  teamName: string;
   createdAt: string;
   updatedAt: string;
   metadata?: Record<string, unknown>;
+  payload?: unknown;
 }
 
 export interface AgentInstance {
@@ -108,6 +117,16 @@ export interface DispatcherDiagnosisControlPlaneState {
   payload: unknown;
 }
 
+export interface WorkerControlPlaneState {
+  workerId: string;
+  workerType: string;
+  status: string;
+  teamName?: string;
+  startedAt: string;
+  updatedAt: string;
+  payload: unknown;
+}
+
 export interface TimelineControlPlaneItemState {
   key: string;
   kind: string;
@@ -179,6 +198,7 @@ export interface AppState {
 
   // Runtime control plane
   runtime: RuntimeControlPlaneState;
+  workers: Record<string, WorkerControlPlaneState>;
   dispatchers: Record<string, DispatcherControlPlaneState>;
   dispatcherDiagnoses: Record<string, DispatcherDiagnosisControlPlaneState>;
   timeline: TimelineControlPlaneItemState[];
@@ -220,6 +240,7 @@ export function createDefaultAppState(overrides: Partial<AppState> = {}): AppSta
         dynamicTools: 0,
       },
     },
+    workers: {},
     dispatchers: {},
     dispatcherDiagnoses: {},
     timeline: [],

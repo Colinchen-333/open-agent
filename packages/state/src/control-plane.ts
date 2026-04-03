@@ -12,6 +12,8 @@ import type {
   TeamInboxMemberControlPlaneState,
   TeamInboxMessageControlPlaneState,
   TimelineControlPlaneItemState,
+  TaskItem,
+  WorkerControlPlaneState,
 } from './app-state.js';
 
 export interface RuntimeControlPlaneSnapshotInput {
@@ -98,6 +100,54 @@ export function setActiveTeamControlPlane(
   return {
     ...state,
     activeTeamName,
+  };
+}
+
+export function upsertTaskControlPlane(
+  state: AppState,
+  task: TaskItem,
+): AppState {
+  return {
+    ...state,
+    tasks: {
+      ...state.tasks,
+      [task.id]: {
+        ...task,
+        ...(task.blocks ? { blocks: [...task.blocks] } : {}),
+        ...(task.blockedBy ? { blockedBy: [...task.blockedBy] } : {}),
+        ...(task.metadata ? { metadata: { ...task.metadata } } : {}),
+      },
+    },
+  };
+}
+
+export function removeTaskControlPlane(
+  state: AppState,
+  taskId: string,
+): AppState {
+  if (!(taskId in state.tasks)) {
+    return state;
+  }
+  const next = { ...state.tasks };
+  delete next[taskId];
+  return {
+    ...state,
+    tasks: next,
+  };
+}
+
+export function upsertWorkerControlPlane(
+  state: AppState,
+  worker: WorkerControlPlaneState,
+): AppState {
+  return {
+    ...state,
+    workers: {
+      ...state.workers,
+      [worker.workerId]: {
+        ...worker,
+      },
+    },
   };
 }
 

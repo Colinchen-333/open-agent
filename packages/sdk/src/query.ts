@@ -24,6 +24,8 @@ import {
   syncRuntimeControlPlane,
   syncSessionControlPlane,
   syncToolRegistryState,
+  upsertTaskControlPlane,
+  upsertWorkerControlPlane,
   upsertDispatcherDiagnosisControlPlane,
   upsertDispatcherControlPlane,
 } from '@open-agent/state';
@@ -73,6 +75,8 @@ import type {
   RuntimeControlPlaneSnapshot,
   RuntimeDiagnosticListOptions,
   RuntimeDiagnosticRecord,
+  OrchestrationControlPlaneSnapshot,
+  OrchestrationControlPlaneOptions,
   TaskListOptions,
   TaskCreateInput,
   TaskUpdateInput,
@@ -1689,6 +1693,38 @@ export function query(
     }));
   };
 
+  const upsertTaskStoreRecord = (record: TaskRecord) => {
+    appStore.setState((prev) => upsertTaskControlPlane(prev, {
+      id: record.id,
+      subject: record.subject,
+      description: record.description,
+      status: record.status,
+      ...(record.owner ? { owner: record.owner } : {}),
+      ...(record.priority !== undefined ? { priority: record.priority } : {}),
+      ...(record.activeForm ? { activeForm: record.activeForm } : {}),
+      blocks: [...record.blocks],
+      blockedBy: [...record.blockedBy],
+      ...(record.lease ? { lease: { ...record.lease } } : {}),
+      teamName: record.teamName,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      ...(record.metadata ? { metadata: { ...record.metadata } } : {}),
+      payload: JSON.parse(JSON.stringify(record)),
+    }));
+  };
+
+  const upsertWorkerStoreRecord = (record: WorkerRecord) => {
+    appStore.setState((prev) => upsertWorkerControlPlane(prev, {
+      workerId: record.workerId,
+      workerType: record.workerType,
+      status: record.status,
+      ...(record.teamName ? { teamName: record.teamName } : {}),
+      startedAt: record.startedAt,
+      updatedAt: record.completedAt ?? record.startedAt,
+      payload: JSON.parse(JSON.stringify(record)),
+    }));
+  };
+
   const upsertDispatcherDiagnosisStoreRecord = (report: TaskDispatcherHealthReport) => {
     appStore.setState((prev) => upsertDispatcherDiagnosisControlPlane(prev, {
       dispatcherId: report.dispatcherId,
@@ -1760,11 +1796,49 @@ export function query(
     };
   };
 
+  const readOrchestrationControlPlaneSnapshot = (
+    options?: OrchestrationControlPlaneOptions,
+  ): OrchestrationControlPlaneSnapshot => {
+    const state = appStore.getState();
+    const teamName = normalizeOptionalString(options?.teamName);
+    return {
+      sessionId: state.sessionId,
+      activeTeamName: state.activeTeamName,
+      tasks: Object.values(state.tasks)
+        .map((entry) => entry.payload as TaskRecord)
+        .filter((entry) => !teamName || entry.teamName === teamName)
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+      workers: Object.values(state.workers)
+        .map((entry) => entry.payload as WorkerRecord)
+        .filter((entry) => !teamName || entry.teamName === teamName)
+        .sort((left, right) => left.startedAt.localeCompare(right.startedAt)),
+      dispatchers: Object.values(state.dispatchers)
+        .map((entry) => entry.payload as TaskDispatcherRecord)
+        .filter((entry) => !teamName || entry.teamName === teamName)
+        .sort((left, right) => left.startedAt.localeCompare(right.startedAt)),
+      dispatcherDiagnoses: Object.values(state.dispatcherDiagnoses)
+        .map((entry) => entry.payload as TaskDispatcherHealthReport)
+        .filter((entry) => !teamName || entry.dispatcher.teamName === teamName)
+        .sort((left, right) => left.observedAt.localeCompare(right.observedAt)),
+    };
+  };
+
   const appendOrchestrationTimelineStoreItem = (event: SDKOrchestrationEvent) => {
     if (event.kind !== 'worker_lifecycle') {
       return;
     }
     appendTimelineStoreItem(toTimelineOrchestrationItem(event));
+  };
+
+  const syncWorkerFromLifecycleEvent = (event: SDKOrchestrationEvent): void => {
+    if (event.kind !== 'worker_lifecycle' || !event.workerId) {
+      return;
+    }
+    const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
+    const session = persistedAgentExecutor.getAgent(event.workerId);
+    if (session) {
+      upsertWorkerStoreRecord(toWorkerRecord(session));
+    }
   };
 
   const loop = new ConversationLoop({
@@ -2525,6 +2599,10 @@ export function query(
         state.record.owner,
         status,
       );
+      const releasedTask = getTaskManager(state.record.teamName).get(assignment.taskId);
+      if (releasedTask) {
+        upsertTaskStoreRecord(toTaskRecord(releasedTask, state.record.teamName));
+      }
     } catch {
       // Non-fatal — the task may already have been released manually.
     }
@@ -2563,6 +2641,7 @@ export function query(
             state.record.leaseMs,
             heartbeatNow,
           );
+          upsertTaskStoreRecord(toTaskRecord(renewedTask, state.record.teamName));
           assignment.lastHeartbeatAt = heartbeatNow.toISOString();
           assignment.leaseExpiresAt = renewedTask.lease?.expiresAt;
           assignment.attempts = renewedTask.lease?.attempts;
@@ -2773,6 +2852,26 @@ export function query(
       .filter((entry) => !options?.severity || entry.severity === options.severity)
       .filter((entry) => !options?.source || entry.source === options.source)
   );
+
+  queryObj.readOrchestrationControlPlane = async (options?: OrchestrationControlPlaneOptions) => {
+    const teamName = normalizeOptionalString(options?.teamName);
+    if (teamName) {
+      await Promise.all([
+        queryObj.listTasks({ teamName }),
+        queryObj.listWorkers({ teamName }),
+        queryObj.listTaskDispatchers({ teamName }),
+        queryObj.listTaskDispatcherDiagnoses({ teamName }),
+      ]);
+    } else {
+      await Promise.all([
+        queryObj.listTasks(),
+        queryObj.listWorkers(),
+        queryObj.listTaskDispatchers(),
+        queryObj.listTaskDispatcherDiagnoses(),
+      ]);
+    }
+    return readOrchestrationControlPlaneSnapshot({ ...(teamName ? { teamName } : {}) });
+  };
 
   queryObj.supportedModels = async () => provider.listModels();
 
@@ -3483,6 +3582,7 @@ export function query(
   const emitStandaloneOrchestrationEvent = (event: SubagentStreamEvent): void => {
     const orchestrationEvent = convertSubagentEventToOrchestrationEvent(undefined, sessionId, event);
     if (!orchestrationEvent) return;
+    syncWorkerFromLifecycleEvent(orchestrationEvent);
     appendOrchestrationTimelineStoreItem(orchestrationEvent);
     handleTaskDispatcherOrchestrationEvent(orchestrationEvent);
     const taskNotification = buildTimelineTaskNotificationFromOrchestrationEvent(
@@ -3579,6 +3679,7 @@ export function query(
         throw new Error(`Worker ${agentId} was launched but its session could not be loaded.`);
       }
       const record = toWorkerRecord(session);
+      upsertWorkerStoreRecord(record);
       return worktreePath && worktreeBranch && !record.worktreeBranch
         ? { ...record, worktreePath, worktreeBranch }
         : record;
@@ -3600,17 +3701,25 @@ export function query(
   queryObj.listWorkers = async (options?: WorkerListOptions) => {
     const teamName = normalizeOptionalString(options?.teamName);
     const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
-    return persistedAgentExecutor
+    const records = persistedAgentExecutor
       .listPersistedAgents()
       .filter((session) => !teamName || session.teamName === teamName)
       .sort((left, right) => new Date(right.startedAt).getTime() - new Date(left.startedAt).getTime())
       .map((session) => toWorkerRecord(session));
+    for (const record of records) {
+      upsertWorkerStoreRecord(record);
+    }
+    return records;
   };
 
   queryObj.getWorker = async (workerId: string) => {
     const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
     const session = persistedAgentExecutor.getAgent(workerId);
-    return session ? toWorkerRecord(session) : null;
+    const record = session ? toWorkerRecord(session) : null;
+    if (record) {
+      upsertWorkerStoreRecord(record);
+    }
+    return record;
   };
 
   queryObj.getWorkerFollowUps = async (workerId: string) => {
@@ -3700,13 +3809,21 @@ export function query(
     const tasks = options?.availableOnly
       ? manager.listAvailable(options.now ?? new Date())
       : manager.listAll();
-    return tasks.map((task) => toTaskRecord(task, teamName));
+    const records = tasks.map((task) => toTaskRecord(task, teamName));
+    for (const record of records) {
+      upsertTaskStoreRecord(record);
+    }
+    return records;
   };
 
   queryObj.getTask = async (taskId: string, options?: { teamName?: string }) => {
     const teamName = resolveTaskTeamName(options?.teamName);
     const task = getTaskManager(teamName).get(taskId);
-    return task ? toTaskRecord(task, teamName) : null;
+    const record = task ? toTaskRecord(task, teamName) : null;
+    if (record) {
+      upsertTaskStoreRecord(record);
+    }
+    return record;
   };
 
   queryObj.createTask = async (input: TaskCreateInput) => {
@@ -3718,13 +3835,17 @@ export function query(
       input.metadata,
       input.priority,
     );
-    return toTaskRecord(item, teamName);
+    const record = toTaskRecord(item, teamName);
+    upsertTaskStoreRecord(record);
+    return record;
   };
 
   queryObj.updateTask = async (input: TaskUpdateInput) => {
     const teamName = resolveTaskTeamName(input.teamName);
     const item = getTaskManager(teamName).update(input.taskId, input as any);
-    return toTaskRecord(item, teamName);
+    const record = toTaskRecord(item, teamName);
+    upsertTaskStoreRecord(record);
+    return record;
   };
 
   queryObj.claimNextTask = async (owner: string, options?: TaskClaimOptions) => {
@@ -3733,7 +3854,11 @@ export function query(
       leaseMs: options?.leaseMs,
       now: options?.now,
     });
-    return task ? toTaskRecord(task, teamName) : null;
+    const record = task ? toTaskRecord(task, teamName) : null;
+    if (record) {
+      upsertTaskStoreRecord(record);
+    }
+    return record;
   };
 
   queryObj.heartbeatTask = async (taskId: string, owner: string, options?: TaskClaimOptions) => {
@@ -3744,7 +3869,9 @@ export function query(
       options?.leaseMs,
       options?.now,
     );
-    return toTaskRecord(task, teamName);
+    const record = toTaskRecord(task, teamName);
+    upsertTaskStoreRecord(record);
+    return record;
   };
 
   queryObj.releaseTask = async (taskId: string, owner: string, options?: TaskReleaseOptions) => {
@@ -3754,7 +3881,9 @@ export function query(
       owner,
       options?.status ?? 'pending',
     );
-    return toTaskRecord(task, teamName);
+    const record = toTaskRecord(task, teamName);
+    upsertTaskStoreRecord(record);
+    return record;
   };
 
   queryObj.dispatchNextTask = async (input: TaskDispatchInput): Promise<TaskDispatchResult | null> => {
@@ -3773,6 +3902,7 @@ export function query(
     }
 
     const taskRecord = toTaskRecord(claimed, teamName);
+    upsertTaskStoreRecord(taskRecord);
     const workerPrompt = normalizeOptionalString(input.prompt)
       ?? buildTaskDispatchPrompt(claimed);
 
@@ -4026,9 +4156,13 @@ export function query(
       const record = cloneTaskDispatcherRecord(syncTaskDispatcherRecord(state));
       merged.set(record.dispatcherId, record);
     }
-    return [...merged.values()]
+    const records = [...merged.values()]
       .filter((record) => (!teamName || record.teamName === teamName) && (!status || record.status === status))
       .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+    for (const record of records) {
+      upsertDispatcherStoreRecord(record);
+    }
+    return records;
   };
 
   queryObj.getTaskDispatcher = async (dispatcherId: string) => {
@@ -4157,10 +4291,14 @@ export function query(
         merged.set(report.dispatcherId, JSON.parse(JSON.stringify(report)) as TaskDispatcherHealthReport);
       }
     }
-    return [...merged.values()]
+    const reports = [...merged.values()]
       .filter((report) => !options?.teamName || report.dispatcher.teamName === options.teamName)
       .filter((report) => options?.healthy === undefined || report.healthy === options.healthy)
       .sort((left, right) => left.observedAt.localeCompare(right.observedAt));
+    for (const report of reports) {
+      upsertDispatcherDiagnosisStoreRecord(report);
+    }
+    return reports;
   };
 
   queryObj.requeueTaskDispatcherAssignment = async (

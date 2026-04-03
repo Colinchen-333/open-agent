@@ -364,6 +364,19 @@ export interface RuntimeDiagnosticListOptions {
   source?: NonNullable<RuntimeDiagnosticRecord['source']>;
 }
 
+export interface OrchestrationControlPlaneOptions {
+  teamName?: string;
+}
+
+export interface OrchestrationControlPlaneSnapshot {
+  sessionId: string;
+  activeTeamName: string | null;
+  tasks: TaskRecord[];
+  workers: WorkerRecord[];
+  dispatchers: TaskDispatcherRecord[];
+  dispatcherDiagnoses: TaskDispatcherHealthReport[];
+}
+
 export interface BackgroundTaskSummary {
   task_id: string;
   type: 'bash' | 'agent';
@@ -888,6 +901,8 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   readRuntimeControlPlane(): Promise<RuntimeControlPlaneSnapshot>;
   /** Return runtime diagnostics from the authoritative control-plane snapshot. */
   listRuntimeDiagnostics(options?: RuntimeDiagnosticListOptions): Promise<RuntimeDiagnosticRecord[]>;
+  /** Return the unified task/worker/dispatcher control-plane snapshot mirrored in AppState. */
+  readOrchestrationControlPlane(options?: OrchestrationControlPlaneOptions): Promise<OrchestrationControlPlaneSnapshot>;
   /** Return the runtime status of every configured MCP server. */
   mcpServerStatus(): Promise<McpServerStatus[]>;
   /** Return account/billing information for the active API key. */
@@ -1081,6 +1096,8 @@ export interface Session {
   readRuntimeControlPlane(): Promise<RuntimeControlPlaneSnapshot>;
   /** Return runtime diagnostics from the authoritative control-plane snapshot. */
   listRuntimeDiagnostics(options?: RuntimeDiagnosticListOptions): Promise<RuntimeDiagnosticRecord[]>;
+  /** Return the unified task/worker/dispatcher control-plane snapshot mirrored in AppState. */
+  readOrchestrationControlPlane(options?: OrchestrationControlPlaneOptions): Promise<OrchestrationControlPlaneSnapshot>;
   /** Return the runtime status of every configured MCP server. */
   mcpServerStatus(): Promise<McpServerStatus[]>;
   /** Return account/billing information for the active API key. */

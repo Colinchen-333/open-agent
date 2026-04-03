@@ -156,6 +156,7 @@ describe('createSession()', () => {
     expect(typeof session.supportedSkills).toBe('function');
     expect(typeof session.readRuntimeControlPlane).toBe('function');
     expect(typeof session.listRuntimeDiagnostics).toBe('function');
+    expect(typeof session.readOrchestrationControlPlane).toBe('function');
     expect(typeof session.mcpServerStatus).toBe('function');
     expect(typeof session.accountInfo).toBe('function');
     expect(typeof session.initializationResult).toBe('function');
@@ -352,6 +353,11 @@ describe('createSession()', () => {
     expect(runtimeControlPlane.permissionMode).toBe('acceptEdits');
     expect(Array.isArray(runtimeControlPlane.runtime.agentNames)).toBe(true);
     expect(Array.isArray(await session.listRuntimeDiagnostics())).toBe(true);
+    const orchestrationControlPlane = await session.readOrchestrationControlPlane();
+    expect(orchestrationControlPlane.sessionId).toBe(session.sessionId);
+    expect(Array.isArray(orchestrationControlPlane.tasks)).toBe(true);
+    expect(Array.isArray(orchestrationControlPlane.workers)).toBe(true);
+    expect(Array.isArray(orchestrationControlPlane.dispatchers)).toBe(true);
     expect(Array.isArray(await session.mcpServerStatus())).toBe(true);
     expect(Array.isArray(await session.listBackgroundTasks())).toBe(true);
 

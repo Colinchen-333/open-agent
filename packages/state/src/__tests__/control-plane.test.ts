@@ -2,6 +2,8 @@ import { describe, expect, it } from 'bun:test';
 import {
   appendTimelineControlPlane,
   createDefaultAppState,
+  upsertTaskControlPlane,
+  upsertWorkerControlPlane,
   removeDispatcherControlPlane,
   setActiveTeamControlPlane,
   upsertDispatcherDiagnosisControlPlane,
@@ -199,6 +201,43 @@ describe('state control plane helpers', () => {
       observedAt: '2026-01-01T00:00:00.000Z',
       findingCount: 2,
       payload: { dispatcherId: 'dispatcher-1' },
+    });
+  });
+
+  it('upserts task and worker control-plane state', () => {
+    const state = createDefaultAppState();
+    const withTask = upsertTaskControlPlane(state, {
+      id: 'task-1',
+      subject: 'Ship runtime surface',
+      description: 'Expose orchestration control plane',
+      status: 'pending',
+      priority: 2,
+      blocks: [],
+      blockedBy: [],
+      teamName: 'alpha',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      payload: { id: 'task-1' },
+    });
+    const withWorker = upsertWorkerControlPlane(withTask, {
+      workerId: 'worker-1',
+      workerType: 'worker',
+      status: 'running',
+      teamName: 'alpha',
+      startedAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:05.000Z',
+      payload: { workerId: 'worker-1' },
+    });
+
+    expect(withWorker.tasks['task-1']?.teamName).toBe('alpha');
+    expect(withWorker.workers['worker-1']).toEqual({
+      workerId: 'worker-1',
+      workerType: 'worker',
+      status: 'running',
+      teamName: 'alpha',
+      startedAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:05.000Z',
+      payload: { workerId: 'worker-1' },
     });
   });
 });
