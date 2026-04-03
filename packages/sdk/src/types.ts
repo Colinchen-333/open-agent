@@ -473,7 +473,7 @@ export interface TaskDispatcherRecord {
   dispatcherId: string;
   owner: string;
   teamName: string;
-  source: 'live' | 'transcript';
+  source: 'live' | 'ledger' | 'transcript';
   workerType: 'worker' | 'verifier';
   status: 'running' | 'draining' | 'stopped';
   pollIntervalMs: number;
