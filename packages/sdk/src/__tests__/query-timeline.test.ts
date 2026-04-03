@@ -443,4 +443,43 @@ describe('query() timeline control plane', () => {
       temp.cleanup();
     }
   });
+
+  it('dedupes task notifications between live timeline store and snapshot rebuild', async () => {
+    const temp = makeTempHome('open-agent-sdk-timeline-task-notification-dedupe-');
+    const teamName = `alpha-team-${Date.now()}`;
+
+    try {
+      const q = query('timeline task notification dedupe', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeBackgroundProvider(),
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+      });
+
+      await q.createTeam({ name: teamName, setActive: true });
+      const worker = await q.launchWorker({
+        prompt: 'Wait until stopped.',
+        teamName,
+      });
+      expect(await q.stopWorker(worker.workerId)).toEqual({ success: true });
+      await waitForWorkerStatus(q, worker.workerId, 'shutdown');
+
+      const timeline = await q.readTimelineInbox({
+        teamName,
+        includeTeamMessages: false,
+        includeTaskNotifications: true,
+      });
+      const notifications = timeline.filter((item) =>
+        item.kind === 'task_notification'
+        && item.workerId === worker.workerId,
+      );
+
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0]?.taskNotification?.status).toBe('stopped');
+      q.close();
+    } finally {
+      temp.cleanup();
+    }
+  });
 });

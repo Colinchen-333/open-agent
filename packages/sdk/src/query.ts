@@ -1595,6 +1595,21 @@ export function query(
     }));
   };
 
+  const appendTimelineStoreItems = (items: SDKTimelineItem[]) => {
+    if (items.length === 0) {
+      return;
+    }
+    appStore.setState((prev) => items.reduce((state, item) => appendTimelineControlPlane(state, {
+      key: item.cursor ?? item.timelineId ?? `${item.kind}:${item.timestamp}:${item.sessionId}`,
+      kind: item.kind,
+      sessionId: item.sessionId,
+      timestamp: item.timestamp,
+      ...(item.cursor ? { cursor: item.cursor } : {}),
+      ...(item.timelineId ? { timelineId: item.timelineId } : {}),
+      payload: JSON.parse(JSON.stringify(item)),
+    }), prev));
+  };
+
   const readTimelineStoreItems = (teamName?: string): SDKTimelineItem[] => (
     appStore.getState().timeline
       .map((entry) => entry.payload as SDKTimelineItem)
@@ -2647,7 +2662,9 @@ export function query(
       ...(typeof input.approve === 'boolean' ? { approve: input.approve } : {}),
     };
     sdkTeamManager.sendMessage(teamName, message);
-    return toTeamMessageRecord(teamName, message);
+    const record = toTeamMessageRecord(teamName, message);
+    appendTimelineStoreItem(toTimelineTeamMessage(record));
+    return record;
   };
 
   queryObj.readTeamInbox = async (options: TeamInboxOptions) => {
@@ -2659,7 +2676,9 @@ export function query(
       after: options?.after,
       limit: options?.limit,
     });
-    return entries.map((entry) => toTeamMessageRecord(teamName, entry.message, entry));
+    const records = entries.map((entry) => toTeamMessageRecord(teamName, entry.message, entry));
+    appendTimelineStoreItems(records.map((entry) => toTimelineTeamMessage(entry)));
+    return records;
   };
 
   queryObj.acknowledgeTeamInbox = async (input: TeamInboxAcknowledgeInput) => {
@@ -2772,12 +2791,18 @@ export function query(
       );
     }
     if (options.includeTaskNotifications !== false) {
-      items.push(
+      const taskNotificationItems = [
+        ...readTimelineStoreItems(options.teamName)
+          .filter((item) => item.kind === 'task_notification')
+          .filter((item) => !options.after || (item.cursor ?? item.timestamp) > options.after)
+          .slice(0, options.limit ?? Number.POSITIVE_INFINITY),
         ...collectTimelineTaskNotifications(options.teamName, transcriptEntries)
           .map((message) => toTimelineTaskNotification(message))
           .filter((item) => !options.after || (item.cursor ?? item.timestamp) > options.after)
           .slice(0, options.limit ?? Number.POSITIVE_INFINITY),
-      );
+      ];
+      appendTimelineStoreItems(taskNotificationItems);
+      items.push(...taskNotificationItems);
     }
     return sortTimelineItems(dedupeTimelineItems(items));
   };
@@ -3191,6 +3216,13 @@ export function query(
     const orchestrationEvent = convertSubagentEventToOrchestrationEvent(undefined, sessionId, event);
     if (!orchestrationEvent) return;
     handleTaskDispatcherOrchestrationEvent(orchestrationEvent);
+    const taskNotification = buildTimelineTaskNotificationFromOrchestrationEvent(
+      orchestrationEvent,
+      responseLanguage,
+    );
+    if (taskNotification) {
+      appendTimelineStoreItem(taskNotification);
+    }
     for (const subscriber of orchestrationSubscribers) {
       subscriber.push(orchestrationEvent);
     }
@@ -5241,6 +5273,12 @@ function buildTimelineTaskNotificationFromOrchestrationEvent(
   );
   return taskNotification ? {
     kind: 'task_notification',
+    ...(buildTaskNotificationFingerprint(taskNotification)
+      ? {
+          timelineId: buildTaskNotificationFingerprint(taskNotification)!,
+          cursor: buildTaskNotificationFingerprint(taskNotification)!,
+        }
+      : {}),
     sessionId: taskNotification.session_id,
     timestamp: taskNotification.completed_at ?? extractTimelineTimestamp(event),
     ...(taskNotification.team_name ? { teamName: taskNotification.team_name } : {}),
