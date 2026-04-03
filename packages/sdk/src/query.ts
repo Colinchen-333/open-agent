@@ -2594,6 +2594,13 @@ export function query(
   };
 
   const syncTaskDispatcherRecord = (state: TaskDispatcherState): TaskDispatcherRecord => {
+    state.record.name = state.name;
+    state.record.prompt = state.prompt;
+    state.record.model = state.model;
+    state.record.maxTurns = state.maxTurns;
+    state.record.mode = state.mode;
+    state.record.cwd = state.cwd;
+    state.record.isolation = state.isolation;
     const activeAssignments = [...state.activeAssignments.values()].map((assignment) => ({
       taskId: assignment.taskId,
       workerId: assignment.workerId,
@@ -2608,6 +2615,46 @@ export function query(
     upsertDispatcherStoreRecord(state.record);
     persistTaskDispatcherLedgerRecord(state.record);
     return state.record;
+  };
+
+  const hydrateTaskDispatcherState = (record: TaskDispatcherRecord): TaskDispatcherState => {
+    const clonedRecord = cloneTaskDispatcherRecord(record);
+    const state: TaskDispatcherState = {
+      record: {
+        ...clonedRecord,
+        source: 'live',
+      },
+      ...(clonedRecord.prompt ? { prompt: clonedRecord.prompt } : {}),
+      ...(clonedRecord.name ? { name: clonedRecord.name } : {}),
+      ...(clonedRecord.model ? { model: clonedRecord.model } : {}),
+      ...(clonedRecord.maxTurns !== undefined ? { maxTurns: clonedRecord.maxTurns } : {}),
+      ...(clonedRecord.mode ? { mode: clonedRecord.mode } : {}),
+      ...(clonedRecord.cwd ? { cwd: clonedRecord.cwd } : {}),
+      ...(clonedRecord.isolation ? { isolation: clonedRecord.isolation } : {}),
+      timer: null,
+      running: false,
+      rerunRequested: false,
+      disposed: false,
+      activeAssignments: new Map(
+        clonedRecord.activeAssignments.map((assignment) => [assignment.workerId, {
+          taskId: assignment.taskId,
+          workerId: assignment.workerId,
+          ...(assignment.claimedAt ? { claimedAt: assignment.claimedAt } : {}),
+          ...(assignment.lastHeartbeatAt ? { lastHeartbeatAt: assignment.lastHeartbeatAt } : {}),
+          ...(assignment.leaseExpiresAt ? { leaseExpiresAt: assignment.leaseExpiresAt } : {}),
+          ...(assignment.attempts !== undefined ? { attempts: assignment.attempts } : {}),
+        }]),
+      ),
+    };
+    for (const assignment of state.activeAssignments.values()) {
+      taskDispatcherByWorkerId.set(assignment.workerId, {
+        dispatcherId: state.record.dispatcherId,
+        taskId: assignment.taskId,
+      });
+    }
+    taskDispatchers.set(state.record.dispatcherId, state);
+    syncTaskDispatcherRecord(state);
+    return state;
   };
 
   const markTaskDispatcherStopped = (state: TaskDispatcherState): TaskDispatcherRecord => {
@@ -3574,30 +3621,55 @@ export function query(
         if (!owner) {
           throw new Error('TaskDispatcher start follow-up action is missing an owner.');
         }
-        const dispatcher = await queryObj.startTaskDispatcher({
-          owner,
-          ...(normalizeOptionalString(action.arguments['dispatcher_id']) ? { dispatcherId: normalizeOptionalString(action.arguments['dispatcher_id']) } : {}),
-          ...(normalizeOptionalString(action.arguments['team_name']) ? { teamName: normalizeOptionalString(action.arguments['team_name']) } : {}),
-          ...(normalizeOptionalString(action.arguments['worker_type']) === 'verifier' ? { workerType: 'verifier' as const } : {}),
-          ...(normalizeOptionalString(action.arguments['name']) ? { name: normalizeOptionalString(action.arguments['name']) } : {}),
-          ...(normalizeOptionalString(action.arguments['prompt']) ? { prompt: normalizeOptionalString(action.arguments['prompt']) } : {}),
-          ...(normalizeOptionalString(action.arguments['model']) ? { model: normalizeOptionalString(action.arguments['model']) } : {}),
-          ...(normalizeOptionalString(action.arguments['mode']) ? { mode: normalizeOptionalString(action.arguments['mode']) } : {}),
-          ...(normalizeOptionalString(action.arguments['cwd']) ? { cwd: normalizeOptionalString(action.arguments['cwd']) } : {}),
-          ...(action.arguments['isolation'] === 'worktree' ? { isolation: 'worktree' as const } : {}),
-          ...(normalizeIntegerField(action.arguments['max_turns']) !== undefined
-            ? { maxTurns: normalizeIntegerField(action.arguments['max_turns'])! }
-            : {}),
-          ...(normalizeIntegerField(action.arguments['poll_interval_ms']) !== undefined
-            ? { pollIntervalMs: normalizeIntegerField(action.arguments['poll_interval_ms'])! }
-            : {}),
-          ...(normalizeIntegerField(action.arguments['lease_ms']) !== undefined
-            ? { leaseMs: normalizeIntegerField(action.arguments['lease_ms'])! }
-            : {}),
-          ...(normalizeIntegerField(action.arguments['max_concurrent_workers']) !== undefined
-            ? { maxConcurrentWorkers: normalizeIntegerField(action.arguments['max_concurrent_workers'])! }
-            : {}),
-        });
+        const dispatcherId = normalizeOptionalString(action.arguments['dispatcher_id']);
+        const dispatcher = dispatcherId
+          ? await queryObj.resumeTaskDispatcher(dispatcherId) ?? await queryObj.startTaskDispatcher({
+              owner,
+              dispatcherId,
+              ...(normalizeOptionalString(action.arguments['team_name']) ? { teamName: normalizeOptionalString(action.arguments['team_name']) } : {}),
+              ...(normalizeOptionalString(action.arguments['worker_type']) === 'verifier' ? { workerType: 'verifier' as const } : {}),
+              ...(normalizeOptionalString(action.arguments['name']) ? { name: normalizeOptionalString(action.arguments['name']) } : {}),
+              ...(normalizeOptionalString(action.arguments['prompt']) ? { prompt: normalizeOptionalString(action.arguments['prompt']) } : {}),
+              ...(normalizeOptionalString(action.arguments['model']) ? { model: normalizeOptionalString(action.arguments['model']) } : {}),
+              ...(normalizeOptionalString(action.arguments['mode']) ? { mode: normalizeOptionalString(action.arguments['mode']) } : {}),
+              ...(normalizeOptionalString(action.arguments['cwd']) ? { cwd: normalizeOptionalString(action.arguments['cwd']) } : {}),
+              ...(action.arguments['isolation'] === 'worktree' ? { isolation: 'worktree' as const } : {}),
+              ...(normalizeIntegerField(action.arguments['max_turns']) !== undefined
+                ? { maxTurns: normalizeIntegerField(action.arguments['max_turns'])! }
+                : {}),
+              ...(normalizeIntegerField(action.arguments['poll_interval_ms']) !== undefined
+                ? { pollIntervalMs: normalizeIntegerField(action.arguments['poll_interval_ms'])! }
+                : {}),
+              ...(normalizeIntegerField(action.arguments['lease_ms']) !== undefined
+                ? { leaseMs: normalizeIntegerField(action.arguments['lease_ms'])! }
+                : {}),
+              ...(normalizeIntegerField(action.arguments['max_concurrent_workers']) !== undefined
+                ? { maxConcurrentWorkers: normalizeIntegerField(action.arguments['max_concurrent_workers'])! }
+                : {}),
+            })
+          : await queryObj.startTaskDispatcher({
+              owner,
+              ...(normalizeOptionalString(action.arguments['team_name']) ? { teamName: normalizeOptionalString(action.arguments['team_name']) } : {}),
+              ...(normalizeOptionalString(action.arguments['worker_type']) === 'verifier' ? { workerType: 'verifier' as const } : {}),
+              ...(normalizeOptionalString(action.arguments['name']) ? { name: normalizeOptionalString(action.arguments['name']) } : {}),
+              ...(normalizeOptionalString(action.arguments['prompt']) ? { prompt: normalizeOptionalString(action.arguments['prompt']) } : {}),
+              ...(normalizeOptionalString(action.arguments['model']) ? { model: normalizeOptionalString(action.arguments['model']) } : {}),
+              ...(normalizeOptionalString(action.arguments['mode']) ? { mode: normalizeOptionalString(action.arguments['mode']) } : {}),
+              ...(normalizeOptionalString(action.arguments['cwd']) ? { cwd: normalizeOptionalString(action.arguments['cwd']) } : {}),
+              ...(action.arguments['isolation'] === 'worktree' ? { isolation: 'worktree' as const } : {}),
+              ...(normalizeIntegerField(action.arguments['max_turns']) !== undefined
+                ? { maxTurns: normalizeIntegerField(action.arguments['max_turns'])! }
+                : {}),
+              ...(normalizeIntegerField(action.arguments['poll_interval_ms']) !== undefined
+                ? { pollIntervalMs: normalizeIntegerField(action.arguments['poll_interval_ms'])! }
+                : {}),
+              ...(normalizeIntegerField(action.arguments['lease_ms']) !== undefined
+                ? { leaseMs: normalizeIntegerField(action.arguments['lease_ms'])! }
+                : {}),
+              ...(normalizeIntegerField(action.arguments['max_concurrent_workers']) !== undefined
+                ? { maxConcurrentWorkers: normalizeIntegerField(action.arguments['max_concurrent_workers'])! }
+                : {}),
+            });
         return {
           kind: 'task_dispatcher',
           followUpKind: scaffold.kind,
@@ -4056,6 +4128,13 @@ export function query(
         pollIntervalMs,
         leaseMs,
         maxConcurrentWorkers,
+        ...(normalizeOptionalString(input.name) ? { name: normalizeOptionalString(input.name) } : {}),
+        ...(normalizeOptionalString(input.prompt) ? { prompt: normalizeOptionalString(input.prompt) } : {}),
+        ...(normalizeOptionalString(input.model) ? { model: normalizeOptionalString(input.model) } : {}),
+        ...(input.maxTurns !== undefined ? { maxTurns: input.maxTurns } : {}),
+        ...(normalizeOptionalString(input.mode) ? { mode: normalizeOptionalString(input.mode) } : {}),
+        ...(normalizeOptionalString(input.cwd) ? { cwd: normalizeOptionalString(input.cwd) } : {}),
+        ...(input.isolation ? { isolation: input.isolation } : {}),
         activeTaskIds: [],
         activeWorkerIds: [],
         activeAssignments: [],
@@ -4078,6 +4157,40 @@ export function query(
     taskDispatchers.set(dispatcherId, state);
     syncTaskDispatcherRecord(state);
     emitTaskDispatcherOrchestrationEvent(state, 'started', { timestamp: startedAt });
+    scheduleTaskDispatcherRun(state, 0);
+    return cloneTaskDispatcherRecord(state.record);
+  };
+
+  queryObj.resumeTaskDispatcher = async (dispatcherId: string): Promise<TaskDispatcherRecord | null> => {
+    const normalizedDispatcherId = normalizeOptionalString(dispatcherId);
+    if (!normalizedDispatcherId) {
+      throw new Error('dispatcherId is required to resume a task dispatcher.');
+    }
+
+    const existing = taskDispatchers.get(normalizedDispatcherId);
+    if (existing && !existing.disposed) {
+      if (existing.record.status !== 'stopped') {
+        return cloneTaskDispatcherRecord(syncTaskDispatcherRecord(existing));
+      }
+      taskDispatchers.delete(normalizedDispatcherId);
+      for (const assignment of existing.activeAssignments.values()) {
+        taskDispatcherByWorkerId.delete(assignment.workerId);
+      }
+    }
+
+    const persisted = readPersistedTaskDispatcherRecords().find((record) => record.dispatcherId === normalizedDispatcherId);
+    if (!persisted) {
+      return null;
+    }
+
+    const state = hydrateTaskDispatcherState({
+      ...persisted,
+      source: 'live',
+      status: persisted.status === 'stopped' ? 'running' : persisted.status,
+      ...(persisted.stoppedAt ? { stoppedAt: undefined } : {}),
+      updatedAt: new Date().toISOString(),
+    });
+    emitTaskDispatcherOrchestrationEvent(state, 'started', { timestamp: state.record.updatedAt });
     scheduleTaskDispatcherRun(state, 0);
     return cloneTaskDispatcherRecord(state.record);
   };
@@ -4485,6 +4598,13 @@ export function query(
           pollIntervalMs: dispatcherEvent.pollIntervalMs,
           leaseMs: dispatcherEvent.leaseMs,
           maxConcurrentWorkers: dispatcherEvent.maxConcurrentWorkers,
+          ...(dispatcherEvent.name ? { name: dispatcherEvent.name } : {}),
+          ...(dispatcherEvent.prompt ? { prompt: dispatcherEvent.prompt } : {}),
+          ...(dispatcherEvent.model ? { model: dispatcherEvent.model } : {}),
+          ...(dispatcherEvent.maxTurns !== undefined ? { maxTurns: dispatcherEvent.maxTurns } : {}),
+          ...(dispatcherEvent.mode ? { mode: dispatcherEvent.mode } : {}),
+          ...(dispatcherEvent.cwd ? { cwd: dispatcherEvent.cwd } : {}),
+          ...(dispatcherEvent.isolation ? { isolation: dispatcherEvent.isolation } : {}),
           activeTaskIds: [...dispatcherEvent.activeTaskIds],
           activeWorkerIds: [...dispatcherEvent.activeWorkerIds],
           activeAssignments: [...dispatcherEvent.activeAssignments],

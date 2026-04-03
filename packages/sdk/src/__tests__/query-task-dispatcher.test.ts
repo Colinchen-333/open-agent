@@ -652,4 +652,96 @@ describe('query() task dispatcher control plane', () => {
       temp.cleanup();
     }
   });
+
+  it('resumes a stopped dispatcher from durable state and restarts live dispatching', async () => {
+    const temp = makeTempHome('open-agent-sdk-task-dispatcher-resume-');
+    const teamName = `dispatcher-team-${Date.now()}`;
+    const sessionId = randomUUID();
+
+    try {
+      const writer = query('dispatcher resume writer', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeCompletingWorkerProvider(),
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        sessionId,
+      } as any);
+
+      await writer.createTeam({ name: teamName, setActive: true });
+      const firstTask = await writer.createTask({
+        teamName,
+        subject: 'First pass',
+        description: 'Complete before resume.',
+        priority: 10,
+      });
+
+      const dispatcher = await writer.startTaskDispatcher({
+        dispatcherId: `dispatcher-${Date.now()}`,
+        owner: 'dispatcher-owner',
+        teamName,
+        pollIntervalMs: 25,
+        leaseMs: 500,
+        name: 'resume-dispatcher',
+        prompt: 'Continue processing queued tasks.',
+        mode: 'plan',
+      });
+
+      await waitForTask(
+        writer,
+        firstTask.id,
+        teamName,
+        (item) => item.status === 'completed',
+      );
+      await waitForDispatcher(
+        writer,
+        dispatcher.dispatcherId,
+        (item) => item.status === 'running' && item.activeAssignments.length === 0,
+      );
+      await writer.stopTaskDispatcher(dispatcher.dispatcherId);
+      await waitForDispatcher(
+        writer,
+        dispatcher.dispatcherId,
+        (item) => item.status === 'stopped',
+      );
+
+      const secondTask = await writer.createTask({
+        teamName,
+        subject: 'Second pass',
+        description: 'Complete after dispatcher resume.',
+        priority: 5,
+      });
+
+      writer.close();
+
+      const reader = query('dispatcher resume reader', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeCompletingWorkerProvider(),
+        sessionId,
+      } as any);
+
+      const resumed = await reader.resumeTaskDispatcher(dispatcher.dispatcherId);
+      expect(resumed).toMatchObject({
+        dispatcherId: dispatcher.dispatcherId,
+        status: 'running',
+        source: 'live',
+        name: 'resume-dispatcher',
+        prompt: 'Continue processing queued tasks.',
+        mode: 'plan',
+      });
+
+      await waitForTask(
+        reader,
+        secondTask.id,
+        teamName,
+        (item) => item.status === 'completed',
+      );
+
+      await reader.stopTaskDispatcher(dispatcher.dispatcherId);
+      reader.close();
+    } finally {
+      temp.cleanup();
+    }
+  });
 });

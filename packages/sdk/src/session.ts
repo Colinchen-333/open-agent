@@ -134,6 +134,7 @@ type SessionControlMethods = Pick<
   | 'heartbeatTask'
   | 'releaseTask'
   | 'startTaskDispatcher'
+  | 'resumeTaskDispatcher'
   | 'getTaskDispatcher'
   | 'listTaskDispatchers'
   | 'inspectTaskDispatcherHealth'
@@ -436,6 +437,7 @@ function _buildSession(
     releaseTask: (...args) => q.releaseTask(...args),
     dispatchNextTask: (...args) => q.dispatchNextTask(...args),
     startTaskDispatcher: (...args) => q.startTaskDispatcher(...args),
+    resumeTaskDispatcher: (...args) => q.resumeTaskDispatcher(...args),
     getTaskDispatcher: (...args) => q.getTaskDispatcher(...args),
     listTaskDispatchers: (...args) => q.listTaskDispatchers(...args),
     inspectTaskDispatcherHealth: (...args) => q.inspectTaskDispatcherHealth(...args),
@@ -701,6 +703,7 @@ export function unstable_v2_createSession(
     releaseTask: (...args) => q.releaseTask(...args),
     dispatchNextTask: (...args) => q.dispatchNextTask(...args),
     startTaskDispatcher: (...args) => q.startTaskDispatcher(...args),
+    resumeTaskDispatcher: (...args) => q.resumeTaskDispatcher(...args),
     getTaskDispatcher: (...args) => q.getTaskDispatcher(...args),
     listTaskDispatchers: (...args) => q.listTaskDispatchers(...args),
     inspectTaskDispatcherHealth: (...args) => q.inspectTaskDispatcherHealth(...args),

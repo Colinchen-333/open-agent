@@ -553,6 +553,13 @@ export interface TaskDispatcherRecord {
   pollIntervalMs: number;
   leaseMs: number;
   maxConcurrentWorkers: number;
+  name?: string;
+  prompt?: string;
+  model?: string;
+  maxTurns?: number;
+  mode?: string;
+  cwd?: string;
+  isolation?: 'worktree';
   activeTaskIds: string[];
   activeWorkerIds: string[];
   activeAssignments: TaskDispatcherAssignmentRecord[];
@@ -982,6 +989,8 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   dispatchNextTask(input: TaskDispatchInput): Promise<TaskDispatchResult | null>;
   /** Start a background dispatcher loop that continuously claims and dispatches tasks. */
   startTaskDispatcher(input: TaskDispatcherStartInput): Promise<TaskDispatcherRecord>;
+  /** Rehydrate a persisted dispatcher into a live loop using its durable control-plane state. */
+  resumeTaskDispatcher(dispatcherId: string): Promise<TaskDispatcherRecord | null>;
   /** Return a single live task dispatcher tracked by this query handle. */
   getTaskDispatcher(dispatcherId: string): Promise<TaskDispatcherRecord | null>;
   /** List live task dispatchers tracked by this query handle. */
@@ -1172,6 +1181,8 @@ export interface Session {
   dispatchNextTask(input: TaskDispatchInput): Promise<TaskDispatchResult | null>;
   /** Start a background dispatcher loop that continuously claims and dispatches tasks. */
   startTaskDispatcher(input: TaskDispatcherStartInput): Promise<TaskDispatcherRecord>;
+  /** Rehydrate a persisted dispatcher into a live loop using its durable control-plane state. */
+  resumeTaskDispatcher(dispatcherId: string): Promise<TaskDispatcherRecord | null>;
   /** Return a single live task dispatcher tracked by this query handle. */
   getTaskDispatcher(dispatcherId: string): Promise<TaskDispatcherRecord | null>;
   /** List live task dispatchers tracked by this query handle. */
