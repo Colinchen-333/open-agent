@@ -70,6 +70,9 @@ import type {
   RewindFilesResult,
   AgentInfo,
   BackgroundTaskInspection,
+  RuntimeControlPlaneSnapshot,
+  RuntimeDiagnosticListOptions,
+  RuntimeDiagnosticRecord,
   TaskListOptions,
   TaskCreateInput,
   TaskUpdateInput,
@@ -1732,6 +1735,31 @@ export function query(
       .filter((item) => !teamName || item.teamName === teamName)
   );
 
+  const readRuntimeControlPlaneSnapshot = (): RuntimeControlPlaneSnapshot => {
+    const state = appStore.getState();
+    return {
+      sessionId: state.sessionId,
+      cwd: state.cwd,
+      model: state.model,
+      permissionMode: state.permissionMode,
+      activeTeamName: state.activeTeamName,
+      mcpServers: state.mcpServers.map((server) => ({ ...server })),
+      runtime: {
+        agentNames: [...state.runtime.agentNames],
+        skillNames: [...state.runtime.skillNames],
+        plugins: state.runtime.plugins.map((plugin) => ({ ...plugin })),
+        hooks: state.runtime.hooks.map((hook) => ({
+          ...hook,
+          sources: [...hook.sources],
+        })),
+        diagnostics: state.runtime.diagnostics.map((entry) => ({ ...entry })) as RuntimeDiagnosticRecord[],
+        capabilitySummary: {
+          ...state.runtime.capabilitySummary,
+        },
+      },
+    };
+  };
+
   const appendOrchestrationTimelineStoreItem = (event: SDKOrchestrationEvent) => {
     if (event.kind !== 'worker_lifecycle') {
       return;
@@ -2737,6 +2765,14 @@ export function query(
     await runtimeReadyPromise;
     return runtime.listSkills();
   };
+
+  queryObj.readRuntimeControlPlane = async () => readRuntimeControlPlaneSnapshot();
+
+  queryObj.listRuntimeDiagnostics = async (options?: RuntimeDiagnosticListOptions) => (
+    readRuntimeControlPlaneSnapshot().runtime.diagnostics
+      .filter((entry) => !options?.severity || entry.severity === options.severity)
+      .filter((entry) => !options?.source || entry.source === options.source)
+  );
 
   queryObj.supportedModels = async () => provider.listModels();
 

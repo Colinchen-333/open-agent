@@ -900,6 +900,17 @@ describe('QueryOptions unsupported official placeholders', () => {
       'plugin_invalid_command_definition',
       'plugin_invalid_agent_definition',
     ]));
+    await expect(q.listRuntimeDiagnostics({ source: 'hook' })).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'plugin_invalid_hook_event' }),
+      expect.objectContaining({ code: 'plugin_invalid_hook_definition' }),
+    ]));
+    await expect(q.readRuntimeControlPlane()).resolves.toMatchObject({
+      runtime: {
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ code: 'plugin_invalid_agent_definition' }),
+        ]),
+      },
+    });
     q.close();
   });
 
@@ -922,6 +933,19 @@ describe('QueryOptions unsupported official placeholders', () => {
       'agent_invalid_definition',
       'agent_override',
     ]));
+    await expect(q.listRuntimeDiagnostics({ source: 'agent' })).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'agent_invalid_definition' }),
+      expect.objectContaining({ code: 'agent_override' }),
+    ]));
+    await expect(q.readRuntimeControlPlane()).resolves.toMatchObject({
+      activeTeamName: null,
+      runtime: {
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ code: 'agent_invalid_definition' }),
+          expect.objectContaining({ code: 'agent_override' }),
+        ]),
+      },
+    });
     q.close();
   });
 });

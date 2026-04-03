@@ -303,6 +303,67 @@ export interface AgentInfo {
   model?: string;
 }
 
+export interface RuntimeDiagnosticRecord {
+  code: string;
+  message: string;
+  severity: 'info' | 'warning' | 'error';
+  source?: 'plugin' | 'hook' | 'agent' | 'runtime';
+}
+
+export interface RuntimeControlPlanePluginRecord {
+  name: string;
+  path: string;
+  version: string;
+  enabled: boolean;
+  agentCount: number;
+  skillCount: number;
+  commandCount: number;
+  mcpServerCount: number;
+  hookEventCount: number;
+  hookCount: number;
+}
+
+export interface RuntimeControlPlaneHookRecord {
+  event: string;
+  count: number;
+  sources: string[];
+}
+
+export interface RuntimeControlPlaneMcpServerRecord {
+  name: string;
+  status: 'connected' | 'connecting' | 'disconnected' | 'error';
+  toolCount: number;
+  error?: string;
+}
+
+export interface RuntimeControlPlaneCapabilitySummary {
+  totalTools: number;
+  mcpTools: number;
+  dynamicTools: number;
+}
+
+export interface RuntimeControlPlaneSnapshot {
+  sessionId: string;
+  cwd: string;
+  model: string;
+  permissionMode: PermissionMode;
+  activeTeamName: string | null;
+  mcpServers: RuntimeControlPlaneMcpServerRecord[];
+  runtime: {
+    agentNames: string[];
+    skillNames: string[];
+    plugins: RuntimeControlPlanePluginRecord[];
+    hooks: RuntimeControlPlaneHookRecord[];
+    diagnostics: RuntimeDiagnosticRecord[];
+    capabilitySummary: RuntimeControlPlaneCapabilitySummary;
+  };
+}
+
+export interface RuntimeDiagnosticListOptions {
+  severity?: RuntimeDiagnosticRecord['severity'];
+  source?: NonNullable<RuntimeDiagnosticRecord['source']>;
+}
+
 export interface BackgroundTaskSummary {
   task_id: string;
   type: 'bash' | 'agent';
@@ -823,6 +884,10 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   supportedAgents(): Promise<AgentInfo[]>;
   /** Return the resolved skill catalog for this session. */
   supportedSkills(): Promise<SkillCatalogEntry[]>;
+  /** Return the authoritative runtime control-plane snapshot mirrored in AppState. */
+  readRuntimeControlPlane(): Promise<RuntimeControlPlaneSnapshot>;
+  /** Return runtime diagnostics from the authoritative control-plane snapshot. */
+  listRuntimeDiagnostics(options?: RuntimeDiagnosticListOptions): Promise<RuntimeDiagnosticRecord[]>;
   /** Return the runtime status of every configured MCP server. */
   mcpServerStatus(): Promise<McpServerStatus[]>;
   /** Return account/billing information for the active API key. */
@@ -1012,6 +1077,10 @@ export interface Session {
   supportedAgents(): Promise<AgentInfo[]>;
   /** Return the resolved skill catalog for this session. */
   supportedSkills(): Promise<SkillCatalogEntry[]>;
+  /** Return the authoritative runtime control-plane snapshot mirrored in AppState. */
+  readRuntimeControlPlane(): Promise<RuntimeControlPlaneSnapshot>;
+  /** Return runtime diagnostics from the authoritative control-plane snapshot. */
+  listRuntimeDiagnostics(options?: RuntimeDiagnosticListOptions): Promise<RuntimeDiagnosticRecord[]>;
   /** Return the runtime status of every configured MCP server. */
   mcpServerStatus(): Promise<McpServerStatus[]>;
   /** Return account/billing information for the active API key. */

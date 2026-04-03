@@ -96,6 +96,8 @@ type SessionControlMethods = Pick<
   | 'supportedModels'
   | 'supportedAgents'
   | 'supportedSkills'
+  | 'readRuntimeControlPlane'
+  | 'listRuntimeDiagnostics'
   | 'mcpServerStatus'
   | 'accountInfo'
   | 'initializationResult'
@@ -394,6 +396,8 @@ function _buildSession(
     supportedModels: (...args) => q.supportedModels(...args),
     supportedAgents: (...args) => q.supportedAgents(...args),
     supportedSkills: (...args) => q.supportedSkills(...args),
+    readRuntimeControlPlane: (...args) => q.readRuntimeControlPlane(...args),
+    listRuntimeDiagnostics: (...args) => q.listRuntimeDiagnostics(...args),
     mcpServerStatus: (...args) => q.mcpServerStatus(...args),
     accountInfo: (...args) => q.accountInfo(...args),
     initializationResult: (...args) => q.initializationResult(...args),
@@ -656,6 +660,8 @@ export function unstable_v2_createSession(
     supportedModels: (...args) => q.supportedModels(...args),
     supportedAgents: (...args) => q.supportedAgents(...args),
     supportedSkills: (...args) => q.supportedSkills(...args),
+    readRuntimeControlPlane: (...args) => q.readRuntimeControlPlane(...args),
+    listRuntimeDiagnostics: (...args) => q.listRuntimeDiagnostics(...args),
     mcpServerStatus: (...args) => q.mcpServerStatus(...args),
     accountInfo: (...args) => q.accountInfo(...args),
     initializationResult: (...args) => q.initializationResult(...args),

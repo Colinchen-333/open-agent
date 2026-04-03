@@ -154,6 +154,8 @@ describe('createSession()', () => {
     expect(typeof session.supportedModels).toBe('function');
     expect(typeof session.supportedAgents).toBe('function');
     expect(typeof session.supportedSkills).toBe('function');
+    expect(typeof session.readRuntimeControlPlane).toBe('function');
+    expect(typeof session.listRuntimeDiagnostics).toBe('function');
     expect(typeof session.mcpServerStatus).toBe('function');
     expect(typeof session.accountInfo).toBe('function');
     expect(typeof session.initializationResult).toBe('function');
@@ -345,6 +347,11 @@ describe('createSession()', () => {
 
     expect(Array.isArray(await session.supportedAgents())).toBe(true);
     expect(Array.isArray(await session.supportedSkills())).toBe(true);
+    const runtimeControlPlane = await session.readRuntimeControlPlane();
+    expect(runtimeControlPlane.sessionId).toBe(session.sessionId);
+    expect(runtimeControlPlane.permissionMode).toBe('acceptEdits');
+    expect(Array.isArray(runtimeControlPlane.runtime.agentNames)).toBe(true);
+    expect(Array.isArray(await session.listRuntimeDiagnostics())).toBe(true);
     expect(Array.isArray(await session.mcpServerStatus())).toBe(true);
     expect(Array.isArray(await session.listBackgroundTasks())).toBe(true);
 
