@@ -4554,6 +4554,43 @@ export function query(
     const findings: TaskDispatcherHealthFinding[] = [];
 
     for (const assignment of dispatcher.activeAssignments) {
+      const task = await queryObj.getTask(assignment.taskId, { teamName: dispatcher.teamName });
+      if (!task) {
+        findings.push({
+          code: 'task_missing',
+          severity: 'error',
+          message: `Task ${assignment.taskId} is missing for dispatcher assignment ${assignment.workerId}.`,
+          observedAt,
+          taskId: assignment.taskId,
+          workerId: assignment.workerId,
+        });
+      } else {
+        const leaseOwner = task.lease?.owner;
+        const driftReasons: string[] = [];
+        if (task.status !== 'in_progress') {
+          driftReasons.push(`status=${task.status}`);
+        }
+        if (task.owner !== dispatcher.owner) {
+          driftReasons.push(`owner=${task.owner ?? 'none'}`);
+        }
+        if (leaseOwner !== dispatcher.owner) {
+          driftReasons.push(`leaseOwner=${leaseOwner ?? 'none'}`);
+        }
+        if (!task.lease) {
+          driftReasons.push('lease=missing');
+        }
+        if (driftReasons.length > 0) {
+          findings.push({
+            code: 'assignment_drift',
+            severity: 'warning',
+            message: `Assignment ${assignment.taskId} on worker ${assignment.workerId} drifted from task state (${driftReasons.join(', ')}).`,
+            observedAt,
+            taskId: assignment.taskId,
+            workerId: assignment.workerId,
+          });
+        }
+      }
+
       const worker = await queryObj.getWorker(assignment.workerId);
       if (!worker) {
         findings.push({

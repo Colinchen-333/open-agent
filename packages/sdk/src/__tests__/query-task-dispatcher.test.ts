@@ -583,4 +583,73 @@ describe('query() task dispatcher control plane', () => {
       temp.cleanup();
     }
   });
+
+  it('reports task_missing and assignment_drift findings for corrupted active assignments', async () => {
+    const temp = makeTempHome('open-agent-sdk-task-dispatcher-drift-');
+    const teamName = `dispatcher-team-${Date.now()}`;
+    const controlledFailure = makeControlledFailureProvider();
+
+    try {
+      const q = query('dispatcher drift diagnosis', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: controlledFailure.provider,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+      } as any);
+
+      await q.createTeam({ name: teamName, setActive: true });
+      const task = await q.createTask({
+        teamName,
+        subject: 'Drifted assignment',
+        description: 'Corrupt the leased task while the assignment is still active.',
+        priority: 10,
+      });
+      const dispatcher = await q.startTaskDispatcher({
+        dispatcherId: `dispatcher-${Date.now()}`,
+        owner: 'dispatcher-owner',
+        teamName,
+        pollIntervalMs: 25,
+        leaseMs: 500,
+      });
+
+      await waitForDispatcher(
+        q,
+        dispatcher.dispatcherId,
+        (item) => item.status === 'running' && item.activeAssignments.length === 1,
+      );
+
+      await q.updateTask({
+        taskId: task.id,
+        teamName,
+        status: 'pending',
+      });
+
+      const driftReport = await q.inspectTaskDispatcherHealth(dispatcher.dispatcherId);
+      expect(driftReport?.findings.map((item) => item.code)).toEqual(expect.arrayContaining([
+        'assignment_drift',
+      ]));
+
+      await q.updateTask({
+        taskId: task.id,
+        teamName,
+        status: 'deleted',
+      });
+
+      const missingReport = await q.inspectTaskDispatcherHealth(dispatcher.dispatcherId);
+      expect(missingReport?.findings.map((item) => item.code)).toEqual(expect.arrayContaining([
+        'task_missing',
+      ]));
+      expect(missingReport?.followUps.some((item) =>
+        item.scaffold.action?.tool === 'TaskDispatcher'
+        && item.scaffold.action.arguments['action'] === 'requeue',
+      )).toBe(true);
+
+      await q.stopTaskDispatcher(dispatcher.dispatcherId);
+      q.close();
+    } finally {
+      controlledFailure.releaseFailure();
+      temp.cleanup();
+    }
+  });
 });

@@ -589,6 +589,8 @@ export interface TaskDispatcherRequeueResult {
 export type TaskDispatcherHealthCode =
   | 'stuck_assignment'
   | 'worker_missing'
+  | 'task_missing'
+  | 'assignment_drift'
   | 'lease_expired'
   | 'draining_timeout';
 
