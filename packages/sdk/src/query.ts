@@ -13,7 +13,7 @@ import type {
   SDKTaskNotificationMessage,
   SDKPromptSuggestionMessage,
 } from '@open-agent/core';
-import { ConversationLoop, SessionManager, buildSystemPrompt, FileCheckpoint, isGitRepository, buildTaskOrchestrationTemplates, loadPromptContext, buildCoordinatorContext } from '@open-agent/core';
+import { ConversationLoop, SessionManager, buildSystemPrompt, FileCheckpoint, isGitRepository, buildTaskOrchestrationTemplates, loadPromptContext, buildCoordinatorContext, HOOK_EVENTS } from '@open-agent/core';
 import {
   createStore,
   appendTimelineControlPlane,
@@ -62,7 +62,7 @@ import { HookExecutor } from '@open-agent/hooks';
 import { OpenAgentRuntime } from '@open-agent/runtime';
 import type { RuntimeDiagnostic, RuntimeHookSummary, RuntimePluginSummary } from '@open-agent/runtime';
 import { PluginLoader } from '@open-agent/plugins';
-import type { LoadedPlugin } from '@open-agent/plugins';
+import type { CommandDefinition, HookConfig, LoadedPlugin, PluginManifest, SkillDefinition } from '@open-agent/plugins';
 import type {
   QueryOptions,
   Query,
@@ -376,7 +376,11 @@ export function query(
     },
   });
   const runtimeReadyPromise = runtime.initialize().then(() => {
-    registerConfiguredPluginSkills(runtime, pluginRuntime.loadedPlugins, options.includePluginSkills);
+    registerConfiguredPluginSkills(
+      runtime,
+      pluginRuntime.loadedPlugins,
+      options.includePluginSkills,
+    );
   });
   void runtimeReadyPromise.catch(() => {});
   runtime.registerSkillTool();
@@ -4498,6 +4502,149 @@ type LoadedPluginRuntime = {
   mcpServers: Record<string, McpServerConfig>;
 };
 
+const VALID_HOOK_EVENT_NAMES = new Set<string>(HOOK_EVENTS);
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
+}
+
+function isValidPluginAgentDefinition(definition: AgentDefinition): boolean {
+  if (!definition || typeof definition !== 'object') return false;
+  if (!isNonEmptyString(definition.prompt)) return false;
+  if (definition.tools !== undefined && !isStringArray(definition.tools)) return false;
+  if (definition.disallowedTools !== undefined && !isStringArray(definition.disallowedTools)) return false;
+  return true;
+}
+
+function isValidPluginCommandDefinition(command: CommandDefinition | undefined): command is CommandDefinition {
+  return Boolean(command)
+    && isNonEmptyString(command?.name)
+    && isNonEmptyString(command?.prompt);
+}
+
+function isValidPluginSkillDefinition(skill: SkillDefinition | undefined): skill is SkillDefinition {
+  return Boolean(skill)
+    && isNonEmptyString(skill?.name)
+    && isNonEmptyString(skill?.prompt);
+}
+
+function isValidPluginHookDefinition(hook: HookConfig | undefined): hook is HookConfig {
+  return Boolean(hook)
+    && typeof hook === 'object'
+    && isNonEmptyString(hook?.command)
+    && (hook.timeout === undefined || typeof hook.timeout === 'number');
+}
+
+function sanitizePluginManifest(
+  manifest: PluginManifest,
+  diagnostics: RuntimeDiagnostic[],
+): PluginManifest {
+  const sanitizedHooks: Record<string, HookConfig[]> = {};
+  for (const [event, entries] of Object.entries(manifest.hooks ?? {})) {
+    if (!VALID_HOOK_EVENT_NAMES.has(event)) {
+      diagnostics.push({
+        code: 'plugin_invalid_hook_event',
+        message: `Plugin "${manifest.name}" declares unsupported hook event "${event}".`,
+        severity: 'warning',
+        source: 'hook',
+      });
+      continue;
+    }
+    if (!Array.isArray(entries)) {
+      diagnostics.push({
+        code: 'plugin_invalid_hook_definition',
+        message: `Plugin "${manifest.name}" hook event "${event}" must be an array of hook definitions.`,
+        severity: 'warning',
+        source: 'hook',
+      });
+      continue;
+    }
+    const validEntries = entries.filter((entry) => {
+      const valid = isValidPluginHookDefinition(entry);
+      if (!valid) {
+        diagnostics.push({
+          code: 'plugin_invalid_hook_definition',
+          message: `Plugin "${manifest.name}" has an invalid hook definition under "${event}".`,
+          severity: 'warning',
+          source: 'hook',
+        });
+      }
+      return valid;
+    });
+    if (validEntries.length > 0) {
+      sanitizedHooks[event] = validEntries;
+    }
+  }
+
+  const sanitizedAgents: Record<string, AgentDefinition> = {};
+  for (const [name, definition] of Object.entries(manifest.agents ?? {})) {
+    if (!isValidPluginAgentDefinition(definition)) {
+      diagnostics.push({
+        code: 'plugin_invalid_agent_definition',
+        message: `Plugin "${manifest.name}" agent "${name}" is missing required schema fields.`,
+        severity: 'warning',
+        source: 'agent',
+      });
+      continue;
+    }
+    sanitizedAgents[name] = definition;
+  }
+
+  const sanitizedCommands = (manifest.commands ?? []).filter((command) => {
+    const valid = isValidPluginCommandDefinition(command);
+    if (!valid) {
+      diagnostics.push({
+        code: 'plugin_invalid_command_definition',
+        message: `Plugin "${manifest.name}" contains a command with missing name or prompt.`,
+        severity: 'warning',
+        source: 'plugin',
+      });
+    }
+    return valid;
+  });
+
+  const sanitizedSkills = (manifest.skills ?? []).filter((skill) => {
+    const valid = isValidPluginSkillDefinition(skill);
+    if (!valid) {
+      diagnostics.push({
+        code: 'plugin_invalid_skill_definition',
+        message: `Plugin "${manifest.name}" contains a skill with missing name or prompt.`,
+        severity: 'warning',
+        source: 'plugin',
+      });
+    }
+    return valid;
+  });
+
+  const sanitizedMcpServers = Object.fromEntries(
+    Object.entries(manifest.mcpServers ?? {}).filter(([, config]) => {
+      const valid = Boolean(config && typeof config === 'object');
+      if (!valid) {
+        diagnostics.push({
+          code: 'plugin_invalid_mcp_definition',
+          message: `Plugin "${manifest.name}" contains an invalid MCP server definition.`,
+          severity: 'warning',
+          source: 'plugin',
+        });
+      }
+      return valid;
+    }),
+  );
+
+  return {
+    ...manifest,
+    hooks: sanitizedHooks,
+    agents: sanitizedAgents,
+    commands: sanitizedCommands,
+    skills: sanitizedSkills,
+    mcpServers: sanitizedMcpServers,
+  };
+}
+
 function loadConfiguredPlugins(
   cwd: string,
   pluginConfigs?: Array<{ type: 'local'; path: string }>,
@@ -4525,6 +4672,7 @@ function loadConfiguredPlugins(
   const loadedPlugins: LoadedPlugin[] = [];
   const pluginSummaries: RuntimePluginSummary[] = [];
   const commandNames = new Set<string>();
+  const skillNames = new Set<string>();
 
   for (const pluginConfig of pluginConfigs) {
     const plugin = loader.loadPlugin(resolvePluginPath(cwd, pluginConfig.path));
@@ -4539,7 +4687,11 @@ function loadConfiguredPlugins(
     }
 
     loadedPlugins.push(plugin);
-    const manifest = plugin.manifest;
+    const manifest = sanitizePluginManifest(plugin.manifest, diagnostics);
+    loadedPlugins[loadedPlugins.length - 1] = {
+      ...plugin,
+      manifest,
+    };
     let hookCount = 0;
     for (const [event, entries] of Object.entries(manifest.hooks ?? {}) as [HookEvent, any[]][]) {
       if (!Array.isArray(entries) || entries.length === 0) continue;
@@ -4591,6 +4743,18 @@ function loadConfiguredPlugins(
         description: command.description,
         argumentHint: command.argumentHint ?? '',
       });
+    }
+
+    for (const skill of manifest.skills ?? []) {
+      if (skillNames.has(skill.name)) {
+        diagnostics.push({
+          code: 'plugin_skill_collision',
+          message: `Plugin skill "${skill.name}" from ${manifest.name} overrides an earlier plugin skill definition.`,
+          severity: 'warning',
+          source: 'plugin',
+        });
+      }
+      skillNames.add(skill.name);
     }
 
     pluginSummaries.push({

@@ -52,6 +52,55 @@ You are the plugin reviewer agent.`);
   return pluginDir;
 }
 
+function createInvalidPluginFixture() {
+  const pluginDir = mkdtempSync(join(tmpdir(), 'open-agent-plugin-invalid-fixture-'));
+  mkdirSync(join(pluginDir, 'skills'), { recursive: true });
+  mkdirSync(join(pluginDir, 'commands'), { recursive: true });
+  mkdirSync(join(pluginDir, 'agents'), { recursive: true });
+
+  writeFileSync(join(pluginDir, 'plugin.json'), JSON.stringify({
+    name: 'broken-kit',
+    version: '1.0.0',
+    description: 'Broken plugin test fixture',
+    hooks: {
+      UnknownEvent: [{ command: 'echo nope' }],
+      PreToolUse: [{ timeout: 5 }, { command: 'echo valid-hook', timeout: 5 }],
+    },
+  }, null, 2));
+  writeFileSync(join(pluginDir, 'skills', 'invalid.md'), `---
+description: Missing prompt
+---
+`);
+  writeFileSync(join(pluginDir, 'skills', 'valid.md'), `---
+name: valid-plugin-skill
+description: Valid plugin skill
+---
+Use this valid plugin skill.`);
+  writeFileSync(join(pluginDir, 'commands', 'invalid.md'), `---
+name: invalid-plugin-command
+description: Missing prompt
+---
+`);
+  writeFileSync(join(pluginDir, 'commands', 'valid.md'), `---
+name: valid-plugin-command
+description: Valid command
+---
+Run the valid plugin command.`);
+  writeFileSync(join(pluginDir, 'agents', 'broken-agent.md'), `---
+description: Broken agent
+tools: Read,Write
+---
+`);
+  writeFileSync(join(pluginDir, 'agents', 'valid-agent.md'), `---
+description: Valid plugin agent
+model: sonnet
+tools: Read
+---
+You are the valid plugin agent.`);
+
+  return pluginDir;
+}
+
 // ---------------------------------------------------------------------------
 // Tests for new QueryOptions fields:
 //   - canUseTool: callback is called, returning false denies
@@ -803,6 +852,38 @@ describe('QueryOptions unsupported official placeholders', () => {
       path: pluginDir,
     }]);
     expect(info?.runtimeDiagnostics).toBeUndefined();
+    q.close();
+  });
+
+  it('surfaces plugin schema diagnostics and filters invalid plugin assets from runtime wiring', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-plugin-invalid-query-'));
+    const pluginDir = createInvalidPluginFixture();
+    const q = query('test invalid plugin runtime wiring', {
+      cwd,
+      model: 'claude-sonnet-4-6',
+      plugins: [{ type: 'local', path: pluginDir }],
+    });
+
+    const [agents, skills, commands, info] = await Promise.all([
+      q.supportedAgents(),
+      q.supportedSkills(),
+      q.supportedCommands(),
+      q.sessionInfo(),
+    ]);
+
+    expect(agents.some((agent) => agent.name === 'valid-agent')).toBe(true);
+    expect(agents.some((agent) => agent.name === 'broken-agent')).toBe(false);
+    expect(skills.some((skill) => skill.name === 'valid-plugin-skill')).toBe(true);
+    expect(skills.some((skill) => skill.name === 'invalid')).toBe(false);
+    expect(commands.some((command) => command.name === '/valid-plugin-command')).toBe(true);
+    expect(commands.some((command) => command.name === '/invalid-plugin-command')).toBe(false);
+    expect(info?.runtimeDiagnostics?.map((entry) => entry.code)).toEqual(expect.arrayContaining([
+      'plugin_invalid_hook_event',
+      'plugin_invalid_hook_definition',
+      'plugin_invalid_skill_definition',
+      'plugin_invalid_command_definition',
+      'plugin_invalid_agent_definition',
+    ]));
     q.close();
   });
 });
