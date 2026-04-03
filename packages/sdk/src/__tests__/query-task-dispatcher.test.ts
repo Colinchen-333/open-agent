@@ -407,6 +407,16 @@ describe('query() task dispatcher control plane', () => {
         item.scaffold.action?.tool === 'TaskDispatcher'
         && item.scaffold.action.arguments['action'] === 'start',
       )).toBe(true);
+      await expect(reader.getTaskDispatcherDiagnosis(dispatcher.dispatcherId)).resolves.toMatchObject({
+        dispatcherId: dispatcher.dispatcherId,
+        healthy: false,
+      });
+      await expect(reader.listTaskDispatcherDiagnoses({ teamName })).resolves.toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          dispatcherId: dispatcher.dispatcherId,
+          healthy: false,
+        }),
+      ]));
 
       reader.close();
       writer.close();

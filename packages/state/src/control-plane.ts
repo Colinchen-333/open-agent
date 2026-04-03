@@ -2,6 +2,7 @@ import type { ToolDefinition } from '@open-agent/tools';
 import type { ThinkingConfig } from '@open-agent/core';
 import type {
   AppState,
+  DispatcherDiagnosisControlPlaneState,
   DispatcherControlPlaneState,
   McpServerStatus,
   RuntimeDiagnosticState,
@@ -127,6 +128,21 @@ export function removeDispatcherControlPlane(
   return {
     ...state,
     dispatchers: next,
+  };
+}
+
+export function upsertDispatcherDiagnosisControlPlane(
+  state: AppState,
+  diagnosis: DispatcherDiagnosisControlPlaneState,
+): AppState {
+  return {
+    ...state,
+    dispatcherDiagnoses: {
+      ...state.dispatcherDiagnoses,
+      [diagnosis.dispatcherId]: {
+        ...diagnosis,
+      },
+    },
   };
 }
 

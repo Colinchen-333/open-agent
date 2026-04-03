@@ -98,6 +98,16 @@ export interface DispatcherControlPlaneState {
   payload: unknown;
 }
 
+export interface DispatcherDiagnosisControlPlaneState {
+  dispatcherId: string;
+  teamName: string;
+  healthy: boolean;
+  source: string;
+  observedAt: string;
+  findingCount: number;
+  payload: unknown;
+}
+
 export interface TimelineControlPlaneItemState {
   key: string;
   kind: string;
@@ -170,6 +180,7 @@ export interface AppState {
   // Runtime control plane
   runtime: RuntimeControlPlaneState;
   dispatchers: Record<string, DispatcherControlPlaneState>;
+  dispatcherDiagnoses: Record<string, DispatcherDiagnosisControlPlaneState>;
   timeline: TimelineControlPlaneItemState[];
   inboxes: Record<string, Record<string, TeamInboxMemberControlPlaneState>>;
   approvals: Record<string, Record<string, TeamApprovalControlPlaneState[]>>;
@@ -210,6 +221,7 @@ export function createDefaultAppState(overrides: Partial<AppState> = {}): AppSta
       },
     },
     dispatchers: {},
+    dispatcherDiagnoses: {},
     timeline: [],
     inboxes: {},
     approvals: {},

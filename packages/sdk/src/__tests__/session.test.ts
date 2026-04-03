@@ -168,6 +168,8 @@ describe('createSession()', () => {
     expect(typeof session.getTaskDispatcher).toBe('function');
     expect(typeof session.listTaskDispatchers).toBe('function');
     expect(typeof session.inspectTaskDispatcherHealth).toBe('function');
+    expect(typeof session.getTaskDispatcherDiagnosis).toBe('function');
+    expect(typeof session.listTaskDispatcherDiagnoses).toBe('function');
     expect(typeof session.requeueTaskDispatcherAssignment).toBe('function');
     expect(typeof session.stopTaskDispatcher).toBe('function');
     expect(typeof session.stopTask).toBe('function');
@@ -547,6 +549,17 @@ describe('createSession()', () => {
     const health = await session.inspectTaskDispatcherHealth(dispatcher.dispatcherId);
     expect(health?.healthy).toBe(true);
     expect(health?.dispatcher.status).toBe('stopped');
+    await expect(session.getTaskDispatcherDiagnosis(dispatcher.dispatcherId)).resolves.toMatchObject({
+      dispatcherId: dispatcher.dispatcherId,
+      healthy: true,
+      dispatcher: { status: 'stopped' },
+    });
+    await expect(session.listTaskDispatcherDiagnoses({ teamName })).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        dispatcherId: dispatcher.dispatcherId,
+        healthy: true,
+      }),
+    ]));
 
     session.close();
   });
@@ -619,6 +632,10 @@ describe('createSession()', () => {
         'stuck_assignment',
         'draining_timeout',
       ]));
+      await expect(resumed.getTaskDispatcherDiagnosis(dispatcher.dispatcherId)).resolves.toMatchObject({
+        dispatcherId: dispatcher.dispatcherId,
+        healthy: false,
+      });
 
       resumed.close();
       session.close();

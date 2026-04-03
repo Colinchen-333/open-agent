@@ -24,6 +24,7 @@ import {
   syncRuntimeControlPlane,
   syncSessionControlPlane,
   syncToolRegistryState,
+  upsertDispatcherDiagnosisControlPlane,
   upsertDispatcherControlPlane,
 } from '@open-agent/state';
 import type { AppState } from '@open-agent/state';
@@ -77,8 +78,10 @@ import type {
   TaskDispatcherListOptions,
   TaskDispatcherRecord,
   TaskDispatcherHealthFinding,
+  TaskDispatcherHealthSummary,
   TaskDispatcherHealthOptions,
   TaskDispatcherHealthReport,
+  TaskDispatcherDiagnosisListOptions,
   TaskDispatcherRequeueInput,
   TaskDispatcherRequeueResult,
   TaskDispatcherStartInput,
@@ -1673,6 +1676,18 @@ export function query(
       startedAt: record.startedAt,
       updatedAt: record.updatedAt,
       payload: cloneTaskDispatcherRecord(record),
+    }));
+  };
+
+  const upsertDispatcherDiagnosisStoreRecord = (report: TaskDispatcherHealthReport) => {
+    appStore.setState((prev) => upsertDispatcherDiagnosisControlPlane(prev, {
+      dispatcherId: report.dispatcherId,
+      teamName: report.dispatcher.teamName,
+      healthy: report.healthy,
+      source: report.source,
+      observedAt: report.observedAt,
+      findingCount: report.findings.length,
+      payload: JSON.parse(JSON.stringify(report)),
     }));
   };
 
@@ -3808,6 +3823,9 @@ export function query(
   const getTaskDispatcherLedgerPath = () => sessionMgr
     ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.dispatchers.json`)
     : join(cwd, '.open-agent', 'dispatcher-ledgers', `${sessionId}.json`);
+  const getTaskDispatcherDiagnosisLedgerPath = () => sessionMgr
+    ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.dispatcher-diagnoses.json`)
+    : join(cwd, '.open-agent', 'dispatcher-ledgers', `${sessionId}.diagnoses.json`);
 
   const readTaskDispatcherLedgerRecords = (): TaskDispatcherRecord[] => {
     const ledgerPath = getTaskDispatcherLedgerPath();
@@ -3851,6 +3869,54 @@ export function query(
     } catch {
       // Non-fatal: durable ledger write failures should not break dispatcher execution.
     }
+  };
+
+  const readPersistedTaskDispatcherDiagnoses = (): TaskDispatcherHealthReport[] => {
+    const ledgerPath = getTaskDispatcherDiagnosisLedgerPath();
+    if (!existsSync(ledgerPath)) {
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(readFileSync(ledgerPath, 'utf-8')) as PersistedTaskDispatcherDiagnosisFile;
+      if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.diagnoses)) {
+        return [];
+      }
+      return parsed.diagnoses
+        .filter((entry): entry is TaskDispatcherHealthReport => Boolean(entry && typeof entry === 'object' && typeof entry.dispatcherId === 'string'))
+        .map((entry) => JSON.parse(JSON.stringify(entry)) as TaskDispatcherHealthReport)
+        .sort((left, right) => left.observedAt.localeCompare(right.observedAt));
+    } catch {
+      return [];
+    }
+  };
+
+  const persistTaskDispatcherDiagnosisReport = (report: TaskDispatcherHealthReport): void => {
+    try {
+      const ledgerPath = getTaskDispatcherDiagnosisLedgerPath();
+      mkdirSync(dirname(ledgerPath), { recursive: true });
+      const merged = new Map<string, TaskDispatcherHealthReport>(
+        readPersistedTaskDispatcherDiagnoses().map((entry) => [entry.dispatcherId, JSON.parse(JSON.stringify(entry)) as TaskDispatcherHealthReport]),
+      );
+      merged.set(report.dispatcherId, JSON.parse(JSON.stringify(report)) as TaskDispatcherHealthReport);
+      writeFileSync(ledgerPath, JSON.stringify({
+        version: 1,
+        diagnoses: [...merged.values()].sort((left, right) => left.observedAt.localeCompare(right.observedAt)),
+      } satisfies PersistedTaskDispatcherDiagnosisFile, null, 2));
+    } catch {
+      // Non-fatal: diagnosis durability should not abort control-plane reads.
+    }
+  };
+
+  const readLatestTaskDispatcherDiagnosis = (dispatcherId: string): TaskDispatcherHealthReport | null => {
+    const normalizedDispatcherId = normalizeOptionalString(dispatcherId);
+    if (!normalizedDispatcherId) {
+      return null;
+    }
+    const storeReport = appStore.getState().dispatcherDiagnoses[normalizedDispatcherId]?.payload;
+    if (storeReport) {
+      return JSON.parse(JSON.stringify(storeReport)) as TaskDispatcherHealthReport;
+    }
+    return readPersistedTaskDispatcherDiagnoses().find((entry) => entry.dispatcherId === normalizedDispatcherId) ?? null;
   };
 
   const readPersistedTaskDispatcherRecords = (): TaskDispatcherRecord[] => {
@@ -4011,7 +4077,7 @@ export function query(
     };
     const followUps = buildTaskDispatcherHealthFollowUps(dispatcher, findings);
 
-    return {
+    const report: TaskDispatcherHealthReport = {
       dispatcherId: dispatcher.dispatcherId,
       source: dispatcher.source,
       observedAt,
@@ -4021,6 +4087,37 @@ export function query(
       summary,
       followUps,
     };
+    upsertDispatcherDiagnosisStoreRecord(report);
+    persistTaskDispatcherDiagnosisReport(report);
+    return report;
+  };
+
+  queryObj.getTaskDispatcherDiagnosis = async (dispatcherId: string) => {
+    const normalizedDispatcherId = normalizeOptionalString(dispatcherId);
+    if (!normalizedDispatcherId) {
+      throw new Error('dispatcherId is required to inspect a dispatcher diagnosis.');
+    }
+    const storeReport = appStore.getState().dispatcherDiagnoses[normalizedDispatcherId]?.payload;
+    if (storeReport) {
+      return JSON.parse(JSON.stringify(storeReport)) as TaskDispatcherHealthReport;
+    }
+    return readPersistedTaskDispatcherDiagnoses().find((entry) => entry.dispatcherId === normalizedDispatcherId) ?? null;
+  };
+
+  queryObj.listTaskDispatcherDiagnoses = async (options?: TaskDispatcherDiagnosisListOptions) => {
+    const merged = new Map<string, TaskDispatcherHealthReport>();
+    for (const diagnosis of Object.values(appStore.getState().dispatcherDiagnoses)) {
+      merged.set(diagnosis.dispatcherId, JSON.parse(JSON.stringify(diagnosis.payload)) as TaskDispatcherHealthReport);
+    }
+    for (const report of readPersistedTaskDispatcherDiagnoses()) {
+      if (!merged.has(report.dispatcherId)) {
+        merged.set(report.dispatcherId, JSON.parse(JSON.stringify(report)) as TaskDispatcherHealthReport);
+      }
+    }
+    return [...merged.values()]
+      .filter((report) => !options?.teamName || report.dispatcher.teamName === options.teamName)
+      .filter((report) => options?.healthy === undefined || report.healthy === options.healthy)
+      .sort((left, right) => left.observedAt.localeCompare(right.observedAt));
   };
 
   queryObj.requeueTaskDispatcherAssignment = async (
@@ -5629,6 +5726,11 @@ interface PersistedTaskDispatcherEventMessage {
 interface PersistedTaskDispatcherLedgerFile {
   version: 1;
   dispatchers: TaskDispatcherRecord[];
+}
+
+interface PersistedTaskDispatcherDiagnosisFile {
+  version: 1;
+  diagnoses: TaskDispatcherHealthReport[];
 }
 
 export function __internal_collectPendingTaskNotifications(params: {

@@ -4,6 +4,7 @@ import {
   createDefaultAppState,
   removeDispatcherControlPlane,
   setActiveTeamControlPlane,
+  upsertDispatcherDiagnosisControlPlane,
   syncTeamInboxMemberControlPlane,
   syncMcpServerState,
   syncRuntimeControlPlane,
@@ -176,5 +177,28 @@ describe('state control plane helpers', () => {
         timestamp: '2026-01-01T00:00:00.000Z',
       },
     ]);
+  });
+
+  it('upserts dispatcher diagnoses as control-plane state', () => {
+    const state = createDefaultAppState();
+    const next = upsertDispatcherDiagnosisControlPlane(state, {
+      dispatcherId: 'dispatcher-1',
+      teamName: 'alpha',
+      healthy: false,
+      source: 'ledger',
+      observedAt: '2026-01-01T00:00:00.000Z',
+      findingCount: 2,
+      payload: { dispatcherId: 'dispatcher-1' },
+    });
+
+    expect(next.dispatcherDiagnoses['dispatcher-1']).toEqual({
+      dispatcherId: 'dispatcher-1',
+      teamName: 'alpha',
+      healthy: false,
+      source: 'ledger',
+      observedAt: '2026-01-01T00:00:00.000Z',
+      findingCount: 2,
+      payload: { dispatcherId: 'dispatcher-1' },
+    });
   });
 });
