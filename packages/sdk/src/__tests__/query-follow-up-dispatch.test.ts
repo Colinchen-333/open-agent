@@ -227,7 +227,7 @@ describe('query() follow-up dispatcher', () => {
       const q = query('follow-up dispatcher', {
         cwd: temp.cwd,
         model: 'mock-model',
-        provider: makeStaticProvider(),
+        provider: makeBackgroundProvider(),
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
       });
@@ -262,9 +262,26 @@ describe('query() follow-up dispatcher', () => {
       const activeDispatcher = await waitForDispatcher(
         q,
         started.dispatcher!.dispatcherId,
-        (dispatcher) => dispatcher.status === 'running' && Boolean(dispatcher.lastDispatchAt),
+        (dispatcher) => dispatcher.status === 'running' && dispatcher.activeAssignments.length === 1,
       );
       expect(activeDispatcher.teamName).toBe(teamName);
+
+      const requeued = await q.executeFollowUp({
+        kind: 'generic_followup',
+        action: {
+          tool: 'TaskDispatcher',
+          arguments: {
+            action: 'requeue',
+            dispatcher_id: started.dispatcher!.dispatcherId,
+            task_id: activeDispatcher.activeAssignments[0]!.taskId,
+            worker_id: activeDispatcher.activeAssignments[0]!.workerId,
+          },
+        },
+      });
+      expect(requeued.kind).toBe('task_dispatcher');
+      expect(requeued.dispatcherRequeue?.success).toBe(true);
+      expect(requeued.dispatcherRequeue?.task?.status).toBe('pending');
+      expect(requeued.dispatcher?.dispatcherId).toBe(started.dispatcher!.dispatcherId);
 
       const stopped = await q.executeFollowUp({
         kind: 'generic_followup',

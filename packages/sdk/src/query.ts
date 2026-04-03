@@ -1958,6 +1958,21 @@ export function query(
       },
     });
 
+    const buildRequeueAction = (): NonNullable<NonNullable<SDKPromptSuggestionMessage['scaffold']>['action']> | null => {
+      if (!event.taskId || !event.workerId) {
+        return null;
+      }
+      return {
+        tool: 'TaskDispatcher',
+        arguments: {
+          action: 'requeue',
+          dispatcher_id: event.dispatcherId,
+          task_id: event.taskId,
+          worker_id: event.workerId,
+        },
+      };
+    };
+
     if (event.type === 'stopped' || event.type === 'task_requeued') {
       followUps.push({
         suggestion: build(
@@ -1992,6 +2007,27 @@ export function query(
           action: buildStopAction(),
         },
       });
+    }
+
+    if (event.type === 'dispatched') {
+      const requeueAction = buildRequeueAction();
+      if (requeueAction) {
+        followUps.push({
+          suggestion: build(
+            `将任务 \`${event.taskId}\` 从 worker \`${event.workerId}\` 退回队列`,
+            `Requeue task \`${event.taskId}\` from worker \`${event.workerId}\``,
+          ),
+          scaffold: {
+            kind: 'generic_followup',
+            title: build('退回当前派单', 'Requeue assignment'),
+            prompt: build(
+              `将任务 ${event.taskId} 从当前 worker 退回队列`,
+              `Requeue task ${event.taskId} from its current worker`,
+            ),
+            action: requeueAction,
+          },
+        });
+      }
     }
 
     return followUps;
@@ -2983,6 +3019,31 @@ export function query(
           followUpKind: scaffold.kind,
           ...(dispatcherStop.dispatcher ? { dispatcher: dispatcherStop.dispatcher } : {}),
           dispatcherStop,
+        };
+      }
+
+      if (dispatcherAction === 'requeue') {
+        const dispatcherId = normalizeOptionalString(action.arguments['dispatcher_id']);
+        if (!dispatcherId) {
+          throw new Error('TaskDispatcher requeue follow-up action is missing a dispatcher_id.');
+        }
+        const dispatcherRequeue = await queryObj.requeueTaskDispatcherAssignment({
+          dispatcherId,
+          ...(normalizeOptionalString(action.arguments['worker_id'])
+            ? { workerId: normalizeOptionalString(action.arguments['worker_id']) }
+            : {}),
+          ...(normalizeOptionalString(action.arguments['task_id'])
+            ? { taskId: normalizeOptionalString(action.arguments['task_id']) }
+            : {}),
+          ...(typeof action.arguments['stop_worker'] === 'boolean'
+            ? { stopWorker: action.arguments['stop_worker'] }
+            : {}),
+        });
+        return {
+          kind: 'task_dispatcher',
+          followUpKind: scaffold.kind,
+          ...(dispatcherRequeue.dispatcher ? { dispatcher: dispatcherRequeue.dispatcher } : {}),
+          dispatcherRequeue,
         };
       }
 

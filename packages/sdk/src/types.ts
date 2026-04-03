@@ -738,6 +738,7 @@ export interface FollowUpExecutionResult {
   teamMessage?: TeamMessageRecord;
   dispatcher?: TaskDispatcherRecord;
   dispatcherStop?: TaskDispatcherStopResult;
+  dispatcherRequeue?: TaskDispatcherRequeueResult;
 }
 
 /**

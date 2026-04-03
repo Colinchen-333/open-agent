@@ -259,6 +259,14 @@ describe('query() timeline control plane', () => {
       expect(dispatcherItems.some((item) => item.orchestrationEvent?.dispatcherEvent?.type === 'stopped')).toBe(true);
       expect(dispatcherItems.every((item) => item.timelineId?.includes(dispatcher.dispatcherId))).toBe(true);
 
+      const dispatchedItem = dispatcherItems.find((item) =>
+        item.orchestrationEvent?.dispatcherEvent?.type === 'dispatched'
+      );
+      expect(dispatchedItem?.orchestrationEvent?.dispatcherEvent?.followUps.some((item) =>
+        item.scaffold.action?.tool === 'TaskDispatcher'
+        && item.scaffold.action.arguments['action'] === 'requeue'
+      )).toBe(true);
+
       const stoppedItem = dispatcherItems.find((item) =>
         item.orchestrationEvent?.dispatcherEvent?.type === 'stopped'
       );
@@ -404,6 +412,10 @@ describe('query() timeline control plane', () => {
       expect(dispatchedItem?.orchestrationEvent?.dispatcherEvent?.activeAssignments[0]?.taskId).toBe(
         dispatchedItem?.orchestrationEvent?.dispatcherEvent?.taskId,
       );
+      expect(dispatchedItem?.orchestrationEvent?.dispatcherEvent?.followUps.some((item) =>
+        item.scaffold.action?.tool === 'TaskDispatcher'
+        && item.scaffold.action.arguments['action'] === 'requeue'
+      )).toBe(true);
       expect(dispatchedItem?.taskNotification).toBeUndefined();
 
       await expect(q.stopTaskDispatcher(dispatcher.dispatcherId)).resolves.toMatchObject({
