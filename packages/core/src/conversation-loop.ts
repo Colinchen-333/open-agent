@@ -6,6 +6,7 @@ import type { PermissionDenial } from './types.js';
 import type { AppState } from '@open-agent/state';
 import { randomUUID } from 'crypto';
 import { basename } from 'path';
+import { SessionManager } from './session-manager.js';
 import { StreamingToolExecutor } from './tool-executor.js';
 
 /**
@@ -58,6 +59,8 @@ export interface LoopHookExecutor {
     updatedInput?: Record<string, unknown>;
     additionalContext?: string;
     decision?: string;
+    reason?: string;
+    permissionDecision?: 'allow' | 'deny' | 'ask';
   }>;
 }
 
@@ -269,6 +272,7 @@ export class ConversationLoop {
   private messages: Message[] = [];
   private options: ConversationLoopOptions;
   private turnCount = 0;
+  private readonly sessionManager = new SessionManager();
   // Cumulative cost counters — accumulate across multiple run() calls.
   private _totalInputTokens = 0;
   private _totalOutputTokens = 0;
@@ -305,8 +309,43 @@ export class ConversationLoop {
   private hookBase(): Record<string, unknown> {
     return {
       session_id: this.options.sessionId,
+      transcript_path: this.sessionManager.getTranscriptPath(this.options.cwd, this.options.sessionId),
       cwd: this.options.cwd,
+      permission_mode: this.options.getAppState?.()?.permissionMode,
     };
+  }
+
+  private lastAssistantText(): string | undefined {
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const message = this.messages[i];
+      if (message.role !== 'assistant') continue;
+      if (typeof message.content === 'string') {
+        return message.content;
+      }
+      if (Array.isArray(message.content)) {
+        const texts = message.content
+          .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
+          .map((block) => block.text)
+          .filter(Boolean);
+        if (texts.length > 0) {
+          return texts.join('\n');
+        }
+      }
+    }
+    return undefined;
+  }
+
+  private applyHookUpdatedInput(target: unknown, updatedInput?: Record<string, unknown>): void {
+    if (!updatedInput) return;
+    if (!target || typeof target !== 'object' || Array.isArray(target)) return;
+    Object.assign(target as Record<string, unknown>, updatedInput);
+  }
+
+  private appendHookAdditionalContext(result: string, context?: string): string {
+    if (!context || context.trim().length === 0) return result;
+    return result.length > 0
+      ? `${result}\n\n[Hook context]\n${context}`
+      : `[Hook context]\n${context}`;
   }
 
   private toolFlag(
@@ -412,7 +451,11 @@ export class ConversationLoop {
     if (this.options.hookExecutor) {
       const hookResult = await this.options.hookExecutor.execute(
         'UserPromptSubmit',
-        { ...this.hookBase(), hook_event_name: 'UserPromptSubmit', user_prompt: userMessage },
+        {
+          ...this.hookBase(),
+          hook_event_name: 'UserPromptSubmit',
+          prompt: typeof userMessage === 'string' ? userMessage : JSON.stringify(userMessage),
+        },
       );
       if (hookResult.continue === false) {
         yield {
@@ -937,8 +980,8 @@ export class ConversationLoop {
             await this.options.hookExecutor.execute('Stop', {
               ...this.hookBase(),
               hook_event_name: 'Stop',
-              stop_reason: stopReason ?? 'end_turn',
-              result: resultText,
+              stop_hook_active: false,
+              last_assistant_message: resultText || this.lastAssistantText(),
             });
           } catch (e) {
             if (e instanceof DOMException && e.name === 'AbortError') throw e;
@@ -1064,7 +1107,67 @@ export class ConversationLoop {
           }
 
           if (decision.behavior === 'ask') {
-            if (!permissionPrompter) {
+            let hookPermissionDecision: 'allow' | 'deny' | 'ask' | undefined;
+            if (this.options.hookExecutor) {
+              try {
+                const hookResult = await this.options.hookExecutor.execute('PermissionRequest', {
+                  ...this.hookBase(),
+                  hook_event_name: 'PermissionRequest',
+                  tool_name: toolUse.name,
+                  tool_input: toolUse.input,
+                }, toolUse.id);
+                this.applyHookUpdatedInput(toolUse.input, hookResult.updatedInput);
+                if (
+                  hookResult.permissionDecision === 'allow'
+                  || hookResult.permissionDecision === 'deny'
+                  || hookResult.permissionDecision === 'ask'
+                ) {
+                  hookPermissionDecision = hookResult.permissionDecision;
+                } else if (hookResult.decision === 'approve') {
+                  hookPermissionDecision = 'allow';
+                } else if (hookResult.decision === 'block' || hookResult.continue === false) {
+                  hookPermissionDecision = 'deny';
+                }
+              } catch (e) {
+                if (e instanceof DOMException && e.name === 'AbortError') throw e;
+              }
+            }
+
+            if (hookPermissionDecision === 'deny') {
+              const reason = 'permission denied by PermissionRequest hook';
+              toolSummaryEntries.push({
+                toolName: toolUse.name,
+                toolUseId: toolUse.id,
+                input: toolUse.input,
+                result: `Permission denied: ${reason}`,
+                isError: true,
+              });
+              permissionDenials.push({
+                tool_name: toolUse.name,
+                tool_use_id: toolUse.id,
+                tool_input: normalizePermissionDenialInput(toolUse.input),
+              });
+              toolResults.push({
+                type: 'tool_result',
+                tool_use_id: toolUse.id,
+                content: `Permission denied: ${reason}`,
+                is_error: true,
+              });
+              yield {
+                type: 'tool_result' as const,
+                tool_name: toolUse.name,
+                tool_use_id: toolUse.id,
+                result: `Permission denied: ${reason}`,
+                is_error: true,
+                uuid: randomUUID(),
+                session_id: sessionId,
+              };
+              continue;
+            }
+
+            if (hookPermissionDecision === 'allow') {
+              // Hook pre-approved the action; skip the interactive prompt.
+            } else if (!permissionPrompter) {
               // No prompter available — deny by default when mode requires confirmation.
               const reason = decision.reason ?? 'permission required but no prompter configured';
               toolSummaryEntries.push({
@@ -1095,54 +1198,95 @@ export class ConversationLoop {
                 session_id: sessionId,
               };
               continue;
+            } else {
+              const userDecision = await permissionPrompter.prompt({
+                toolName: toolUse.name,
+                input: toolUse.input,
+                reason: decision.reason,
+              });
+
+              if (userDecision === 'deny') {
+                const reason = 'user denied permission';
+                toolSummaryEntries.push({
+                  toolName: toolUse.name,
+                  toolUseId: toolUse.id,
+                  input: toolUse.input,
+                  result: `Permission denied: ${reason}`,
+                  isError: true,
+                });
+                permissionDenials.push({
+                  tool_name: toolUse.name,
+                  tool_use_id: toolUse.id,
+                  tool_input: normalizePermissionDenialInput(toolUse.input),
+                });
+                toolResults.push({
+                  type: 'tool_result',
+                  tool_use_id: toolUse.id,
+                  content: `Permission denied: ${reason}`,
+                  is_error: true,
+                });
+                yield {
+                  type: 'tool_result' as const,
+                  tool_name: toolUse.name,
+                  tool_use_id: toolUse.id,
+                  result: `Permission denied: ${reason}`,
+                  is_error: true,
+                  uuid: randomUUID(),
+                  session_id: sessionId,
+                };
+                continue;
+              }
+
+              if (userDecision === 'always') {
+                // Persist an allow rule so this tool is pre-approved in future turns.
+                permissionEngine.addRule('allow', { toolName: toolUse.name });
+              }
             }
+            // 'allow' or 'always' — fall through to queue the tool.
+          }
+        }
+        // ── End permission check ───────────────────────────────────────────
 
-            const userDecision = await permissionPrompter.prompt({
-              toolName: toolUse.name,
-              input: toolUse.input,
-              reason: decision.reason,
-            });
-
-            if (userDecision === 'deny') {
-              const reason = 'user denied permission';
+        if (this.options.hookExecutor) {
+          try {
+            const hookResult = await this.options.hookExecutor.execute('PreToolUse', {
+              ...this.hookBase(),
+              hook_event_name: 'PreToolUse',
+              tool_name: toolUse.name,
+              tool_input: toolUse.input,
+              tool_use_id: toolUse.id,
+            }, toolUse.id);
+            this.applyHookUpdatedInput(toolUse.input, hookResult.updatedInput);
+            if (hookResult.continue === false) {
+              const reason = hookResult.reason ?? hookResult.decision ?? 'blocked by PreToolUse hook';
               toolSummaryEntries.push({
                 toolName: toolUse.name,
                 toolUseId: toolUse.id,
                 input: toolUse.input,
-                result: `Permission denied: ${reason}`,
+                result: reason,
                 isError: true,
-              });
-              permissionDenials.push({
-                tool_name: toolUse.name,
-                tool_use_id: toolUse.id,
-                tool_input: normalizePermissionDenialInput(toolUse.input),
               });
               toolResults.push({
                 type: 'tool_result',
                 tool_use_id: toolUse.id,
-                content: `Permission denied: ${reason}`,
+                content: reason,
                 is_error: true,
               });
               yield {
                 type: 'tool_result' as const,
                 tool_name: toolUse.name,
                 tool_use_id: toolUse.id,
-                result: `Permission denied: ${reason}`,
+                result: reason,
                 is_error: true,
                 uuid: randomUUID(),
                 session_id: sessionId,
               };
               continue;
             }
-
-            if (userDecision === 'always') {
-              // Persist an allow rule so this tool is pre-approved in future turns.
-              permissionEngine.addRule('allow', { toolName: toolUse.name });
-            }
-            // 'allow' or 'always' — fall through to queue the tool.
+          } catch (e) {
+            if (e instanceof DOMException && e.name === 'AbortError') throw e;
           }
         }
-        // ── End permission check ───────────────────────────────────────────
 
         approvedTools.push({ toolUse: toolUse as ApprovedEntry['toolUse'], tool });
       }
@@ -1167,6 +1311,7 @@ export class ConversationLoop {
         blocked: boolean;
         blockReason?: string;
         isImageResult?: boolean;
+        additionalContext?: string;
       };
 
       const executor = new StreamingToolExecutor(
@@ -1229,11 +1374,31 @@ export class ConversationLoop {
 
       // ── Phase 3: Yield results in original call order ─────────────────────
       for (const { toolUse, resultStr, isError, blocked, isImageResult } of orderedResults) {
+        let finalResultStr = resultStr;
+        if (this.options.hookExecutor) {
+          try {
+            const hookEvent = isError ? 'PostToolUseFailure' : 'PostToolUse';
+            const hookResult = await this.options.hookExecutor.execute(hookEvent, {
+              ...this.hookBase(),
+              hook_event_name: hookEvent,
+              tool_name: toolUse.name,
+              tool_input: toolUse.input,
+              tool_use_id: toolUse.id,
+              ...(isError
+                ? { error: resultStr }
+                : { tool_response: resultStr }),
+            }, toolUse.id);
+            finalResultStr = this.appendHookAdditionalContext(finalResultStr, hookResult.additionalContext);
+          } catch (e) {
+            if (e instanceof DOMException && e.name === 'AbortError') throw e;
+          }
+        }
+
         toolSummaryEntries.push({
           toolName: toolUse.name,
           toolUseId: toolUse.id,
           input: toolUse.input,
-          result: resultStr,
+          result: finalResultStr,
           isError: blocked || isError,
         });
 
@@ -1242,14 +1407,14 @@ export class ConversationLoop {
           toolResults.push({
             type: 'tool_result',
             tool_use_id: toolUse.id,
-            content: resultStr,
+            content: finalResultStr,
             is_error: true,
           });
           yield {
             type: 'tool_result' as const,
             tool_name: toolUse.name,
             tool_use_id: toolUse.id,
-            result: resultStr,
+            result: finalResultStr,
             is_error: true,
             uuid: randomUUID(),
             session_id: sessionId,
@@ -1260,8 +1425,8 @@ export class ConversationLoop {
         if (isError) {
           // Truncate large error messages (e.g. stack traces) to 10K chars.
           const truncatedError = resultStr.length > 10_000
-            ? resultStr.slice(0, 10_000) + '\n[Error output truncated]'
-            : resultStr;
+            ? finalResultStr.slice(0, 10_000) + '\n[Error output truncated]'
+            : finalResultStr;
           toolResults.push({
             type: 'tool_result',
             tool_use_id: toolUse.id,
@@ -1272,7 +1437,7 @@ export class ConversationLoop {
             type: 'tool_result' as const,
             tool_name: toolUse.name,
             tool_use_id: toolUse.id,
-            result: resultStr.slice(0, 500),
+            result: finalResultStr.slice(0, 500),
             _fullResult: truncatedError,
             is_error: true,
             uuid: randomUUID(),
@@ -1281,7 +1446,7 @@ export class ConversationLoop {
         } else if (isImageResult) {
           // Parse the structured image result and send it as actual image
           // content blocks so the LLM can visually inspect the image.
-          const parsed = JSON.parse(resultStr) as {
+          const parsed = JSON.parse(finalResultStr) as {
             type: 'image';
             source: { type: 'base64'; media_type: string; data: string };
             file_path?: string;
@@ -1307,7 +1472,7 @@ export class ConversationLoop {
             tool_name: toolUse.name,
             tool_use_id: toolUse.id,
             result: `[Image: ${parsed.file_path ?? 'unknown'}]`,
-            _fullResult: resultStr,
+            _fullResult: finalResultStr,
             is_error: false,
             uuid: randomUUID(),
             session_id: sessionId,
@@ -1316,9 +1481,9 @@ export class ConversationLoop {
           // Truncate oversized tool results to 30K chars to prevent context
           // bloat.  This matches Claude Code's truncation threshold.
           const MAX_TOOL_RESULT = 30_000;
-          const truncatedResult = resultStr.length > MAX_TOOL_RESULT
-            ? resultStr.slice(0, MAX_TOOL_RESULT) + `\n\n[Output truncated: ${resultStr.length} chars total, showing first ${MAX_TOOL_RESULT}]`
-            : resultStr;
+          const truncatedResult = finalResultStr.length > MAX_TOOL_RESULT
+            ? finalResultStr.slice(0, MAX_TOOL_RESULT) + `\n\n[Output truncated: ${finalResultStr.length} chars total, showing first ${MAX_TOOL_RESULT}]`
+            : finalResultStr;
 
           toolResults.push({
             type: 'tool_result',
@@ -1329,7 +1494,7 @@ export class ConversationLoop {
             type: 'tool_result' as const,
             tool_name: toolUse.name,
             tool_use_id: toolUse.id,
-            result: resultStr.slice(0, 500),
+            result: finalResultStr.slice(0, 500),
             // Include the full result for transcript persistence so --resume
             // reconstructs the complete tool_result user message.
             _fullResult: truncatedResult,
@@ -1559,7 +1724,7 @@ export class ConversationLoop {
     } as const;
 
     const preCount = this.messages.length;
-    const compacted = await this.compactInternal();
+    const compacted = await this.compactInternal(trigger);
     const removedCount = preCount - this.messages.length;
 
     if (compacted) {
@@ -1598,10 +1763,10 @@ export class ConversationLoop {
 
   /** Compact conversation history by summarising older messages with the LLM. */
   async compact(): Promise<void> {
-    await this.compactInternal();
+    await this.compactInternal('manual');
   }
 
-  private async compactInternal(): Promise<boolean> {
+  private async compactInternal(trigger: 'manual' | 'auto'): Promise<boolean> {
     if (this.messages.length <= 4) return false;
 
     // ── PreCompact hook ───────────────────────────────────────────────
@@ -1609,8 +1774,8 @@ export class ConversationLoop {
       await this.options.hookExecutor.execute('PreCompact', {
         ...this.hookBase(),
         hook_event_name: 'PreCompact',
-        message_count: this.messages.length,
-        estimated_tokens: this.estimateTokens(),
+        trigger,
+        custom_instructions: null,
       });
     }
     // ── End PreCompact hook ───────────────────────────────────────────

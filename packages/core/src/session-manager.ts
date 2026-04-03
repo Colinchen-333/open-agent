@@ -667,6 +667,15 @@ export class SessionManager {
   }
 
   /**
+   * Return the transcript JSONL path for the given session.
+   * Useful for hook payloads and diagnostics that need the durable transcript location.
+   */
+  getTranscriptPath(cwd: string, sessionId: string): string {
+    const projectDir = this.resolveSessionProjectDir(cwd, sessionId);
+    return this.transcriptPath(projectDir, sessionId);
+  }
+
+  /**
    * Return a single session by ID, or `null` if not found.
    * Falls back to the global index for cross-CWD lookup when
    * the session is not found in the specified CWD's project directory.

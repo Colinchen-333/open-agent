@@ -705,11 +705,8 @@ describe('ConversationLoop', () => {
     });
   });
 
-  describe('pre-tool hook blocked execution', () => {
-    // Skipped: StreamingToolExecutor integration (Task 9) removed inline
-    // PreToolUse/PostToolUse hooks from ConversationLoop. Hook support will
-    // be re-added to the executor in a future task.
-    it.skip('emits top-level tool_result for blocked tool use and continues', async () => {
+  describe('tool lifecycle hooks', () => {
+    it('emits top-level tool_result for blocked tool use and continues', async () => {
       const toolId = 'blocked-by-hook';
       const tool = {
         name: 'BlockedByHook',
@@ -745,6 +742,111 @@ describe('ConversationLoop', () => {
       expect(result).toBeDefined();
       expect(result.subtype).toBe('success');
       expect(result.result).toBe('Hook blocked handled.');
+    });
+
+    it('emits post-tool hooks with transcript and permission context', async () => {
+      const captured: Array<{ event: string; input: Record<string, unknown> }> = [];
+      const successTool = {
+        name: 'HookedSuccess',
+        description: 'Succeeds',
+        inputSchema: { type: 'object', properties: { value: { type: 'string' } } },
+        async execute(input: any) { return { echoed: input.value }; },
+      };
+      const failTool = {
+        name: 'HookedFailure',
+        description: 'Fails',
+        inputSchema: { type: 'object', properties: {} },
+        async execute() { throw new Error('boom'); },
+      };
+
+      const provider = makeMockProvider([
+        [
+          ...toolUseResponse('ok-1', 'HookedSuccess', { value: 'hi' }),
+        ],
+        [
+          ...toolUseResponse('fail-1', 'HookedFailure', {}),
+        ],
+        textResponse('done'),
+      ]);
+
+      const loop = new ConversationLoop(baseOptions(
+        provider,
+        new Map([
+          ['HookedSuccess', successTool],
+          ['HookedFailure', failTool],
+        ]),
+        {
+          getAppState: () => ({ permissionMode: 'plan' } as any),
+          hookExecutor: {
+            async execute(event, input) {
+              captured.push({ event, input });
+              if (event === 'PostToolUse') {
+                return { additionalContext: 'success hook context' };
+              }
+              if (event === 'PostToolUseFailure') {
+                return { additionalContext: 'failure hook context' };
+              }
+              return { continue: true };
+            },
+          },
+        },
+      ));
+
+      const messages = await collectMessages(loop.run('run both tools'));
+      const toolResults = messages.filter((message) => message.type === 'tool_result') as any[];
+      expect(toolResults.some((message) => message.tool_name === 'HookedSuccess' && message.result.includes('success hook context'))).toBe(true);
+      expect(toolResults.some((message) => message.tool_name === 'HookedFailure' && message.result.includes('failure hook context'))).toBe(true);
+
+      const preTool = captured.find((entry) => entry.event === 'PreToolUse');
+      expect(preTool?.input.transcript_path).toContain('test-session-id.jsonl');
+      expect(preTool?.input.permission_mode).toBe('plan');
+
+      const postTool = captured.find((entry) => entry.event === 'PostToolUse');
+      expect(postTool?.input.tool_name).toBe('HookedSuccess');
+      expect(postTool?.input.tool_response).toContain('echoed');
+
+      const postFailure = captured.find((entry) => entry.event === 'PostToolUseFailure');
+      expect(postFailure?.input.tool_name).toBe('HookedFailure');
+      expect(postFailure?.input.error).toContain('boom');
+    });
+
+    it('lets PermissionRequest hook approve ask-mode tools without a prompter', async () => {
+      const tool = {
+        name: 'NeedsApproval',
+        description: 'Needs approval',
+        inputSchema: { type: 'object', properties: {} },
+        async execute() { return 'approved by hook'; },
+      };
+      const provider = makeMockProvider([
+        toolUseResponse('approve-1', 'NeedsApproval', {}),
+        textResponse('done'),
+      ]);
+      const permissionEngine: PermissionChecker = {
+        evaluate: async () => ({ behavior: 'ask', reason: 'needs review' }),
+        addRule() {},
+      };
+
+      const loop = new ConversationLoop(baseOptions(
+        provider,
+        new Map([['NeedsApproval', tool]]),
+        {
+          permissionEngine,
+          hookExecutor: {
+            async execute(event) {
+              if (event === 'PermissionRequest') {
+                return { permissionDecision: 'allow' };
+              }
+              return { continue: true };
+            },
+          },
+        },
+      ));
+
+      const messages = await collectMessages(loop.run('approve via hook'));
+      const toolResult = messages.find((message) => message.type === 'tool_result') as any;
+      expect(toolResult).toBeDefined();
+      expect(toolResult.is_error).toBe(false);
+      expect(toolResult.result).toContain('approved by hook');
     });
   });
 
