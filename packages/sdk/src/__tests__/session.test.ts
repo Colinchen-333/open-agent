@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'bun:test';
+import { mkdtempSync, mkdirSync, rmSync } from 'fs';
 import type { ModelInfo } from '@open-agent/core';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import type { LLMProvider, Message, StreamEvent, ChatOptions } from '@open-agent/providers';
 import {
   createSession,
@@ -11,6 +14,26 @@ import {
   __internal_buildSessionTurnQueryOptions,
   __internal_loadInitialMessages,
 } from '../session.js';
+
+function makeTempHome(prefix: string): { cwd: string; cleanup(): void } {
+  const cwd = mkdtempSync(join(tmpdir(), prefix));
+  const home = join(cwd, 'home');
+  mkdirSync(home, { recursive: true });
+  const originalHome = process.env.HOME;
+  process.env.HOME = home;
+
+  return {
+    cwd,
+    cleanup() {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+      rmSync(cwd, { recursive: true, force: true });
+    },
+  };
+}
 
 function makeMockProvider(responses: StreamEvent[][]): LLMProvider {
   let callIndex = 0;
@@ -526,6 +549,77 @@ describe('createSession()', () => {
     expect(health?.dispatcher.status).toBe('stopped');
 
     session.close();
+  });
+
+  it('restores dispatcher ledger through stable session transcript persistence', async () => {
+    const temp = makeTempHome('open-agent-sdk-session-dispatcher-ledger-');
+    const teamName = `alpha-team-${Date.now()}`;
+
+    try {
+      const session = createSession({
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeBackgroundControlProvider(),
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        persistSession: true,
+      } as any);
+
+      await session.createTeam({ name: teamName, setActive: true });
+      await session.createTask({
+        teamName,
+        subject: 'Persist dispatcher ledger through session',
+        description: 'Recover dispatcher state from the stable session transcript.',
+        priority: 1,
+      });
+
+      const dispatcher = await session.startTaskDispatcher({
+        dispatcherId: `dispatcher-${Date.now()}`,
+        owner: 'dispatcher-owner',
+        teamName,
+        pollIntervalMs: 25,
+        leaseMs: 500,
+      });
+
+      await waitForDispatcher(
+        (dispatcherId) => session.getTaskDispatcher(dispatcherId),
+        dispatcher.dispatcherId,
+        (item) => item.status === 'running' && Array.isArray(item.activeAssignments) && item.activeAssignments.length === 1,
+      );
+      await expect(session.stopTaskDispatcher(dispatcher.dispatcherId)).resolves.toMatchObject({
+        success: true,
+        dispatcher: { status: 'draining' },
+      });
+
+      const resumed = resumeSession(session.sessionId, {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeMockProvider([textResponse('unused')]),
+        persistSession: true,
+      } as any);
+
+      await expect(resumed.getTaskDispatcher(dispatcher.dispatcherId)).resolves.toMatchObject({
+        dispatcherId: dispatcher.dispatcherId,
+        source: 'transcript',
+        status: 'draining',
+      });
+      const recoveredHealth = await resumed.inspectTaskDispatcherHealth(dispatcher.dispatcherId, {
+        now: new Date(Date.now() + 60_000),
+        heartbeatGraceMs: 1,
+        drainingTimeoutMs: 1,
+      });
+      expect(recoveredHealth?.healthy).toBe(false);
+      expect(recoveredHealth?.findings.map((item) => item.code)).toEqual(expect.arrayContaining([
+        'lease_expired',
+        'stuck_assignment',
+        'draining_timeout',
+      ]));
+
+      resumed.close();
+      session.close();
+    } finally {
+      temp.cleanup();
+    }
   });
 
   it('forwards follow-up dispatch through the stable session handle', async () => {
