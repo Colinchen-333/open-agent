@@ -2,7 +2,8 @@ import { describe, expect, it } from 'bun:test';
 import { randomUUID } from 'crypto';
 import { mkdtempSync, mkdirSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
+import { SessionManager } from '@open-agent/core';
 import type { ChatOptions, LLMProvider, Message, StreamEvent } from '@open-agent/providers';
 import type { Query, TaskDispatcherRecord, TaskRecord } from '../types.js';
 import { query } from '../query.js';
@@ -99,6 +100,22 @@ async function waitForDispatcher(
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`Timed out waiting for dispatcher ${dispatcherId}`);
+}
+
+async function waitForOrchestrationSnapshot(
+  q: Query,
+  teamName: string,
+  predicate: (snapshot: Awaited<ReturnType<Query['readOrchestrationControlPlane']>>) => boolean,
+): Promise<Awaited<ReturnType<Query['readOrchestrationControlPlane']>>> {
+  const timeoutAt = Date.now() + 4_000;
+  while (Date.now() < timeoutAt) {
+    const snapshot = await q.readOrchestrationControlPlane({ teamName });
+    if (predicate(snapshot)) {
+      return snapshot;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for orchestration snapshot for team ${teamName}`);
 }
 
 describe('query() task dispatcher control plane', () => {
@@ -487,6 +504,79 @@ describe('query() task dispatcher control plane', () => {
       q.close();
     } finally {
       controlledFailure.releaseFailure();
+      temp.cleanup();
+    }
+  });
+
+  it('rebuilds orchestration snapshot from durable task and worker ledgers after cold restart', async () => {
+    const temp = makeTempHome('open-agent-sdk-orchestration-ledger-');
+    const teamName = `dispatcher-team-${Date.now()}`;
+    const sessionId = randomUUID();
+    const sessionMgr = new SessionManager();
+
+    try {
+      const writer = query('orchestration ledger writer', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeCompletingWorkerProvider(),
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        sessionId,
+      } as any);
+
+      await writer.createTeam({ name: teamName, setActive: true });
+      const task = await writer.createTask({
+        teamName,
+        subject: 'Ledger-backed task',
+        description: 'Persist orchestration records for cold recovery.',
+        priority: 9,
+      });
+      const dispatcher = await writer.startTaskDispatcher({
+        dispatcherId: `dispatcher-${Date.now()}`,
+        owner: 'dispatcher-owner',
+        teamName,
+        pollIntervalMs: 25,
+        leaseMs: 500,
+      });
+
+      const warmSnapshot = await waitForOrchestrationSnapshot(
+        writer,
+        teamName,
+        (snapshot) =>
+          snapshot.dispatchers.some((item) => item.dispatcherId === dispatcher.dispatcherId)
+          && snapshot.workers.length > 0,
+      );
+      const workerId = warmSnapshot.workers[0]?.workerId;
+      expect(workerId).toBeTruthy();
+
+      writer.close();
+
+      rmSync(join(process.env.HOME!, '.open-agent', 'tasks', teamName), { recursive: true, force: true });
+      rmSync(join(process.env.HOME!, '.open-agent', 'agent-sessions'), { recursive: true, force: true });
+
+      const transcriptDir = dirname(sessionMgr.getTranscriptPath(temp.cwd, sessionId));
+      expect(() => rmSync(join(transcriptDir, `${sessionId}.jsonl`), { force: true })).not.toThrow();
+
+      const reader = query('orchestration ledger reader', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeCompletingWorkerProvider(),
+        sessionId,
+      } as any);
+
+      const recovered = await reader.readOrchestrationControlPlane({ teamName });
+      expect(recovered.tasks).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: task.id, teamName }),
+      ]));
+      expect(recovered.workers).toEqual(expect.arrayContaining([
+        expect.objectContaining({ workerId, teamName }),
+      ]));
+      expect(recovered.dispatchers).toEqual(expect.arrayContaining([
+        expect.objectContaining({ dispatcherId: dispatcher.dispatcherId, teamName }),
+      ]));
+
+      reader.close();
+    } finally {
       temp.cleanup();
     }
   });

@@ -1693,7 +1693,10 @@ export function query(
     }));
   };
 
-  const upsertTaskStoreRecord = (record: TaskRecord) => {
+  const upsertTaskStoreRecord = (
+    record: TaskRecord,
+    options?: { persist?: boolean },
+  ) => {
     appStore.setState((prev) => upsertTaskControlPlane(prev, {
       id: record.id,
       subject: record.subject,
@@ -1711,9 +1714,15 @@ export function query(
       ...(record.metadata ? { metadata: { ...record.metadata } } : {}),
       payload: JSON.parse(JSON.stringify(record)),
     }));
+    if (options?.persist !== false) {
+      persistTaskLedgerRecord(record);
+    }
   };
 
-  const upsertWorkerStoreRecord = (record: WorkerRecord) => {
+  const upsertWorkerStoreRecord = (
+    record: WorkerRecord,
+    options?: { persist?: boolean },
+  ) => {
     appStore.setState((prev) => upsertWorkerControlPlane(prev, {
       workerId: record.workerId,
       workerType: record.workerType,
@@ -1723,6 +1732,9 @@ export function query(
       updatedAt: record.completedAt ?? record.startedAt,
       payload: JSON.parse(JSON.stringify(record)),
     }));
+    if (options?.persist !== false) {
+      persistWorkerLedgerRecord(record);
+    }
   };
 
   const upsertDispatcherDiagnosisStoreRecord = (report: TaskDispatcherHealthReport) => {
@@ -1821,6 +1833,20 @@ export function query(
         .filter((entry) => !teamName || entry.dispatcher.teamName === teamName)
         .sort((left, right) => left.observedAt.localeCompare(right.observedAt)),
     };
+  };
+
+  const hydratePersistedOrchestrationLedgersIntoStore = (options?: OrchestrationControlPlaneOptions) => {
+    const teamName = normalizeOptionalString(options?.teamName);
+    for (const record of readPersistedTaskLedgerRecords()) {
+      if (!teamName || record.teamName === teamName) {
+        upsertTaskStoreRecord(record, { persist: false });
+      }
+    }
+    for (const record of readPersistedWorkerLedgerRecords()) {
+      if (!teamName || record.teamName === teamName) {
+        upsertWorkerStoreRecord(record, { persist: false });
+      }
+    }
   };
 
   const appendOrchestrationTimelineStoreItem = (event: SDKOrchestrationEvent) => {
@@ -2855,6 +2881,7 @@ export function query(
 
   queryObj.readOrchestrationControlPlane = async (options?: OrchestrationControlPlaneOptions) => {
     const teamName = normalizeOptionalString(options?.teamName);
+    hydratePersistedOrchestrationLedgersIntoStore({ ...(teamName ? { teamName } : {}) });
     if (teamName) {
       await Promise.all([
         queryObj.listTasks({ teamName }),
@@ -3701,25 +3728,29 @@ export function query(
   queryObj.listWorkers = async (options?: WorkerListOptions) => {
     const teamName = normalizeOptionalString(options?.teamName);
     const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
-    const records = persistedAgentExecutor
-      .listPersistedAgents()
-      .filter((session) => !teamName || session.teamName === teamName)
-      .sort((left, right) => new Date(right.startedAt).getTime() - new Date(left.startedAt).getTime())
-      .map((session) => toWorkerRecord(session));
+    const merged = new Map<string, WorkerRecord>();
+    for (const record of readPersistedWorkerLedgerRecords()) {
+      merged.set(record.workerId, JSON.parse(JSON.stringify(record)) as WorkerRecord);
+    }
+    for (const session of persistedAgentExecutor.listPersistedAgents()) {
+      const record = toWorkerRecord(session);
+      merged.set(record.workerId, record);
+    }
+    const records = [...merged.values()]
+      .filter((record) => !teamName || record.teamName === teamName)
+      .sort((left, right) => new Date(right.startedAt).getTime() - new Date(left.startedAt).getTime());
     for (const record of records) {
-      upsertWorkerStoreRecord(record);
+      upsertWorkerStoreRecord(record, { persist: false });
     }
     return records;
   };
 
   queryObj.getWorker = async (workerId: string) => {
-    const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
-    const session = persistedAgentExecutor.getAgent(workerId);
-    const record = session ? toWorkerRecord(session) : null;
-    if (record) {
-      upsertWorkerStoreRecord(record);
+    const normalizedWorkerId = normalizeOptionalString(workerId);
+    if (!normalizedWorkerId) {
+      throw new Error('workerId is required to inspect a worker.');
     }
-    return record;
+    return (await queryObj.listWorkers()).find((record) => record.workerId === normalizedWorkerId) ?? null;
   };
 
   queryObj.getWorkerFollowUps = async (workerId: string) => {
@@ -3806,12 +3837,26 @@ export function query(
   queryObj.listTasks = async (options?: TaskListOptions) => {
     const teamName = resolveTaskTeamName(options?.teamName);
     const manager = getTaskManager(teamName);
+    const merged = new Map<string, TaskRecord>();
+    if (!options?.availableOnly) {
+      for (const record of readPersistedTaskLedgerRecords()) {
+        if (!teamName || record.teamName === teamName) {
+          merged.set(record.id, JSON.parse(JSON.stringify(record)) as TaskRecord);
+        }
+      }
+    }
     const tasks = options?.availableOnly
       ? manager.listAvailable(options.now ?? new Date())
       : manager.listAll();
-    const records = tasks.map((task) => toTaskRecord(task, teamName));
+    for (const task of tasks) {
+      const record = toTaskRecord(task, teamName);
+      merged.set(record.id, record);
+    }
+    const records = [...merged.values()]
+      .filter((record) => !teamName || record.teamName === teamName)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
     for (const record of records) {
-      upsertTaskStoreRecord(record);
+      upsertTaskStoreRecord(record, { persist: false });
     }
     return records;
   };
@@ -3821,7 +3866,7 @@ export function query(
     const task = getTaskManager(teamName).get(taskId);
     const record = task ? toTaskRecord(task, teamName) : null;
     if (record) {
-      upsertTaskStoreRecord(record);
+      upsertTaskStoreRecord(record, { persist: false });
     }
     return record;
   };
@@ -3999,6 +4044,84 @@ export function query(
   const getTaskDispatcherDiagnosisLedgerPath = () => sessionMgr
     ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.dispatcher-diagnoses.json`)
     : join(cwd, '.open-agent', 'dispatcher-ledgers', `${sessionId}.diagnoses.json`);
+  const getTaskLedgerPath = () => sessionMgr
+    ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.tasks.json`)
+    : join(cwd, '.open-agent', 'orchestration-ledgers', `${sessionId}.tasks.json`);
+  const getWorkerLedgerPath = () => sessionMgr
+    ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.workers.json`)
+    : join(cwd, '.open-agent', 'orchestration-ledgers', `${sessionId}.workers.json`);
+
+  const readPersistedTaskLedgerRecords = (): TaskRecord[] => {
+    const ledgerPath = getTaskLedgerPath();
+    if (!existsSync(ledgerPath)) {
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(readFileSync(ledgerPath, 'utf-8')) as PersistedTaskLedgerFile;
+      if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.tasks)) {
+        return [];
+      }
+      return parsed.tasks
+        .filter((record): record is TaskRecord => Boolean(record && typeof record === 'object' && typeof record.id === 'string'))
+        .map((record) => JSON.parse(JSON.stringify(record)) as TaskRecord)
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    } catch {
+      return [];
+    }
+  };
+
+  const persistTaskLedgerRecord = (record: TaskRecord): void => {
+    try {
+      const ledgerPath = getTaskLedgerPath();
+      mkdirSync(dirname(ledgerPath), { recursive: true });
+      const merged = new Map<string, TaskRecord>(
+        readPersistedTaskLedgerRecords().map((entry) => [entry.id, JSON.parse(JSON.stringify(entry)) as TaskRecord]),
+      );
+      merged.set(record.id, JSON.parse(JSON.stringify(record)) as TaskRecord);
+      writeFileSync(ledgerPath, JSON.stringify({
+        version: 1,
+        tasks: [...merged.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+      } satisfies PersistedTaskLedgerFile, null, 2));
+    } catch {
+      // Non-fatal: task ledger durability should not break the query control plane.
+    }
+  };
+
+  const readPersistedWorkerLedgerRecords = (): WorkerRecord[] => {
+    const ledgerPath = getWorkerLedgerPath();
+    if (!existsSync(ledgerPath)) {
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(readFileSync(ledgerPath, 'utf-8')) as PersistedWorkerLedgerFile;
+      if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.workers)) {
+        return [];
+      }
+      return parsed.workers
+        .filter((record): record is WorkerRecord => Boolean(record && typeof record === 'object' && typeof record.workerId === 'string'))
+        .map((record) => JSON.parse(JSON.stringify(record)) as WorkerRecord)
+        .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+    } catch {
+      return [];
+    }
+  };
+
+  const persistWorkerLedgerRecord = (record: WorkerRecord): void => {
+    try {
+      const ledgerPath = getWorkerLedgerPath();
+      mkdirSync(dirname(ledgerPath), { recursive: true });
+      const merged = new Map<string, WorkerRecord>(
+        readPersistedWorkerLedgerRecords().map((entry) => [entry.workerId, JSON.parse(JSON.stringify(entry)) as WorkerRecord]),
+      );
+      merged.set(record.workerId, JSON.parse(JSON.stringify(record)) as WorkerRecord);
+      writeFileSync(ledgerPath, JSON.stringify({
+        version: 1,
+        workers: [...merged.values()].sort((left, right) => left.startedAt.localeCompare(right.startedAt)),
+      } satisfies PersistedWorkerLedgerFile, null, 2));
+    } catch {
+      // Non-fatal: worker ledger durability should not break the query control plane.
+    }
+  };
 
   const readTaskDispatcherLedgerRecords = (): TaskDispatcherRecord[] => {
     const ledgerPath = getTaskDispatcherLedgerPath();
@@ -6084,6 +6207,16 @@ interface PersistedTaskDispatcherEventMessage {
 interface PersistedTaskDispatcherLedgerFile {
   version: 1;
   dispatchers: TaskDispatcherRecord[];
+}
+
+interface PersistedTaskLedgerFile {
+  version: 1;
+  tasks: TaskRecord[];
+}
+
+interface PersistedWorkerLedgerFile {
+  version: 1;
+  workers: WorkerRecord[];
 }
 
 interface PersistedTaskDispatcherDiagnosisFile {
