@@ -1947,6 +1947,22 @@ export function query(
       dispatcherEvent: raw,
       raw,
     };
+    if (sessionMgr) {
+      try {
+        const transcriptMessage: PersistedTaskDispatcherEventMessage = {
+          type: 'system',
+          subtype: 'task_dispatcher_event',
+          session_id: sessionId,
+          dispatcher_id: record.dispatcherId,
+          team_name: record.teamName,
+          timestamp: raw.timestamp,
+          event: JSON.parse(JSON.stringify(raw)),
+        };
+        sessionMgr.appendToTranscript(transcriptCwd, sessionId, transcriptMessage);
+      } catch {
+        // Non-fatal: never fail dispatcher orchestration on transcript write errors.
+      }
+    }
     for (const subscriber of orchestrationSubscribers) {
       subscriber.push(event);
     }
@@ -2441,6 +2457,14 @@ export function query(
 
   queryObj.readTimelineInbox = async (options: TimelineInboxOptions = {}) => {
     const items: SDKTimelineItem[] = [];
+    let transcriptEntries: unknown[] = [];
+    if (sessionMgr && (options.includeTaskNotifications !== false || options.includeOrchestration === true)) {
+      try {
+        transcriptEntries = sessionMgr.readTranscript(transcriptCwd, sessionId);
+      } catch {
+        transcriptEntries = [];
+      }
+    }
     if (options.includeTeamMessages !== false && options.memberName) {
       const messages = await queryObj.readTeamInbox({
         teamName: options.teamName,
@@ -2453,9 +2477,21 @@ export function query(
       });
       items.push(...messages.map((message) => toTimelineTeamMessage(message)));
     }
+    if (options.includeOrchestration === true) {
+      items.push(
+        ...extractTimelineDispatcherEventsFromTranscriptEntries(
+          transcriptEntries,
+          options.orchestrationTypes,
+        )
+          .filter((event) => !options.teamName || event.teamName === options.teamName)
+          .map((event) => toTimelineOrchestrationItem(event))
+          .filter((item) => !options.after || (item.cursor ?? item.timestamp) > options.after)
+          .slice(0, options.limit ?? Number.POSITIVE_INFINITY),
+      );
+    }
     if (options.includeTaskNotifications !== false) {
       items.push(
-        ...collectTimelineTaskNotifications(options.teamName)
+        ...collectTimelineTaskNotifications(options.teamName, transcriptEntries)
           .map((message) => toTimelineTaskNotification(message))
           .filter((item) => !options.after || (item.cursor ?? item.timestamp) > options.after)
           .slice(0, options.limit ?? Number.POSITIVE_INFINITY),
@@ -2675,10 +2711,13 @@ export function query(
     };
   };
 
-  const collectTimelineTaskNotifications = (teamName?: string): SDKTaskNotificationMessage[] => {
+  const collectTimelineTaskNotifications = (
+    teamName?: string,
+    transcriptEntriesOverride?: unknown[],
+  ): SDKTaskNotificationMessage[] => {
     const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
-    let transcriptEntries: unknown[] = [];
-    if (sessionMgr) {
+    let transcriptEntries: unknown[] = transcriptEntriesOverride ?? [];
+    if (!transcriptEntriesOverride && sessionMgr) {
       try {
         transcriptEntries = sessionMgr.readTranscript(transcriptCwd, sessionId);
       } catch {
@@ -4329,6 +4368,51 @@ function buildTimelineTeamMessageFingerprint(message: TeamMessageRecord): string
   ]);
 }
 
+function extractTimelineDispatcherEventsFromTranscriptEntries(
+  entries: unknown[],
+  orchestrationTypes?: SDKOrchestrationEventKind[],
+): SDKOrchestrationEvent[] {
+  const allowDispatcher = !orchestrationTypes || orchestrationTypes.includes('task_dispatcher');
+  if (!allowDispatcher) {
+    return [];
+  }
+
+  const events: SDKOrchestrationEvent[] = [];
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') continue;
+    const record = entry as Record<string, unknown>;
+    if (record.type !== 'system' || record.subtype !== 'task_dispatcher_event') continue;
+
+    const dispatcherId = normalizeOptionalString(record.dispatcher_id);
+    const sessionId = normalizeOptionalString(record.session_id);
+    const teamName = normalizeOptionalString(record.team_name);
+    const timestamp = normalizeOptionalString(record.timestamp);
+    const rawEvent = record.event;
+    if (!dispatcherId || !sessionId || !teamName || !timestamp || !rawEvent || typeof rawEvent !== 'object') {
+      continue;
+    }
+
+    const dispatcherEvent = JSON.parse(JSON.stringify(rawEvent)) as SDKTaskDispatcherEvent;
+    events.push({
+      kind: 'task_dispatcher',
+      sessionId,
+      parentToolCallId: `sdk-dispatcher:${dispatcherId}`,
+      dispatcherId,
+      teamName,
+      ...(normalizeOptionalString((dispatcherEvent as Record<string, unknown>).workerId)
+        ? { workerId: normalizeOptionalString((dispatcherEvent as Record<string, unknown>).workerId) }
+        : {}),
+      ...(normalizeOptionalString((dispatcherEvent as Record<string, unknown>).taskId)
+        ? { taskId: normalizeOptionalString((dispatcherEvent as Record<string, unknown>).taskId) }
+        : {}),
+      dispatcherEvent,
+      raw: dispatcherEvent,
+    });
+  }
+
+  return events;
+}
+
 function extractTimelineTaskNotificationsFromTranscriptEntries(
   entries: unknown[],
 ): SDKTaskNotificationMessage[] {
@@ -4408,6 +4492,16 @@ type PendingTaskNotificationSession = Pick<
   | 'totalToolUseCount'
   | 'durationMs'
 >;
+
+interface PersistedTaskDispatcherEventMessage {
+  type: 'system';
+  subtype: 'task_dispatcher_event';
+  session_id: string;
+  dispatcher_id: string;
+  team_name: string;
+  timestamp: string;
+  event: SDKTaskDispatcherEvent;
+}
 
 export function __internal_collectPendingTaskNotifications(params: {
   sessionId: string;

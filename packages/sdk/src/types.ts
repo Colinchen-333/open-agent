@@ -676,6 +676,8 @@ export interface TimelineInboxOptions {
   teamName?: string;
   memberName?: string;
   includeTeamMessages?: boolean;
+  includeOrchestration?: boolean;
+  orchestrationTypes?: SDKOrchestrationEventKind[];
   includeTaskNotifications?: boolean;
   consume?: boolean;
   acknowledge?: boolean;
@@ -685,8 +687,6 @@ export interface TimelineInboxOptions {
 }
 
 export interface SubscribeTimelineOptions extends TimelineInboxOptions {
-  includeOrchestration?: boolean;
-  orchestrationTypes?: SDKOrchestrationEventKind[];
   pollIntervalMs?: number;
   signal?: AbortSignal;
 }

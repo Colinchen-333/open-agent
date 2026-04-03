@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { homedir, tmpdir } from 'os';
 import { join } from 'path';
 import type { ChatOptions, LLMProvider, Message, StreamEvent } from '@open-agent/providers';
-import type { Query, WorkerRecord, SDKTimelineItem } from '../types.js';
+import type { Query, WorkerRecord, SDKTimelineItem, TaskDispatcherRecord } from '../types.js';
 import { query } from '../query.js';
 
 function makeTempHome(prefix: string): { cwd: string; cleanup(): void } {
@@ -97,6 +97,22 @@ async function waitForWorkerStatus(
   }
 }
 
+async function waitForDispatcher(
+  q: Query,
+  dispatcherId: string,
+  predicate: (dispatcher: TaskDispatcherRecord) => boolean,
+): Promise<TaskDispatcherRecord> {
+  const timeoutAt = Date.now() + 2_000;
+  while (Date.now() < timeoutAt) {
+    const dispatcher = (await q.listTaskDispatchers()).find((item) => item.dispatcherId === dispatcherId);
+    if (dispatcher && predicate(dispatcher)) {
+      return dispatcher;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for dispatcher ${dispatcherId}`);
+}
+
 async function readTimelineItem(
   iterator: AsyncIterator<SDKTimelineItem>,
   predicate: (item: SDKTimelineItem) => boolean,
@@ -186,6 +202,64 @@ describe('query() timeline control plane', () => {
       if (workerDir) {
         rmSync(workerDir, { recursive: true, force: true });
       }
+      temp.cleanup();
+    }
+  });
+
+  it('reads persisted dispatcher orchestration items from timeline snapshot mode', async () => {
+    const temp = makeTempHome('open-agent-sdk-timeline-dispatcher-snapshot-');
+    const teamName = `alpha-team-${Date.now()}`;
+
+    try {
+      const q = query('timeline dispatcher snapshot', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeStaticProvider(),
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+      });
+
+      await q.createTeam({ name: teamName, setActive: true });
+      await q.createTask({
+        teamName,
+        subject: 'Persist dispatcher replay',
+        description: 'Store dispatcher lifecycle in transcript.',
+        priority: 10,
+      });
+
+      const dispatcher = await q.startTaskDispatcher({
+        dispatcherId: `dispatcher-${Date.now()}`,
+        owner: 'dispatcher-owner',
+        teamName,
+        pollIntervalMs: 25,
+      });
+
+      await waitForDispatcher(
+        q,
+        dispatcher.dispatcherId,
+        (item) => item.status === 'running' && item.activeTaskIds.length === 0 && Boolean(item.lastDispatchAt),
+      );
+      await q.stopTaskDispatcher(dispatcher.dispatcherId);
+      await waitForDispatcher(q, dispatcher.dispatcherId, (item) => item.status === 'stopped');
+
+      const timeline = await q.readTimelineInbox({
+        teamName,
+        includeTeamMessages: false,
+        includeOrchestration: true,
+        includeTaskNotifications: false,
+      });
+      const dispatcherItems = timeline.filter((item) =>
+        item.kind === 'task_dispatcher'
+        && item.orchestrationEvent?.dispatcherId === dispatcher.dispatcherId,
+      );
+
+      expect(dispatcherItems.some((item) => item.orchestrationEvent?.dispatcherEvent?.type === 'started')).toBe(true);
+      expect(dispatcherItems.some((item) => item.orchestrationEvent?.dispatcherEvent?.type === 'dispatched')).toBe(true);
+      expect(dispatcherItems.some((item) => item.orchestrationEvent?.dispatcherEvent?.type === 'task_completed')).toBe(true);
+      expect(dispatcherItems.some((item) => item.orchestrationEvent?.dispatcherEvent?.type === 'stopped')).toBe(true);
+      expect(dispatcherItems.every((item) => item.timelineId?.includes(dispatcher.dispatcherId))).toBe(true);
+      q.close();
+    } finally {
       temp.cleanup();
     }
   });
