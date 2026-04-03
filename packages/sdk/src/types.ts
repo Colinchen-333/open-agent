@@ -120,6 +120,14 @@ export interface QueryOptions {
   forkSession?: boolean;
   hooks?: Partial<Record<HookEvent, any[]>>;
   persistSession?: boolean;
+  /** Advanced/internal transcript adapter used by higher-level session wrappers. */
+  sessionManager?: {
+    ensureSession(cwd: string, sessionId: string, model: string, metadata?: Record<string, unknown>): unknown;
+    appendToTranscript(cwd: string, sessionId: string, message: unknown): void;
+    readTranscript(cwd: string, sessionId: string): unknown[];
+    getSession(cwd: string, sessionId: string): SessionInfo | null;
+    touchSession?(cwd: string, sessionId: string): unknown;
+  };
   includePartialMessages?: boolean;
   thinking?: ThinkingConfig;
   effort?: 'low' | 'medium' | 'high' | 'max';
@@ -464,6 +472,7 @@ export interface TaskDispatcherRecord {
   dispatcherId: string;
   owner: string;
   teamName: string;
+  source: 'live' | 'transcript';
   workerType: 'worker' | 'verifier';
   status: 'running' | 'draining' | 'stopped';
   pollIntervalMs: number;
@@ -473,6 +482,7 @@ export interface TaskDispatcherRecord {
   activeWorkerIds: string[];
   activeAssignments: TaskDispatcherAssignmentRecord[];
   startedAt: string;
+  updatedAt: string;
   stoppedAt?: string;
   lastDispatchAt?: string;
 }
@@ -499,6 +509,36 @@ export interface TaskDispatcherRequeueResult {
   dispatcher: TaskDispatcherRecord | null;
   task: TaskRecord | null;
   workerStop?: { success: boolean };
+}
+
+export type TaskDispatcherHealthCode =
+  | 'stuck_assignment'
+  | 'worker_missing'
+  | 'lease_expired'
+  | 'draining_timeout';
+
+export interface TaskDispatcherHealthFinding {
+  code: TaskDispatcherHealthCode;
+  severity: 'warning' | 'error';
+  message: string;
+  observedAt: string;
+  taskId?: string;
+  workerId?: string;
+}
+
+export interface TaskDispatcherHealthOptions {
+  now?: string | Date;
+  heartbeatGraceMs?: number;
+  drainingTimeoutMs?: number;
+}
+
+export interface TaskDispatcherHealthReport {
+  dispatcherId: string;
+  source: TaskDispatcherRecord['source'];
+  observedAt: string;
+  healthy: boolean;
+  dispatcher: TaskDispatcherRecord;
+  findings: TaskDispatcherHealthFinding[];
 }
 
 export interface TeamMemberRecord {
@@ -635,6 +675,7 @@ export interface SDKTaskDispatcherEvent {
   owner: string;
   teamName: string;
   workerType: 'worker' | 'verifier';
+  source: TaskDispatcherRecord['source'];
   status: TaskDispatcherRecord['status'];
   timestamp: string;
   pollIntervalMs: number;
@@ -653,6 +694,10 @@ export interface SDKTaskDispatcherEvent {
   activeTaskIds: string[];
   activeWorkerIds: string[];
   activeAssignments: TaskDispatcherAssignmentRecord[];
+  startedAt: string;
+  updatedAt: string;
+  lastDispatchAt?: string;
+  stoppedAt?: string;
   followUps: WorkerFollowUpSuggestion[];
 }
 
@@ -843,6 +888,11 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   getTaskDispatcher(dispatcherId: string): Promise<TaskDispatcherRecord | null>;
   /** List live task dispatchers tracked by this query handle. */
   listTaskDispatchers(options?: TaskDispatcherListOptions): Promise<TaskDispatcherRecord[]>;
+  /** Inspect a dispatcher and emit structured health findings for stuck / expired / missing assignments. */
+  inspectTaskDispatcherHealth(
+    dispatcherId: string,
+    options?: TaskDispatcherHealthOptions,
+  ): Promise<TaskDispatcherHealthReport | null>;
   /** Force one active dispatcher assignment back to pending, optionally stopping its worker first. */
   requeueTaskDispatcherAssignment(input: TaskDispatcherRequeueInput): Promise<TaskDispatcherRequeueResult>;
   /** Stop a running task dispatcher. Active workers are drained before final stop. */
@@ -1018,6 +1068,11 @@ export interface Session {
   getTaskDispatcher(dispatcherId: string): Promise<TaskDispatcherRecord | null>;
   /** List live task dispatchers tracked by this query handle. */
   listTaskDispatchers(options?: TaskDispatcherListOptions): Promise<TaskDispatcherRecord[]>;
+  /** Inspect a dispatcher and emit structured health findings for stuck / expired / missing assignments. */
+  inspectTaskDispatcherHealth(
+    dispatcherId: string,
+    options?: TaskDispatcherHealthOptions,
+  ): Promise<TaskDispatcherHealthReport | null>;
   /** Force one active dispatcher assignment back to pending, optionally stopping its worker first. */
   requeueTaskDispatcherAssignment(input: TaskDispatcherRequeueInput): Promise<TaskDispatcherRequeueResult>;
   /** Stop a running task dispatcher. Active workers are drained before final stop. */

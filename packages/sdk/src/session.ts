@@ -133,6 +133,7 @@ type SessionControlMethods = Pick<
   | 'startTaskDispatcher'
   | 'getTaskDispatcher'
   | 'listTaskDispatchers'
+  | 'inspectTaskDispatcherHealth'
   | 'requeueTaskDispatcherAssignment'
   | 'stopTaskDispatcher'
   | 'listBackgroundTasks'
@@ -293,6 +294,7 @@ function _buildSession(
       abortController,
       ...(initialMessages && initialMessages.length > 0 ? { initialMessages } : {}),
       persistSession: false,
+      ...(sessionMgr ? { sessionManager: sessionMgr } : {}),
     },
   });
 
@@ -428,6 +430,7 @@ function _buildSession(
     startTaskDispatcher: (...args) => q.startTaskDispatcher(...args),
     getTaskDispatcher: (...args) => q.getTaskDispatcher(...args),
     listTaskDispatchers: (...args) => q.listTaskDispatchers(...args),
+    inspectTaskDispatcherHealth: (...args) => q.inspectTaskDispatcherHealth(...args),
     requeueTaskDispatcherAssignment: (...args) => q.requeueTaskDispatcherAssignment(...args),
     stopTaskDispatcher: (...args) => q.stopTaskDispatcher(...args),
     listBackgroundTasks: (...args) => q.listBackgroundTasks(...args),
@@ -687,6 +690,7 @@ export function unstable_v2_createSession(
     startTaskDispatcher: (...args) => q.startTaskDispatcher(...args),
     getTaskDispatcher: (...args) => q.getTaskDispatcher(...args),
     listTaskDispatchers: (...args) => q.listTaskDispatchers(...args),
+    inspectTaskDispatcherHealth: (...args) => q.inspectTaskDispatcherHealth(...args),
     requeueTaskDispatcherAssignment: (...args) => q.requeueTaskDispatcherAssignment(...args),
     stopTaskDispatcher: (...args) => q.stopTaskDispatcher(...args),
     listBackgroundTasks: (...args) => q.listBackgroundTasks(...args),

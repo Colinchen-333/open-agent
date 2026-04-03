@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { randomUUID } from 'crypto';
 import { mkdtempSync, mkdirSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -310,6 +311,92 @@ describe('query() task dispatcher control plane', () => {
 
       q.close();
     } finally {
+      temp.cleanup();
+    }
+  });
+
+  it('rebuilds dispatcher ledger from transcript and reports structured health findings', async () => {
+    const temp = makeTempHome('open-agent-sdk-task-dispatcher-health-');
+    const teamName = `dispatcher-team-${Date.now()}`;
+    const sessionId = randomUUID();
+    const controlledFailure = makeControlledFailureProvider();
+
+    try {
+      const writer = query('dispatcher health writer', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: controlledFailure.provider,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        sessionId,
+      } as any);
+
+      await writer.createTeam({ name: teamName, setActive: true });
+      const task = await writer.createTask({
+        teamName,
+        subject: 'Persist dispatcher diagnostics',
+        description: 'Keep assignment state in transcript for later inspection.',
+        priority: 1,
+      });
+
+      const dispatcher = await writer.startTaskDispatcher({
+        dispatcherId: `dispatcher-${Date.now()}`,
+        owner: 'dispatcher-owner',
+        teamName,
+        pollIntervalMs: 25,
+        leaseMs: 500,
+      });
+
+      const liveDispatcher = await waitForDispatcher(
+        writer,
+        dispatcher.dispatcherId,
+        (item) => item.status === 'running' && item.activeAssignments.length === 1,
+      );
+      expect(liveDispatcher.source).toBe('live');
+
+      await expect(writer.stopTaskDispatcher(dispatcher.dispatcherId)).resolves.toMatchObject({
+        success: true,
+        dispatcher: { status: 'draining' },
+      });
+      const drainingDispatcher = await waitForDispatcher(
+        writer,
+        dispatcher.dispatcherId,
+        (item) => item.status === 'draining' && item.activeAssignments.length === 1,
+      );
+
+      const reader = query('dispatcher health reader', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeCompletingWorkerProvider(),
+        sessionId,
+      } as any);
+
+      const recovered = await reader.getTaskDispatcher(dispatcher.dispatcherId);
+      expect(recovered?.source).toBe('transcript');
+      expect(recovered?.status).toBe('draining');
+      expect(recovered?.activeAssignments).toHaveLength(1);
+      expect(recovered?.activeAssignments[0]?.taskId).toBe(task.id);
+      expect((await reader.listTaskDispatchers()).some((item) =>
+        item.dispatcherId === dispatcher.dispatcherId && item.source === 'transcript',
+      )).toBe(true);
+
+      const health = await reader.inspectTaskDispatcherHealth(dispatcher.dispatcherId, {
+        now: new Date(Date.parse(drainingDispatcher.updatedAt) + 60_000),
+        heartbeatGraceMs: 1,
+        drainingTimeoutMs: 1,
+      });
+      expect(health?.healthy).toBe(false);
+      expect(health?.source).toBe('transcript');
+      expect(health?.findings.map((item) => item.code)).toEqual(expect.arrayContaining([
+        'lease_expired',
+        'stuck_assignment',
+        'draining_timeout',
+      ]));
+
+      reader.close();
+      writer.close();
+    } finally {
+      controlledFailure.releaseFailure();
       temp.cleanup();
     }
   });

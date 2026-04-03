@@ -61,6 +61,9 @@ import type {
   TaskDispatchResult,
   TaskDispatcherListOptions,
   TaskDispatcherRecord,
+  TaskDispatcherHealthFinding,
+  TaskDispatcherHealthOptions,
+  TaskDispatcherHealthReport,
   TaskDispatcherRequeueInput,
   TaskDispatcherRequeueResult,
   TaskDispatcherStartInput,
@@ -186,6 +189,7 @@ export function query(
     ? new SettingsLoader().load(cwd, settingSources)
     : null;
   const shouldPersist = options.persistSession !== false;
+  const sharedSessionManager = options.sessionManager ?? null;
   const availableAgents = loadAvailableAgents(cwd, options.agents);
   const selectedAgent = resolveSelectedAgent(options.agent, availableAgents);
   const supportedAgentInfos = buildAgentInfoList(availableAgents);
@@ -194,7 +198,7 @@ export function query(
   const outputStyle = options.outputStyle ?? 'text';
   const responseLanguage = normalizeOptionalString(options.language);
   const isGitRepo = isGitRepository(cwd);
-  const sessionExistedBeforeQuery = shouldPersist
+  const sessionExistedBeforeQuery = (shouldPersist || sharedSessionManager !== null)
     ? resumeManager.getSession(cwd, sessionId) !== null
     : false;
 
@@ -1056,7 +1060,7 @@ export function query(
   const model =
     requestedModelHint ??
     (provider.name === 'anthropic' ? 'claude-sonnet-4-6' : 'gpt-4o');
-  const sessionMgr = shouldPersist ? new SessionManager() : null;
+  const sessionMgr = sharedSessionManager ?? (shouldPersist ? new SessionManager() : null);
   if (sessionMgr) {
     try {
       sessionMgr.ensureSession(cwd, sessionId, model);
@@ -2038,15 +2042,18 @@ export function query(
     type: SDKTaskDispatcherEvent['type'],
     overrides: Partial<Pick<SDKTaskDispatcherEvent, 'taskId' | 'workerId' | 'taskStatus' | 'timestamp'>> = {},
   ): void => {
+    const eventTimestamp = overrides.timestamp ?? new Date().toISOString();
+    state.record.updatedAt = eventTimestamp;
     const record = syncTaskDispatcherRecord(state);
     const rawBase: Omit<SDKTaskDispatcherEvent, 'followUps'> = {
       type,
       dispatcherId: record.dispatcherId,
       owner: record.owner,
       teamName: record.teamName,
+      source: record.source,
       workerType: record.workerType,
       status: record.status,
-      timestamp: overrides.timestamp ?? new Date().toISOString(),
+      timestamp: eventTimestamp,
       pollIntervalMs: record.pollIntervalMs,
       leaseMs: record.leaseMs,
       maxConcurrentWorkers: record.maxConcurrentWorkers,
@@ -2063,6 +2070,10 @@ export function query(
       ...(overrides.workerId ? { workerId: overrides.workerId } : {}),
       ...(overrides.taskStatus ? { taskStatus: overrides.taskStatus } : {}),
       activeAssignments: [...record.activeAssignments],
+      startedAt: record.startedAt,
+      updatedAt: record.updatedAt,
+      ...(record.lastDispatchAt ? { lastDispatchAt: record.lastDispatchAt } : {}),
+      ...(record.stoppedAt ? { stoppedAt: record.stoppedAt } : {}),
     };
     const raw: SDKTaskDispatcherEvent = {
       ...rawBase,
@@ -3396,6 +3407,7 @@ export function query(
         dispatcherId,
         owner,
         teamName,
+        source: 'live',
         workerType: input.workerType === 'verifier' ? 'verifier' : 'worker',
         status: 'running',
         pollIntervalMs,
@@ -3405,6 +3417,7 @@ export function query(
         activeWorkerIds: [],
         activeAssignments: [],
         startedAt,
+        updatedAt: startedAt,
       },
       ...(normalizeOptionalString(input.prompt) ? { prompt: normalizeOptionalString(input.prompt) } : {}),
       ...(normalizeOptionalString(input.name) ? { name: normalizeOptionalString(input.name) } : {}),
@@ -3426,14 +3439,65 @@ export function query(
     return cloneTaskDispatcherRecord(state.record);
   };
 
+  const readPersistedTaskDispatcherRecords = (): TaskDispatcherRecord[] => {
+    if (!sessionMgr) {
+      return [];
+    }
+    let transcriptEntries: unknown[] = [];
+    try {
+      transcriptEntries = sessionMgr.readTranscript(transcriptCwd, sessionId);
+    } catch {
+      transcriptEntries = [];
+    }
+
+    const records = new Map<string, TaskDispatcherRecord>();
+    for (const event of extractTimelineDispatcherEventsFromTranscriptEntries(transcriptEntries)) {
+      const dispatcherEvent = event.dispatcherEvent;
+      if (!dispatcherEvent || !event.dispatcherId || !event.teamName) {
+        continue;
+      }
+      const previous = records.get(event.dispatcherId);
+      records.set(event.dispatcherId, {
+        dispatcherId: event.dispatcherId,
+        owner: dispatcherEvent.owner,
+        teamName: event.teamName,
+        source: 'transcript',
+        workerType: dispatcherEvent.workerType,
+        status: dispatcherEvent.status,
+        pollIntervalMs: dispatcherEvent.pollIntervalMs,
+        leaseMs: dispatcherEvent.leaseMs,
+        maxConcurrentWorkers: dispatcherEvent.maxConcurrentWorkers,
+        activeTaskIds: [...dispatcherEvent.activeTaskIds],
+        activeWorkerIds: [...dispatcherEvent.activeWorkerIds],
+        activeAssignments: [...dispatcherEvent.activeAssignments],
+        startedAt: previous?.startedAt ?? dispatcherEvent.startedAt ?? dispatcherEvent.timestamp,
+        updatedAt: dispatcherEvent.updatedAt ?? dispatcherEvent.timestamp,
+        ...(dispatcherEvent.lastDispatchAt || previous?.lastDispatchAt
+          ? { lastDispatchAt: dispatcherEvent.lastDispatchAt ?? previous?.lastDispatchAt }
+          : {}),
+        ...(dispatcherEvent.stoppedAt || previous?.stoppedAt
+          ? { stoppedAt: dispatcherEvent.stoppedAt ?? previous?.stoppedAt }
+          : {}),
+      });
+    }
+
+    return [...records.values()].sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+  };
+
   queryObj.listTaskDispatchers = async (options?: TaskDispatcherListOptions) => {
     const teamName = normalizeOptionalString(options?.teamName);
     const status = options?.status;
-    return [...taskDispatchers.values()]
-      .map((state) => syncTaskDispatcherRecord(state))
+    const merged = new Map<string, TaskDispatcherRecord>();
+    for (const record of readPersistedTaskDispatcherRecords()) {
+      merged.set(record.dispatcherId, cloneTaskDispatcherRecord(record));
+    }
+    for (const state of taskDispatchers.values()) {
+      const record = cloneTaskDispatcherRecord(syncTaskDispatcherRecord(state));
+      merged.set(record.dispatcherId, record);
+    }
+    return [...merged.values()]
       .filter((record) => (!teamName || record.teamName === teamName) && (!status || record.status === status))
-      .sort((left, right) => left.startedAt.localeCompare(right.startedAt))
-      .map((record) => cloneTaskDispatcherRecord(record));
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
   };
 
   queryObj.getTaskDispatcher = async (dispatcherId: string) => {
@@ -3443,9 +3507,91 @@ export function query(
     }
     const state = taskDispatchers.get(normalizedDispatcherId);
     if (!state) {
-      return null;
+      return readPersistedTaskDispatcherRecords().find((record) => record.dispatcherId === normalizedDispatcherId) ?? null;
     }
     return cloneTaskDispatcherRecord(syncTaskDispatcherRecord(state));
+  };
+
+  queryObj.inspectTaskDispatcherHealth = async (
+    dispatcherId: string,
+    options?: TaskDispatcherHealthOptions,
+  ): Promise<TaskDispatcherHealthReport | null> => {
+    const dispatcher = await queryObj.getTaskDispatcher(dispatcherId);
+    if (!dispatcher) {
+      return null;
+    }
+
+    const observedAt = options?.now instanceof Date
+      ? options.now.toISOString()
+      : typeof options?.now === 'string'
+        ? options.now
+        : new Date().toISOString();
+    const observedAtMs = Date.parse(observedAt);
+    const heartbeatGraceMs = options?.heartbeatGraceMs ?? Math.max(dispatcher.leaseMs, dispatcher.pollIntervalMs * 4);
+    const drainingTimeoutMs = options?.drainingTimeoutMs ?? Math.max(dispatcher.leaseMs, dispatcher.pollIntervalMs * 8);
+    const findings: TaskDispatcherHealthFinding[] = [];
+
+    for (const assignment of dispatcher.activeAssignments) {
+      const worker = await queryObj.getWorker(assignment.workerId);
+      if (!worker) {
+        findings.push({
+          code: 'worker_missing',
+          severity: 'error',
+          message: `Worker ${assignment.workerId} is missing for dispatcher assignment ${assignment.taskId}.`,
+          observedAt,
+          taskId: assignment.taskId,
+          workerId: assignment.workerId,
+        });
+      }
+
+      const leaseExpiresAtMs = assignment.leaseExpiresAt ? Date.parse(assignment.leaseExpiresAt) : NaN;
+      if (Number.isFinite(leaseExpiresAtMs) && leaseExpiresAtMs <= observedAtMs) {
+        findings.push({
+          code: 'lease_expired',
+          severity: 'error',
+          message: `Lease expired for task ${assignment.taskId} on worker ${assignment.workerId}.`,
+          observedAt,
+          taskId: assignment.taskId,
+          workerId: assignment.workerId,
+        });
+      }
+
+      const lastHeartbeatAtMs = assignment.lastHeartbeatAt ? Date.parse(assignment.lastHeartbeatAt) : NaN;
+      if (Number.isFinite(lastHeartbeatAtMs) && observedAtMs - lastHeartbeatAtMs > heartbeatGraceMs) {
+        findings.push({
+          code: 'stuck_assignment',
+          severity: 'warning',
+          message: `Assignment ${assignment.taskId} on worker ${assignment.workerId} has not heartbeat for ${observedAtMs - lastHeartbeatAtMs}ms.`,
+          observedAt,
+          taskId: assignment.taskId,
+          workerId: assignment.workerId,
+        });
+      }
+    }
+
+    const updatedAtMs = Date.parse(dispatcher.updatedAt);
+    if (
+      dispatcher.status === 'draining'
+      && dispatcher.activeAssignments.length > 0
+      && Number.isFinite(updatedAtMs)
+      && observedAtMs - updatedAtMs > drainingTimeoutMs
+    ) {
+      findings.push({
+        code: 'draining_timeout',
+        severity: 'warning',
+        message: `Dispatcher ${dispatcher.dispatcherId} has been draining for ${observedAtMs - updatedAtMs}ms with active assignments.`,
+        observedAt,
+      });
+    }
+
+    return {
+      dispatcherId: dispatcher.dispatcherId,
+      source: dispatcher.source,
+      observedAt,
+      healthy: findings.length === 0,
+      dispatcher,
+      findings,
+    };
   };
 
   queryObj.requeueTaskDispatcherAssignment = async (
@@ -4720,12 +4866,18 @@ function extractTimelineDispatcherEventsFromTranscriptEntries(
         }));
     const normalizedDispatcherEvent = {
       ...dispatcherEvent,
+      source: dispatcherEvent.source === 'transcript' ? 'transcript' : 'live',
       activeAssignments: fallbackActiveAssignments,
+      startedAt: dispatcherEvent.startedAt ?? dispatcherEvent.timestamp,
+      updatedAt: dispatcherEvent.updatedAt ?? dispatcherEvent.timestamp,
       followUps: Array.isArray(dispatcherEvent.followUps)
         ? dispatcherEvent.followUps
         : buildTaskDispatcherFollowUps({
             ...(dispatcherEvent as Omit<SDKTaskDispatcherEvent, 'followUps'>),
+            source: dispatcherEvent.source === 'transcript' ? 'transcript' : 'live',
             activeAssignments: fallbackActiveAssignments,
+            startedAt: dispatcherEvent.startedAt ?? dispatcherEvent.timestamp,
+            updatedAt: dispatcherEvent.updatedAt ?? dispatcherEvent.timestamp,
           }),
     };
     events.push({

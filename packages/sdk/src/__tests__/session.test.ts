@@ -144,6 +144,7 @@ describe('createSession()', () => {
     expect(typeof session.startTaskDispatcher).toBe('function');
     expect(typeof session.getTaskDispatcher).toBe('function');
     expect(typeof session.listTaskDispatchers).toBe('function');
+    expect(typeof session.inspectTaskDispatcherHealth).toBe('function');
     expect(typeof session.requeueTaskDispatcherAssignment).toBe('function');
     expect(typeof session.stopTaskDispatcher).toBe('function');
     expect(typeof session.stopTask).toBe('function');
@@ -519,6 +520,10 @@ describe('createSession()', () => {
       teamName,
       status: 'pending',
     });
+
+    const health = await session.inspectTaskDispatcherHealth(dispatcher.dispatcherId);
+    expect(health?.healthy).toBe(true);
+    expect(health?.dispatcher.status).toBe('stopped');
 
     session.close();
   });
