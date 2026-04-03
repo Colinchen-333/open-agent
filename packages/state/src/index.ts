@@ -51,6 +51,9 @@ export {
   type RuntimeCapabilitySummaryState,
   type RuntimeControlPlaneState,
   type DispatcherControlPlaneState,
+  type TeamInboxMessageControlPlaneState,
+  type TeamInboxMemberControlPlaneState,
+  type TeamApprovalControlPlaneState,
   type TimelineControlPlaneItemState,
   createDefaultAppState,
 } from './app-state.js';
@@ -64,5 +67,6 @@ export {
   upsertDispatcherControlPlane,
   removeDispatcherControlPlane,
   appendTimelineControlPlane,
+  syncTeamInboxMemberControlPlane,
   type RuntimeControlPlaneSnapshotInput,
 } from './control-plane.js';

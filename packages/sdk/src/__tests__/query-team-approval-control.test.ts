@@ -28,8 +28,12 @@ describe('query() team approval control plane', () => {
         memberName: 'lead',
         unreadOnly: true,
       });
+      expect(await q.getTeamInboxCount('lead', { teamName })).toBe(1);
       expect(pending).toHaveLength(1);
       expect(pending[0]?.requestType).toBe('plan_approval_request');
+      const stateBeforeResponse = (q as any).__internal_getAppState?.();
+      expect(stateBeforeResponse?.approvals[teamName]?.['lead']).toHaveLength(1);
+      expect(stateBeforeResponse?.inboxes[teamName]?.['lead']?.unreadCount).toBe(1);
 
       const response = await q.respondToTeamApproval({
         teamName,
@@ -43,6 +47,14 @@ describe('query() team approval control plane', () => {
       expect(response.request.requestId).toBe(request.requestId);
       expect(response.response.type).toBe('plan_approval_response');
       expect(response.response.approve).toBe(true);
+      expect(await q.getTeamInboxCount('lead', { teamName })).toBe(0);
+      expect(await q.getTeamInboxCount('worker-1', { teamName })).toBe(1);
+      const stateAfterResponse = (q as any).__internal_getAppState?.();
+      expect(stateAfterResponse?.approvals[teamName]?.['lead']).toHaveLength(1);
+      expect(stateAfterResponse?.approvals[teamName]?.['lead']?.[0]?.readAt).toBeTruthy();
+      expect(stateAfterResponse?.inboxes[teamName]?.['worker-1']?.messages.some((message: any) =>
+        message.type === 'plan_approval_response' && message.requestId === request.requestId,
+      )).toBe(true);
 
       const workerInbox = await q.readTeamInbox({ teamName, memberName: 'worker-1', consume: false });
       expect(
@@ -89,6 +101,8 @@ describe('query() team approval control plane', () => {
       });
       expect(pending).toHaveLength(1);
       expect(pending[0]?.requestType).toBe('shutdown_request');
+      const stateBeforeShutdownResponse = (q as any).__internal_getAppState?.();
+      expect(stateBeforeShutdownResponse?.approvals[teamName]?.['worker-2']).toHaveLength(1);
 
       const response = await q.respondToTeamApproval({
         teamName,
@@ -101,6 +115,14 @@ describe('query() team approval control plane', () => {
       expect(response.acknowledged).toBe(0);
       expect(response.response.type).toBe('shutdown_response');
       expect(response.response.approve).toBe(false);
+      expect(await q.getTeamInboxCount('worker-2', { teamName })).toBe(1);
+      expect(await q.getTeamInboxCount('lead', { teamName })).toBe(1);
+      const stateAfterShutdownResponse = (q as any).__internal_getAppState?.();
+      expect(stateAfterShutdownResponse?.approvals[teamName]?.['worker-2']).toHaveLength(1);
+      expect(stateAfterShutdownResponse?.approvals[teamName]?.['worker-2']?.[0]?.readAt).toBeUndefined();
+      expect(stateAfterShutdownResponse?.inboxes[teamName]?.['lead']?.messages.some((message: any) =>
+        message.type === 'shutdown_response' && message.requestId === request.requestId,
+      )).toBe(true);
 
       const leadInbox = await q.readTeamInbox({ teamName, memberName: 'lead', consume: true });
       expect(leadInbox).toHaveLength(1);

@@ -108,6 +108,41 @@ export interface TimelineControlPlaneItemState {
   payload: unknown;
 }
 
+export interface TeamInboxMessageControlPlaneState {
+  messageId: string;
+  type: string;
+  from: string;
+  to?: string;
+  content: string;
+  summary?: string;
+  timestamp: string;
+  requestId?: string;
+  approve?: boolean;
+  readAt?: string;
+}
+
+export interface TeamInboxMemberControlPlaneState {
+  teamName: string;
+  memberName: string;
+  unreadCount: number;
+  updatedAt: string;
+  messages: TeamInboxMessageControlPlaneState[];
+}
+
+export interface TeamApprovalControlPlaneState {
+  messageId: string;
+  teamName: string;
+  memberName: string;
+  requestType: string;
+  requestId: string;
+  from: string;
+  to?: string;
+  content: string;
+  summary?: string;
+  timestamp: string;
+  readAt?: string;
+}
+
 export interface AppState {
   // Session
   sessionId: string;
@@ -136,6 +171,8 @@ export interface AppState {
   runtime: RuntimeControlPlaneState;
   dispatchers: Record<string, DispatcherControlPlaneState>;
   timeline: TimelineControlPlaneItemState[];
+  inboxes: Record<string, Record<string, TeamInboxMemberControlPlaneState>>;
+  approvals: Record<string, Record<string, TeamApprovalControlPlaneState[]>>;
 
   // Settings
   thinkingConfig: ThinkingConfig;
@@ -174,6 +211,8 @@ export function createDefaultAppState(overrides: Partial<AppState> = {}): AppSta
     },
     dispatchers: {},
     timeline: [],
+    inboxes: {},
+    approvals: {},
     thinkingConfig: { type: 'adaptive' },
     verbose: false,
     ...overrides,

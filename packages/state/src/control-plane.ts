@@ -7,6 +7,9 @@ import type {
   RuntimeDiagnosticState,
   RuntimeHookState,
   RuntimePluginState,
+  TeamApprovalControlPlaneState,
+  TeamInboxMemberControlPlaneState,
+  TeamInboxMessageControlPlaneState,
   TimelineControlPlaneItemState,
 } from './app-state.js';
 
@@ -140,5 +143,64 @@ export function appendTimelineControlPlane(
   return {
     ...state,
     timeline: nextTimeline.slice(-limit),
+  };
+}
+
+function derivePendingApprovals(
+  memberSnapshot: TeamInboxMemberControlPlaneState,
+): TeamApprovalControlPlaneState[] {
+  return memberSnapshot.messages
+    .filter((message) =>
+      (message.type === 'shutdown_request' || message.type === 'plan_approval_request')
+      && typeof message.requestId === 'string'
+      && message.requestId.length > 0,
+    )
+    .map((message) => ({
+      messageId: message.messageId,
+      teamName: memberSnapshot.teamName,
+      memberName: memberSnapshot.memberName,
+      requestType: message.type,
+      requestId: message.requestId!,
+      from: message.from,
+      ...(message.to ? { to: message.to } : {}),
+      content: message.content,
+      ...(message.summary ? { summary: message.summary } : {}),
+      timestamp: message.timestamp,
+      ...(message.readAt ? { readAt: message.readAt } : {}),
+    }));
+}
+
+export function syncTeamInboxMemberControlPlane(
+  state: AppState,
+  input: {
+    teamName: string;
+    memberName: string;
+    messages: TeamInboxMessageControlPlaneState[];
+    updatedAt?: string;
+  },
+): AppState {
+  const memberSnapshot: TeamInboxMemberControlPlaneState = {
+    teamName: input.teamName,
+    memberName: input.memberName,
+    unreadCount: input.messages.filter((message) => !message.readAt).length,
+    updatedAt: input.updatedAt ?? new Date().toISOString(),
+    messages: input.messages.map((message) => ({ ...message })),
+  };
+  return {
+    ...state,
+    inboxes: {
+      ...state.inboxes,
+      [input.teamName]: {
+        ...(state.inboxes[input.teamName] ?? {}),
+        [input.memberName]: memberSnapshot,
+      },
+    },
+    approvals: {
+      ...state.approvals,
+      [input.teamName]: {
+        ...(state.approvals[input.teamName] ?? {}),
+        [input.memberName]: derivePendingApprovals(memberSnapshot),
+      },
+    },
   };
 }

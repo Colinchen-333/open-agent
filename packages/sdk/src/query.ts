@@ -19,6 +19,7 @@ import {
   appendTimelineControlPlane,
   createDefaultAppState,
   setActiveTeamControlPlane,
+  syncTeamInboxMemberControlPlane,
   syncMcpServerState,
   syncRuntimeControlPlane,
   syncSessionControlPlane,
@@ -467,6 +468,58 @@ export function query(
     ...(message.idleReason ? { idleReason: message.idleReason } : {}),
     ...(message.routing ? { routing: JSON.parse(JSON.stringify(message.routing)) } : {}),
   });
+  const resolveTeamMessageSyncTargets = (teamName: string, message: TeamMessage): string[] => {
+    if (message.type === 'broadcast') {
+      const members = sdkTeamManager.getMembers(teamName);
+      return members.length > 0 ? members.map((member) => member.name) : ['broadcast'];
+    }
+    if (message.type === 'idle_notification') {
+      const members = sdkTeamManager.getMembers(teamName);
+      const lead = members.find((member) => member.name === 'lead') ?? members[0];
+      return [lead?.name ?? 'lead'];
+    }
+    return [message.to ?? 'unknown'];
+  };
+  const syncTeamInboxMemberSnapshot = (teamName: string, memberName: string): TeamMessageRecord[] => {
+    const entries = sdkTeamManager.readInboxEntries(teamName, memberName, { consume: false });
+    const records = entries.map((entry) => toTeamMessageRecord(teamName, entry.message, entry));
+    appStore.setState((prev) => syncTeamInboxMemberControlPlane(prev, {
+      teamName,
+      memberName,
+      updatedAt: new Date().toISOString(),
+      messages: records.map((record) => ({
+        messageId: record.messageId ?? buildTimelineTeamMessageFingerprint(record),
+        type: record.type,
+        from: record.from,
+        ...(record.to ? { to: record.to } : {}),
+        content: record.content,
+        ...(record.summary ? { summary: record.summary } : {}),
+        timestamp: record.timestamp,
+        ...(record.requestId ? { requestId: record.requestId } : {}),
+        ...(typeof record.approve === 'boolean' ? { approve: record.approve } : {}),
+        ...(record.readAt ? { readAt: record.readAt } : {}),
+      })),
+    }));
+    appendTimelineStoreItems(records.map((entry) => toTimelineTeamMessage(entry)));
+    return records;
+  };
+  const findMatchingSyncedTeamMessage = (
+    records: TeamMessageRecord[],
+    message: TeamMessage,
+  ): TeamMessageRecord | null => {
+    for (let index = records.length - 1; index >= 0; index -= 1) {
+      const record = records[index]!;
+      if (record.type !== message.type) continue;
+      if (record.from !== message.from) continue;
+      if ((record.to ?? '') !== (message.to ?? '')) continue;
+      if (record.timestamp !== message.timestamp) continue;
+      if (record.content !== message.content) continue;
+      if ((record.summary ?? '') !== (message.summary ?? '')) continue;
+      if ((record.requestId ?? '') !== (message.requestId ?? '')) continue;
+      return record;
+    }
+    return null;
+  };
   const isTeamApprovalRequestType = (type: TeamMessage['type']): type is TeamApprovalRecord['requestType'] =>
     type === 'shutdown_request' || type === 'plan_approval_request';
   const toTeamApprovalRecord = (
@@ -505,16 +558,25 @@ export function query(
     ...(message.readAt ? { readAt: message.readAt } : {}),
     teamMessage: JSON.parse(JSON.stringify(message)),
   });
-  const toTimelineOrchestrationItem = (event: SDKOrchestrationEvent): SDKTimelineItem => ({
-    kind: event.kind,
-    sessionId: event.sessionId,
-    timestamp: extractTimelineTimestamp(event),
-    ...(event.teamName ? { teamName: event.teamName } : {}),
-    ...(event.workerId ? { workerId: event.workerId } : {}),
-    ...(event.dispatcherId ? { timelineId: `dispatcher:${event.dispatcherId}:${extractTimelineTimestamp(event)}`, cursor: `dispatcher:${event.dispatcherId}:${extractTimelineTimestamp(event)}` } : {}),
-    ...(event.parentToolCallId ? { parentToolCallId: event.parentToolCallId } : {}),
-    orchestrationEvent: cloneOrchestrationEvent(event),
-  });
+  const toTimelineOrchestrationItem = (event: SDKOrchestrationEvent): SDKTimelineItem => {
+    const timestamp = extractTimelineTimestamp(event);
+    return {
+      kind: event.kind,
+      sessionId: event.sessionId,
+      timestamp,
+      ...(event.teamName ? { teamName: event.teamName } : {}),
+      ...(event.workerId ? { workerId: event.workerId } : {}),
+      ...(event.dispatcherId ? { timelineId: `dispatcher:${event.dispatcherId}:${timestamp}`, cursor: `dispatcher:${event.dispatcherId}:${timestamp}` } : {}),
+      ...(event.kind === 'worker_lifecycle' && event.workerId
+        ? {
+            timelineId: `worker:${event.workerId}:${event.lifecycle ?? 'event'}:${timestamp}`,
+            cursor: `worker:${event.workerId}:${event.lifecycle ?? 'event'}:${timestamp}`,
+          }
+        : {}),
+      ...(event.parentToolCallId ? { parentToolCallId: event.parentToolCallId } : {}),
+      orchestrationEvent: cloneOrchestrationEvent(event),
+    };
+  };
   const toTimelineTaskNotification = (message: SDKTaskNotificationMessage): SDKTimelineItem => ({
     kind: 'task_notification',
     ...(buildTaskNotificationFingerprint(message) ? { timelineId: buildTaskNotificationFingerprint(message)!, cursor: buildTaskNotificationFingerprint(message)! } : {}),
@@ -2041,6 +2103,7 @@ export function query(
   // Attach control methods to make the generator satisfy Query
   // ------------------------------------------------------------------
   const queryObj = gen as unknown as Query;
+  (queryObj as Query & { __internal_getAppState?: () => AppState }).__internal_getAppState = () => appStore.getState();
   const finalizeGenerator = () => {
     const returnPromise = queryObj.return?.(undefined as any) as Promise<IteratorResult<SDKMessage, void>> | undefined;
     if (returnPromise) {
@@ -2625,6 +2688,19 @@ export function query(
     const existed = sdkTeamManager.getTeam(name) !== null;
     sdkTeamManager.deleteTeam(name);
     rmSync(join(cwd, '.open-agent', 'tasks', name), { recursive: true, force: true });
+    appStore.setState((prev) => ({
+      ...prev,
+      dispatchers: Object.fromEntries(
+        Object.entries(prev.dispatchers).filter(([, dispatcher]) => dispatcher.teamName !== name),
+      ),
+      timeline: prev.timeline.filter((item) => item.payload == null || (item.payload as { teamName?: string }).teamName !== name),
+      inboxes: Object.fromEntries(
+        Object.entries(prev.inboxes).filter(([teamName]) => teamName !== name),
+      ),
+      approvals: Object.fromEntries(
+        Object.entries(prev.approvals).filter(([teamName]) => teamName !== name),
+      ),
+    }));
     if (activeTeamName === name) {
       activeTeamName = null;
       appStore.setState((prev) => setActiveTeamControlPlane(prev, activeTeamName));
@@ -2670,9 +2746,9 @@ export function query(
       ...(typeof input.approve === 'boolean' ? { approve: input.approve } : {}),
     };
     sdkTeamManager.sendMessage(teamName, message);
-    const record = toTeamMessageRecord(teamName, message);
-    appendTimelineStoreItem(toTimelineTeamMessage(record));
-    return record;
+    const syncedRecords = resolveTeamMessageSyncTargets(teamName, message)
+      .flatMap((memberName) => syncTeamInboxMemberSnapshot(teamName, memberName));
+    return findMatchingSyncedTeamMessage(syncedRecords, message) ?? toTeamMessageRecord(teamName, message);
   };
 
   queryObj.readTeamInbox = async (options: TeamInboxOptions) => {
@@ -2686,27 +2762,30 @@ export function query(
     });
     const records = entries.map((entry) => toTeamMessageRecord(teamName, entry.message, entry));
     appendTimelineStoreItems(records.map((entry) => toTimelineTeamMessage(entry)));
+    syncTeamInboxMemberSnapshot(teamName, options.memberName);
     return records;
   };
 
   queryObj.acknowledgeTeamInbox = async (input: TeamInboxAcknowledgeInput) => {
     const teamName = resolveTeamName(input?.teamName);
+    const acknowledged = sdkTeamManager.acknowledgeInboxMessages(teamName, input.memberName, input.messageIds);
+    syncTeamInboxMemberSnapshot(teamName, input.memberName);
     return {
-      acknowledged: sdkTeamManager.acknowledgeInboxMessages(teamName, input.memberName, input.messageIds),
+      acknowledged,
     };
   };
 
   queryObj.listPendingTeamApprovals = async (options: TeamApprovalListOptions) => {
     const teamName = resolveTeamName(options?.teamName);
-    const entries = sdkTeamManager.readInboxEntries(teamName, options.memberName, {
-      consume: false,
-      unreadOnly: options?.unreadOnly,
-      after: options?.after,
-      limit: options?.limit,
-    });
-    return entries
-      .map((entry) => toTeamApprovalRecord(teamName, options.memberName, entry))
-      .filter((entry): entry is TeamApprovalRecord => entry !== null);
+    if (!appStore.getState().inboxes[teamName]?.[options.memberName]) {
+      syncTeamInboxMemberSnapshot(teamName, options.memberName);
+    }
+    const approvals = appStore.getState().approvals[teamName]?.[options.memberName] ?? [];
+    return approvals
+      .filter((entry) => !options?.unreadOnly || !entry.readAt)
+      .filter((entry) => !options?.after || entry.messageId > options.after)
+      .slice(0, options?.limit ?? Number.POSITIVE_INFINITY)
+      .map((entry) => ({ ...entry }));
   };
 
   queryObj.respondToTeamApproval = async (
@@ -2743,19 +2822,29 @@ export function query(
       approve: input.approve,
     };
     sdkTeamManager.sendMessage(teamName, responseMessage);
+    const acknowledged = input.acknowledge === false || !matchedEntry.id
+      ? 0
+      : sdkTeamManager.acknowledgeInboxMessages(teamName, input.memberName, [matchedEntry.id]);
+    syncTeamInboxMemberSnapshot(teamName, input.memberName);
+    const responseInboxRecords = responseMessage.to
+      ? syncTeamInboxMemberSnapshot(teamName, responseMessage.to)
+      : [];
+    const responseRecord = findMatchingSyncedTeamMessage(responseInboxRecords, responseMessage)
+      ?? toTeamMessageRecord(teamName, responseMessage);
 
     return {
-      acknowledged: input.acknowledge === false || !matchedEntry.id
-        ? 0
-        : sdkTeamManager.acknowledgeInboxMessages(teamName, input.memberName, [matchedEntry.id]),
+      acknowledged,
       request,
-      response: toTeamMessageRecord(teamName, responseMessage),
+      response: responseRecord,
     };
   };
 
   queryObj.getTeamInboxCount = async (memberName: string, options?: { teamName?: string }) => {
     const teamName = resolveTeamName(options?.teamName);
-    return sdkTeamManager.getInboxCount(teamName, memberName);
+    if (!appStore.getState().inboxes[teamName]?.[memberName]) {
+      syncTeamInboxMemberSnapshot(teamName, memberName);
+    }
+    return appStore.getState().inboxes[teamName]?.[memberName]?.unreadCount ?? 0;
   };
 
   queryObj.readTimelineInbox = async (options: TimelineInboxOptions = {}) => {

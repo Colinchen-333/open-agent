@@ -25,6 +25,9 @@ describe('query() team inbox control plane', () => {
       expect(peeked).toHaveLength(1);
       expect(peeked[0]?.messageId).toBeTruthy();
       expect(await q.getTeamInboxCount('alice', { teamName })).toBe(1);
+      const stateAfterPeek = (q as any).__internal_getAppState?.();
+      expect(stateAfterPeek?.inboxes[teamName]?.['alice']?.unreadCount).toBe(1);
+      expect(stateAfterPeek?.approvals[teamName]?.['alice']).toHaveLength(1);
 
       expect(
         await q.acknowledgeTeamInbox({
@@ -34,6 +37,9 @@ describe('query() team inbox control plane', () => {
         }),
       ).toEqual({ acknowledged: 1 });
       expect(await q.getTeamInboxCount('alice', { teamName })).toBe(0);
+      const stateAfterAck = (q as any).__internal_getAppState?.();
+      expect(stateAfterAck?.inboxes[teamName]?.['alice']?.unreadCount).toBe(0);
+      expect(stateAfterAck?.approvals[teamName]?.['alice']?.[0]?.readAt).toBeTruthy();
 
       const unreadOnly = await q.readTeamInbox({
         teamName,

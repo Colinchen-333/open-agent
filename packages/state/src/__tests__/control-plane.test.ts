@@ -4,6 +4,7 @@ import {
   createDefaultAppState,
   removeDispatcherControlPlane,
   setActiveTeamControlPlane,
+  syncTeamInboxMemberControlPlane,
   syncMcpServerState,
   syncRuntimeControlPlane,
   syncSessionControlPlane,
@@ -129,5 +130,51 @@ describe('state control plane helpers', () => {
     expect(deduped.timeline).toHaveLength(1);
     expect(deduped.timeline[0]?.payload).toEqual({ type: 'started-again' });
     expect(removed.dispatchers['dispatcher-1']).toBeUndefined();
+  });
+
+  it('syncs member inbox snapshots and derives pending approvals', () => {
+    const state = createDefaultAppState();
+    const next = syncTeamInboxMemberControlPlane(state, {
+      teamName: 'alpha',
+      memberName: 'lead',
+      messages: [
+        {
+          messageId: 'msg-1',
+          type: 'plan_approval_request',
+          from: 'worker-1',
+          to: 'lead',
+          content: 'Approve the plan.',
+          summary: 'plan',
+          timestamp: '2026-01-01T00:00:00.000Z',
+          requestId: 'req-1',
+        },
+        {
+          messageId: 'msg-2',
+          type: 'message',
+          from: 'worker-2',
+          content: 'FYI',
+          timestamp: '2026-01-01T00:01:00.000Z',
+          readAt: '2026-01-01T00:02:00.000Z',
+        },
+      ],
+      updatedAt: '2026-01-01T00:03:00.000Z',
+    });
+
+    expect(next.inboxes['alpha']?.['lead']?.unreadCount).toBe(1);
+    expect(next.inboxes['alpha']?.['lead']?.messages).toHaveLength(2);
+    expect(next.approvals['alpha']?.['lead']).toEqual([
+      {
+        messageId: 'msg-1',
+        teamName: 'alpha',
+        memberName: 'lead',
+        requestType: 'plan_approval_request',
+        requestId: 'req-1',
+        from: 'worker-1',
+        to: 'lead',
+        content: 'Approve the plan.',
+        summary: 'plan',
+        timestamp: '2026-01-01T00:00:00.000Z',
+      },
+    ]);
   });
 });
