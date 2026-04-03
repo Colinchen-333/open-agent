@@ -113,6 +113,22 @@ async function waitForDispatcher(
   throw new Error(`Timed out waiting for dispatcher ${dispatcherId}`);
 }
 
+async function waitForTimelineItems(
+  q: Query,
+  options: Parameters<Query['readTimelineInbox']>[0],
+  predicate: (items: SDKTimelineItem[]) => boolean,
+): Promise<SDKTimelineItem[]> {
+  const timeoutAt = Date.now() + 2_000;
+  while (Date.now() < timeoutAt) {
+    const items = await q.readTimelineInbox(options);
+    if (predicate(items)) {
+      return items;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('Timed out waiting for timeline items');
+}
+
 async function readTimelineItem(
   iterator: AsyncIterator<SDKTimelineItem>,
   predicate: (item: SDKTimelineItem) => boolean,
@@ -477,6 +493,57 @@ describe('query() timeline control plane', () => {
 
       expect(notifications).toHaveLength(1);
       expect(notifications[0]?.taskNotification?.status).toBe('stopped');
+      q.close();
+    } finally {
+      temp.cleanup();
+    }
+  });
+
+  it('reads live worker lifecycle items back from timeline snapshot mode', async () => {
+    const temp = makeTempHome('open-agent-sdk-timeline-worker-lifecycle-snapshot-');
+    const teamName = `alpha-team-${Date.now()}`;
+
+    try {
+      const q = query('timeline worker lifecycle snapshot', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeBackgroundProvider(),
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+      });
+
+      await q.createTeam({ name: teamName, setActive: true });
+      const worker = await q.launchWorker({
+        prompt: 'Wait until stopped.',
+        teamName,
+      });
+      expect(await q.stopWorker(worker.workerId)).toEqual({ success: true });
+      await waitForWorkerStatus(q, worker.workerId, 'shutdown');
+
+      const timeline = await waitForTimelineItems(
+        q,
+        {
+          teamName,
+          includeTeamMessages: false,
+          includeOrchestration: true,
+          includeTaskNotifications: false,
+        },
+        (items) => {
+          const lifecycleItems = items.filter((item) =>
+            item.kind === 'worker_lifecycle'
+            && item.workerId === worker.workerId,
+          );
+          return lifecycleItems.some((item) => item.orchestrationEvent?.lifecycle === 'launched')
+            && lifecycleItems.some((item) => item.orchestrationEvent?.lifecycle === 'shutdown');
+        },
+      );
+      const lifecycleItems = timeline.filter((item) =>
+        item.kind === 'worker_lifecycle'
+        && item.workerId === worker.workerId,
+      );
+
+      expect(lifecycleItems.some((item) => item.orchestrationEvent?.lifecycle === 'launched')).toBe(true);
+      expect(lifecycleItems.some((item) => item.orchestrationEvent?.lifecycle === 'shutdown')).toBe(true);
       q.close();
     } finally {
       temp.cleanup();

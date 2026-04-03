@@ -411,6 +411,7 @@ export function query(
     }
     const orchestrationEvent = convertSubagentEventToOrchestrationEvent(parentToolUseId, sessionId, event);
     if (orchestrationEvent) {
+      appendOrchestrationTimelineStoreItem(orchestrationEvent);
       handleTaskDispatcherOrchestrationEvent(orchestrationEvent);
       for (const subscriber of orchestrationSubscribers) {
         subscriber.push(orchestrationEvent);
@@ -1615,6 +1616,13 @@ export function query(
       .map((entry) => entry.payload as SDKTimelineItem)
       .filter((item) => !teamName || item.teamName === teamName)
   );
+
+  const appendOrchestrationTimelineStoreItem = (event: SDKOrchestrationEvent) => {
+    if (event.kind !== 'worker_lifecycle') {
+      return;
+    }
+    appendTimelineStoreItem(toTimelineOrchestrationItem(event));
+  };
 
   const loop = new ConversationLoop({
     provider,
@@ -3215,6 +3223,7 @@ export function query(
   const emitStandaloneOrchestrationEvent = (event: SubagentStreamEvent): void => {
     const orchestrationEvent = convertSubagentEventToOrchestrationEvent(undefined, sessionId, event);
     if (!orchestrationEvent) return;
+    appendOrchestrationTimelineStoreItem(orchestrationEvent);
     handleTaskDispatcherOrchestrationEvent(orchestrationEvent);
     const taskNotification = buildTimelineTaskNotificationFromOrchestrationEvent(
       orchestrationEvent,
