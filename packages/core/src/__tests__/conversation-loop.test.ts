@@ -811,6 +811,7 @@ describe('ConversationLoop', () => {
     });
 
     it('lets PermissionRequest hook approve ask-mode tools without a prompter', async () => {
+      const captured: Array<{ event: string; input: Record<string, unknown> }> = [];
       const tool = {
         name: 'NeedsApproval',
         description: 'Needs approval',
@@ -832,7 +833,8 @@ describe('ConversationLoop', () => {
         {
           permissionEngine,
           hookExecutor: {
-            async execute(event) {
+            async execute(event, input) {
+              captured.push({ event, input });
               if (event === 'PermissionRequest') {
                 return { permissionDecision: 'allow' };
               }
@@ -847,6 +849,17 @@ describe('ConversationLoop', () => {
       expect(toolResult).toBeDefined();
       expect(toolResult.is_error).toBe(false);
       expect(toolResult.result).toContain('approved by hook');
+
+      const permissionRequest = captured.find((entry) => entry.event === 'PermissionRequest');
+      expect(permissionRequest?.input.tool_use_id).toBe('approve-1');
+      expect(permissionRequest?.input.stage).toBe('before_prompt');
+      expect(permissionRequest?.input.reason).toBe('needs review');
+      expect(permissionRequest?.input.metadata).toEqual(expect.objectContaining({
+        readOnly: false,
+        destructive: false,
+        openWorld: false,
+        source: 'builtin',
+      }));
     });
   });
 

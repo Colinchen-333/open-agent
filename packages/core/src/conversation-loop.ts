@@ -1057,11 +1057,12 @@ export class ConversationLoop {
         // ── Permission check ───────────────────────────────────────────────
         const { permissionEngine, permissionPrompter } = this.options;
         if (permissionEngine) {
+          const permissionMetadata = this.permissionMetadata(tool, toolUse.input);
           const decision = await permissionEngine.evaluate({
             toolName: toolUse.name,
             input: toolUse.input,
             toolUseId: toolUse.id,
-            metadata: this.permissionMetadata(tool, toolUse.input),
+            metadata: permissionMetadata,
           });
 
           if (decision.behavior === 'deny') {
@@ -1115,6 +1116,10 @@ export class ConversationLoop {
                   hook_event_name: 'PermissionRequest',
                   tool_name: toolUse.name,
                   tool_input: toolUse.input,
+                  tool_use_id: toolUse.id,
+                  stage: 'before_prompt',
+                  reason: decision.reason,
+                  metadata: permissionMetadata,
                 }, toolUse.id);
                 this.applyHookUpdatedInput(toolUse.input, hookResult.updatedInput);
                 if (
