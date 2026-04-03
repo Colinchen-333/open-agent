@@ -609,6 +609,11 @@ describe('createSession()', () => {
         drainingTimeoutMs: 1,
       });
       expect(recoveredHealth?.healthy).toBe(false);
+      expect(recoveredHealth?.summary.totalFindings).toBeGreaterThan(0);
+      expect(recoveredHealth?.followUps.some((item) =>
+        item.scaffold.action?.tool === 'TaskDispatcher'
+        && item.scaffold.action.arguments['action'] === 'requeue',
+      )).toBe(true);
       expect(recoveredHealth?.findings.map((item) => item.code)).toEqual(expect.arrayContaining([
         'lease_expired',
         'stuck_assignment',

@@ -527,10 +527,23 @@ export interface TaskDispatcherHealthFinding {
   workerId?: string;
 }
 
+export interface TaskDispatcherHealthSummary {
+  totalFindings: number;
+  errorCount: number;
+  warningCount: number;
+  affectedTaskIds: string[];
+  affectedWorkerIds: string[];
+}
+
 export interface TaskDispatcherHealthOptions {
   now?: string | Date;
   heartbeatGraceMs?: number;
   drainingTimeoutMs?: number;
+}
+
+export interface TaskDispatcherDiagnosisListOptions {
+  teamName?: string;
+  healthy?: boolean;
 }
 
 export interface TaskDispatcherHealthReport {
@@ -540,6 +553,8 @@ export interface TaskDispatcherHealthReport {
   healthy: boolean;
   dispatcher: TaskDispatcherRecord;
   findings: TaskDispatcherHealthFinding[];
+  summary: TaskDispatcherHealthSummary;
+  followUps: WorkerFollowUpSuggestion[];
 }
 
 export interface TeamMemberRecord {
@@ -894,6 +909,10 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
     dispatcherId: string,
     options?: TaskDispatcherHealthOptions,
   ): Promise<TaskDispatcherHealthReport | null>;
+  /** Return the latest persisted diagnosis object for a dispatcher, if one exists. */
+  getTaskDispatcherDiagnosis(dispatcherId: string): Promise<TaskDispatcherHealthReport | null>;
+  /** List persisted dispatcher diagnosis objects visible to this query handle. */
+  listTaskDispatcherDiagnoses(options?: TaskDispatcherDiagnosisListOptions): Promise<TaskDispatcherHealthReport[]>;
   /** Force one active dispatcher assignment back to pending, optionally stopping its worker first. */
   requeueTaskDispatcherAssignment(input: TaskDispatcherRequeueInput): Promise<TaskDispatcherRequeueResult>;
   /** Stop a running task dispatcher. Active workers are drained before final stop. */
@@ -1074,6 +1093,10 @@ export interface Session {
     dispatcherId: string,
     options?: TaskDispatcherHealthOptions,
   ): Promise<TaskDispatcherHealthReport | null>;
+  /** Return the latest persisted diagnosis object for a dispatcher, if one exists. */
+  getTaskDispatcherDiagnosis(dispatcherId: string): Promise<TaskDispatcherHealthReport | null>;
+  /** List persisted dispatcher diagnosis objects visible to this query handle. */
+  listTaskDispatcherDiagnoses(options?: TaskDispatcherDiagnosisListOptions): Promise<TaskDispatcherHealthReport[]>;
   /** Force one active dispatcher assignment back to pending, optionally stopping its worker first. */
   requeueTaskDispatcherAssignment(input: TaskDispatcherRequeueInput): Promise<TaskDispatcherRequeueResult>;
   /** Stop a running task dispatcher. Active workers are drained before final stop. */

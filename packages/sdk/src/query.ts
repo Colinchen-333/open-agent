@@ -2253,6 +2253,82 @@ export function query(
     return followUps;
   };
 
+  const buildTaskDispatcherHealthFollowUps = (
+    dispatcher: TaskDispatcherRecord,
+    findings: TaskDispatcherHealthFinding[],
+  ): WorkerFollowUpSuggestion[] => {
+    const isChinese = /中文|chinese|zh/i.test(responseLanguage ?? '');
+    const build = (zh: string, en: string) => (isChinese ? zh : en);
+    const followUps: WorkerFollowUpSuggestion[] = [];
+    const seenAssignments = new Set<string>();
+
+    for (const finding of findings) {
+      if (!finding.taskId || !finding.workerId) {
+        continue;
+      }
+      const key = `${finding.taskId}:${finding.workerId}`;
+      if (seenAssignments.has(key)) {
+        continue;
+      }
+      seenAssignments.add(key);
+      followUps.push({
+        suggestion: build(
+          `将卡住的派单 \`${finding.taskId}\` 从 worker \`${finding.workerId}\` 退回队列`,
+          `Requeue stuck assignment \`${finding.taskId}\` from worker \`${finding.workerId}\``,
+        ),
+        scaffold: {
+          kind: 'generic_followup',
+          title: build('退回异常派单', 'Requeue assignment'),
+          prompt: build(
+            `将任务 ${finding.taskId} 从当前 worker 退回队列`,
+            `Requeue task ${finding.taskId} from its current worker`,
+          ),
+          action: {
+            tool: 'TaskDispatcher',
+            arguments: {
+              action: 'requeue',
+              dispatcher_id: dispatcher.dispatcherId,
+              task_id: finding.taskId,
+              worker_id: finding.workerId,
+            },
+          },
+        },
+      });
+    }
+
+    if ((dispatcher.status === 'draining' || dispatcher.status === 'stopped') && findings.length > 0) {
+      followUps.push({
+        suggestion: build(
+          `重新启动调度器 \`${dispatcher.dispatcherId}\`，恢复处理 ${dispatcher.teamName} 队列`,
+          `Restart dispatcher \`${dispatcher.dispatcherId}\` for the ${dispatcher.teamName} queue`,
+        ),
+        scaffold: {
+          kind: 'generic_followup',
+          title: build('恢复调度器', 'Resume dispatcher'),
+          prompt: build(
+            `恢复调度器 ${dispatcher.dispatcherId}`,
+            `Resume dispatcher ${dispatcher.dispatcherId}`,
+          ),
+          action: {
+            tool: 'TaskDispatcher',
+            arguments: {
+              action: 'start',
+              dispatcher_id: dispatcher.dispatcherId,
+              owner: dispatcher.owner,
+              team_name: dispatcher.teamName,
+              worker_type: dispatcher.workerType,
+              poll_interval_ms: dispatcher.pollIntervalMs,
+              lease_ms: dispatcher.leaseMs,
+              max_concurrent_workers: dispatcher.maxConcurrentWorkers,
+            },
+          },
+        },
+      });
+    }
+
+    return followUps;
+  };
+
   const emitTaskDispatcherOrchestrationEvent = (
     state: TaskDispatcherState,
     type: SDKTaskDispatcherEvent['type'],
@@ -3926,6 +4002,15 @@ export function query(
       });
     }
 
+    const summary = {
+      totalFindings: findings.length,
+      errorCount: findings.filter((item) => item.severity === 'error').length,
+      warningCount: findings.filter((item) => item.severity === 'warning').length,
+      affectedTaskIds: [...new Set(findings.map((item) => item.taskId).filter((value): value is string => typeof value === 'string'))],
+      affectedWorkerIds: [...new Set(findings.map((item) => item.workerId).filter((value): value is string => typeof value === 'string'))],
+    };
+    const followUps = buildTaskDispatcherHealthFollowUps(dispatcher, findings);
+
     return {
       dispatcherId: dispatcher.dispatcherId,
       source: dispatcher.source,
@@ -3933,6 +4018,8 @@ export function query(
       healthy: findings.length === 0,
       dispatcher,
       findings,
+      summary,
+      followUps,
     };
   };
 

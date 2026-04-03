@@ -387,11 +387,26 @@ describe('query() task dispatcher control plane', () => {
       });
       expect(health?.healthy).toBe(false);
       expect(health?.source).toBe('ledger');
+      expect(health?.summary).toEqual(expect.objectContaining({
+        totalFindings: 3,
+        errorCount: 1,
+        warningCount: 2,
+      }));
+      expect(health?.summary.affectedTaskIds).toEqual([task.id]);
+      expect(health?.summary.affectedWorkerIds).toHaveLength(1);
       expect(health?.findings.map((item) => item.code)).toEqual(expect.arrayContaining([
         'lease_expired',
         'stuck_assignment',
         'draining_timeout',
       ]));
+      expect(health?.followUps.some((item) =>
+        item.scaffold.action?.tool === 'TaskDispatcher'
+        && item.scaffold.action.arguments['action'] === 'requeue',
+      )).toBe(true);
+      expect(health?.followUps.some((item) =>
+        item.scaffold.action?.tool === 'TaskDispatcher'
+        && item.scaffold.action.arguments['action'] === 'start',
+      )).toBe(true);
 
       reader.close();
       writer.close();
