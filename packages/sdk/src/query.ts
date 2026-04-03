@@ -1749,7 +1749,10 @@ export function query(
     }));
   };
 
-  const appendTimelineStoreItem = (item: SDKTimelineItem) => {
+  const appendTimelineStoreItem = (
+    item: SDKTimelineItem,
+    options?: { persist?: boolean },
+  ) => {
     const key = item.cursor ?? item.timelineId ?? `${item.kind}:${item.timestamp}:${item.sessionId}`;
     appStore.setState((prev) => appendTimelineControlPlane(prev, {
       key,
@@ -1760,9 +1763,15 @@ export function query(
       ...(item.timelineId ? { timelineId: item.timelineId } : {}),
       payload: JSON.parse(JSON.stringify(item)),
     }));
+    if (options?.persist !== false) {
+      persistOrchestrationTimelineLedgerItem(item);
+    }
   };
 
-  const appendTimelineStoreItems = (items: SDKTimelineItem[]) => {
+  const appendTimelineStoreItems = (
+    items: SDKTimelineItem[],
+    options?: { persist?: boolean },
+  ) => {
     if (items.length === 0) {
       return;
     }
@@ -1775,6 +1784,11 @@ export function query(
       ...(item.timelineId ? { timelineId: item.timelineId } : {}),
       payload: JSON.parse(JSON.stringify(item)),
     }), prev));
+    if (options?.persist !== false) {
+      for (const item of items) {
+        persistOrchestrationTimelineLedgerItem(item);
+      }
+    }
   };
 
   const readTimelineStoreItems = (teamName?: string): SDKTimelineItem[] => (
@@ -1846,6 +1860,31 @@ export function query(
       if (!teamName || record.teamName === teamName) {
         upsertWorkerStoreRecord(record, { persist: false });
       }
+    }
+  };
+
+  const hydratePersistedOrchestrationTimelineIntoStore = (options?: {
+    teamName?: string;
+    includeOrchestration?: boolean;
+    includeTaskNotifications?: boolean;
+  }) => {
+    const teamName = normalizeOptionalString(options?.teamName);
+    const includeKinds = new Set<SDKTimelineItem['kind']>();
+    if (options?.includeOrchestration !== false) {
+      includeKinds.add('worker_lifecycle');
+      includeKinds.add('task_dispatcher');
+    }
+    if (options?.includeTaskNotifications !== false) {
+      includeKinds.add('task_notification');
+    }
+    for (const item of readPersistedOrchestrationTimelineLedgerItems()) {
+      if (!includeKinds.has(item.kind)) {
+        continue;
+      }
+      if (teamName && item.teamName !== teamName) {
+        continue;
+      }
+      appendTimelineStoreItem(item, { persist: false });
     }
   };
 
@@ -3147,6 +3186,11 @@ export function query(
   queryObj.readTimelineInbox = async (options: TimelineInboxOptions = {}) => {
     const items: SDKTimelineItem[] = [];
     let transcriptEntries: unknown[] = [];
+    hydratePersistedOrchestrationTimelineIntoStore({
+      teamName: options.teamName,
+      includeOrchestration: options.includeOrchestration === true,
+      includeTaskNotifications: options.includeTaskNotifications !== false,
+    });
     if (sessionMgr && (options.includeTaskNotifications !== false || options.includeOrchestration === true)) {
       try {
         transcriptEntries = sessionMgr.readTranscript(transcriptCwd, sessionId);
@@ -3195,7 +3239,7 @@ export function query(
           .filter((item) => !options.after || (item.cursor ?? item.timestamp) > options.after)
           .slice(0, options.limit ?? Number.POSITIVE_INFINITY),
       ];
-      appendTimelineStoreItems(taskNotificationItems);
+      appendTimelineStoreItems(taskNotificationItems, { persist: false });
       items.push(...taskNotificationItems);
     }
     return sortTimelineItems(dedupeTimelineItems(items));
@@ -4050,6 +4094,56 @@ export function query(
   const getWorkerLedgerPath = () => sessionMgr
     ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.workers.json`)
     : join(cwd, '.open-agent', 'orchestration-ledgers', `${sessionId}.workers.json`);
+  const getOrchestrationTimelineLedgerPath = () => sessionMgr
+    ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.orchestration-timeline.json`)
+    : join(cwd, '.open-agent', 'orchestration-ledgers', `${sessionId}.timeline.json`);
+
+  const readPersistedOrchestrationTimelineLedgerItems = (): SDKTimelineItem[] => {
+    const ledgerPath = getOrchestrationTimelineLedgerPath();
+    if (!existsSync(ledgerPath)) {
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(readFileSync(ledgerPath, 'utf-8')) as PersistedOrchestrationTimelineLedgerFile;
+      if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.items)) {
+        return [];
+      }
+      return parsed.items
+        .filter((item): item is SDKTimelineItem => {
+          if (!item || typeof item !== 'object') return false;
+          const kind = (item as { kind?: unknown }).kind;
+          return kind === 'worker_lifecycle' || kind === 'task_dispatcher' || kind === 'task_notification';
+        })
+        .map((item) => JSON.parse(JSON.stringify(item)) as SDKTimelineItem)
+        .sort((left, right) => compareTimelineTimestamps(left.timestamp, right.timestamp));
+    } catch {
+      return [];
+    }
+  };
+
+  const persistOrchestrationTimelineLedgerItem = (item: SDKTimelineItem): void => {
+    if (item.kind !== 'worker_lifecycle' && item.kind !== 'task_dispatcher' && item.kind !== 'task_notification') {
+      return;
+    }
+    try {
+      const ledgerPath = getOrchestrationTimelineLedgerPath();
+      mkdirSync(dirname(ledgerPath), { recursive: true });
+      const merged = new Map<string, SDKTimelineItem>(
+        readPersistedOrchestrationTimelineLedgerItems().map((entry) => [
+          entry.cursor ?? entry.timelineId ?? `${entry.kind}:${entry.timestamp}:${entry.sessionId}`,
+          JSON.parse(JSON.stringify(entry)) as SDKTimelineItem,
+        ]),
+      );
+      const key = item.cursor ?? item.timelineId ?? `${item.kind}:${item.timestamp}:${item.sessionId}`;
+      merged.set(key, JSON.parse(JSON.stringify(item)) as SDKTimelineItem);
+      writeFileSync(ledgerPath, JSON.stringify({
+        version: 1,
+        items: sortTimelineItems([...merged.values()]),
+      } satisfies PersistedOrchestrationTimelineLedgerFile, null, 2));
+    } catch {
+      // Non-fatal: timeline durability should not break runtime orchestration.
+    }
+  };
 
   const readPersistedTaskLedgerRecords = (): TaskRecord[] => {
     const ledgerPath = getTaskLedgerPath();
@@ -6202,6 +6296,11 @@ interface PersistedTaskDispatcherEventMessage {
   team_name: string;
   timestamp: string;
   event: SDKTaskDispatcherEvent;
+}
+
+interface PersistedOrchestrationTimelineLedgerFile {
+  version: 1;
+  items: SDKTimelineItem[];
 }
 
 interface PersistedTaskDispatcherLedgerFile {

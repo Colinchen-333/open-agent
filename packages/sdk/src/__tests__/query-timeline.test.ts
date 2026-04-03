@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'bun:test';
+import { randomUUID } from 'crypto';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { homedir, tmpdir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
+import { SessionManager } from '@open-agent/core';
 import type { ChatOptions, LLMProvider, Message, StreamEvent } from '@open-agent/providers';
 import type { Query, WorkerRecord, SDKTimelineItem, TaskDispatcherRecord } from '../types.js';
 import { query } from '../query.js';
@@ -225,6 +227,8 @@ describe('query() timeline control plane', () => {
   it('reads persisted dispatcher orchestration items from timeline snapshot mode', async () => {
     const temp = makeTempHome('open-agent-sdk-timeline-dispatcher-snapshot-');
     const teamName = `alpha-team-${Date.now()}`;
+    const sessionId = randomUUID();
+    const sessionMgr = new SessionManager();
 
     try {
       const q = query('timeline dispatcher snapshot', {
@@ -233,6 +237,7 @@ describe('query() timeline control plane', () => {
         provider: makeStaticProvider(),
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
+        sessionId,
       });
 
       await q.createTeam({ name: teamName, setActive: true });
@@ -257,8 +262,19 @@ describe('query() timeline control plane', () => {
       );
       await q.stopTaskDispatcher(dispatcher.dispatcherId);
       await waitForDispatcher(q, dispatcher.dispatcherId, (item) => item.status === 'stopped');
+      q.close();
 
-      const timeline = await q.readTimelineInbox({
+      const transcriptDir = dirname(sessionMgr.getTranscriptPath(temp.cwd, sessionId));
+      rmSync(join(transcriptDir, `${sessionId}.jsonl`), { force: true });
+
+      const reader = query('timeline dispatcher snapshot reader', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeStaticProvider(),
+        sessionId,
+      });
+
+      const timeline = await reader.readTimelineInbox({
         teamName,
         includeTeamMessages: false,
         includeOrchestration: true,
@@ -294,19 +310,19 @@ describe('query() timeline control plane', () => {
       expect(stoppedItem?.orchestrationEvent?.dispatcherEvent?.followUps[0]?.scaffold.action?.tool).toBe('TaskDispatcher');
       expect(stoppedItem?.orchestrationEvent?.dispatcherEvent?.followUps[0]?.scaffold.action?.arguments['action']).toBe('start');
 
-      const restarted = await q.executeFollowUp(
+      const restarted = await reader.executeFollowUp(
         stoppedItem!.orchestrationEvent!.dispatcherEvent!.followUps[0]!,
       );
       expect(restarted.kind).toBe('task_dispatcher');
       expect(restarted.dispatcher?.dispatcherId).toBe(dispatcher.dispatcherId);
       await waitForDispatcher(
-        q,
+        reader,
         dispatcher.dispatcherId,
         (item) => item.status === 'running',
       );
-      await q.stopTaskDispatcher(dispatcher.dispatcherId);
-      await waitForDispatcher(q, dispatcher.dispatcherId, (item) => item.status === 'stopped');
-      q.close();
+      await reader.stopTaskDispatcher(dispatcher.dispatcherId);
+      await waitForDispatcher(reader, dispatcher.dispatcherId, (item) => item.status === 'stopped');
+      reader.close();
     } finally {
       temp.cleanup();
     }
@@ -545,6 +561,80 @@ describe('query() timeline control plane', () => {
       expect(lifecycleItems.some((item) => item.orchestrationEvent?.lifecycle === 'launched')).toBe(true);
       expect(lifecycleItems.some((item) => item.orchestrationEvent?.lifecycle === 'shutdown')).toBe(true);
       q.close();
+    } finally {
+      temp.cleanup();
+    }
+  });
+
+  it('rebuilds worker lifecycle and task notifications from timeline ledger after cold restart', async () => {
+    const temp = makeTempHome('open-agent-sdk-timeline-orchestration-ledger-');
+    const teamName = `alpha-team-${Date.now()}`;
+    const sessionId = randomUUID();
+    const sessionMgr = new SessionManager();
+
+    try {
+      const writer = query('timeline orchestration ledger writer', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeBackgroundProvider(),
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        sessionId,
+      });
+
+      await writer.createTeam({ name: teamName, setActive: true });
+      const worker = await writer.launchWorker({
+        prompt: 'Wait until stopped.',
+        teamName,
+      });
+      expect(await writer.stopWorker(worker.workerId)).toEqual({ success: true });
+      await waitForWorkerStatus(writer, worker.workerId, 'shutdown');
+      writer.close();
+
+      rmSync(join(process.env.HOME!, '.open-agent', 'agent-sessions'), { recursive: true, force: true });
+      const transcriptDir = dirname(sessionMgr.getTranscriptPath(temp.cwd, sessionId));
+      rmSync(join(transcriptDir, `${sessionId}.jsonl`), { force: true });
+
+      const reader = query('timeline orchestration ledger reader', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeBackgroundProvider(),
+        sessionId,
+      });
+
+      const timeline = await waitForTimelineItems(
+        reader,
+        {
+          teamName,
+          includeTeamMessages: false,
+          includeOrchestration: true,
+          includeTaskNotifications: true,
+        },
+        (items) => {
+          const lifecycleItems = items.filter((item) =>
+            item.kind === 'worker_lifecycle' && item.workerId === worker.workerId,
+          );
+          const notificationItems = items.filter((item) =>
+            item.kind === 'task_notification' && item.workerId === worker.workerId,
+          );
+          return lifecycleItems.some((item) => item.orchestrationEvent?.lifecycle === 'launched')
+            && lifecycleItems.some((item) => item.orchestrationEvent?.lifecycle === 'shutdown')
+            && notificationItems.some((item) => item.taskNotification?.status === 'stopped');
+        },
+      );
+
+      const lifecycleItems = timeline.filter((item) =>
+        item.kind === 'worker_lifecycle' && item.workerId === worker.workerId,
+      );
+      const notificationItems = timeline.filter((item) =>
+        item.kind === 'task_notification' && item.workerId === worker.workerId,
+      );
+
+      expect(lifecycleItems.some((item) => item.orchestrationEvent?.lifecycle === 'launched')).toBe(true);
+      expect(lifecycleItems.some((item) => item.orchestrationEvent?.lifecycle === 'shutdown')).toBe(true);
+      expect(notificationItems).toHaveLength(1);
+      expect(notificationItems[0]?.taskNotification?.status).toBe('stopped');
+      reader.close();
     } finally {
       temp.cleanup();
     }
