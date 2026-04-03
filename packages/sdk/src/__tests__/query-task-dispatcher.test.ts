@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { randomUUID } from 'crypto';
-import { mkdtempSync, mkdirSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { SessionManager } from '@open-agent/core';
@@ -389,12 +389,12 @@ describe('query() task dispatcher control plane', () => {
       } as any);
 
       const recovered = await reader.getTaskDispatcher(dispatcher.dispatcherId);
-      expect(recovered?.source).toBe('ledger');
+      expect(recovered?.source).toBe('live');
       expect(recovered?.status).toBe('draining');
       expect(recovered?.activeAssignments).toHaveLength(1);
       expect(recovered?.activeAssignments[0]?.taskId).toBe(task.id);
       expect((await reader.listTaskDispatchers()).some((item) =>
-        item.dispatcherId === dispatcher.dispatcherId && item.source === 'ledger',
+        item.dispatcherId === dispatcher.dispatcherId && item.source === 'live',
       )).toBe(true);
 
       const health = await reader.inspectTaskDispatcherHealth(dispatcher.dispatcherId, {
@@ -403,7 +403,7 @@ describe('query() task dispatcher control plane', () => {
         drainingTimeoutMs: 1,
       });
       expect(health?.healthy).toBe(false);
-      expect(health?.source).toBe('ledger');
+      expect(health?.source).toBe('live');
       expect(health?.summary).toEqual(expect.objectContaining({
         totalFindings: 3,
         errorCount: 1,
@@ -734,6 +734,96 @@ describe('query() task dispatcher control plane', () => {
       await waitForTask(
         reader,
         secondTask.id,
+        teamName,
+        (item) => item.status === 'completed',
+      );
+
+      await reader.stopTaskDispatcher(dispatcher.dispatcherId);
+      reader.close();
+    } finally {
+      temp.cleanup();
+    }
+  });
+
+  it('auto-recovers running dispatchers from durable state on a fresh query handle', async () => {
+    const temp = makeTempHome('open-agent-sdk-task-dispatcher-auto-recover-');
+    const teamName = `dispatcher-team-${Date.now()}`;
+    const sessionId = randomUUID();
+    const sessionMgr = new SessionManager();
+
+    try {
+      const writer = query('dispatcher auto recovery writer', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeCompletingWorkerProvider(),
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        sessionId,
+      } as any);
+
+      await writer.createTeam({ name: teamName, setActive: true });
+      const dispatcher = await writer.startTaskDispatcher({
+        dispatcherId: `dispatcher-${Date.now()}`,
+        owner: 'dispatcher-owner',
+        teamName,
+        pollIntervalMs: 25,
+        leaseMs: 500,
+        prompt: 'Process recovered queued tasks.',
+      });
+      await waitForDispatcher(
+        writer,
+        dispatcher.dispatcherId,
+        (item) => item.status === 'running' && item.activeAssignments.length === 0,
+      );
+      await writer.stopTaskDispatcher(dispatcher.dispatcherId);
+      await waitForDispatcher(
+        writer,
+        dispatcher.dispatcherId,
+        (item) => item.status === 'stopped',
+      );
+
+      const task = await writer.createTask({
+        teamName,
+        subject: 'Recovered auto task',
+        description: 'Should be picked up by auto-recovered dispatcher.',
+        priority: 7,
+      });
+      writer.close();
+
+      const transcriptDir = dirname(sessionMgr.getTranscriptPath(temp.cwd, sessionId));
+      const orchestrationPath = join(transcriptDir, `${sessionId}.orchestration.json`);
+      const orchestration = JSON.parse(readFileSync(orchestrationPath, 'utf-8')) as {
+        dispatchers: Array<Record<string, unknown>>;
+      };
+      orchestration.dispatchers = orchestration.dispatchers.map((record) =>
+        record.dispatcherId === dispatcher.dispatcherId
+          ? {
+              ...record,
+              status: 'running',
+              updatedAt: new Date().toISOString(),
+              stoppedAt: undefined,
+            }
+          : record,
+      );
+      writeFileSync(orchestrationPath, JSON.stringify(orchestration, null, 2));
+
+      const reader = query('dispatcher auto recovery reader', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeCompletingWorkerProvider(),
+        sessionId,
+      } as any);
+
+      const recoveredDispatcher = await waitForDispatcher(
+        reader,
+        dispatcher.dispatcherId,
+        (item) => item.source === 'live' && item.status === 'running',
+      );
+      expect(recoveredDispatcher.prompt).toBe('Process recovered queued tasks.');
+
+      await waitForTask(
+        reader,
+        task.id,
         teamName,
         (item) => item.status === 'completed',
       );

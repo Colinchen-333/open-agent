@@ -889,6 +889,7 @@ export function query(
   let sdkAgentExecutor: AgentExecutor | undefined;
   const taskDispatchers = new Map<string, TaskDispatcherState>();
   const taskDispatcherByWorkerId = new Map<string, { dispatcherId: string; taskId: string }>();
+  let taskDispatcherRecoveryPromise: Promise<void> | null = null;
   const taskToolAutoWired = !toolRegistry.get('Task');
   if (taskToolAutoWired) {
     const getAgentInfo = (agentId: string) => {
@@ -2657,6 +2658,27 @@ export function query(
     return state;
   };
 
+  const ensureTaskDispatcherRecovery = async (): Promise<void> => {
+    if (!taskDispatcherRecoveryPromise) {
+      taskDispatcherRecoveryPromise = (async () => {
+        const persisted = readPersistedTaskDispatcherRecords()
+          .filter((record) => record.status === 'running' || record.status === 'draining');
+        for (const record of persisted) {
+          if (taskDispatchers.has(record.dispatcherId)) {
+            continue;
+          }
+          const state = hydrateTaskDispatcherState({
+            ...record,
+            source: 'live',
+            updatedAt: new Date().toISOString(),
+          });
+          scheduleTaskDispatcherRun(state, 0);
+        }
+      })();
+    }
+    await taskDispatcherRecoveryPromise;
+  };
+
   const markTaskDispatcherStopped = (state: TaskDispatcherState): TaskDispatcherRecord => {
     if (state.timer) {
       clearTimeout(state.timer);
@@ -2966,6 +2988,7 @@ export function query(
   );
 
   queryObj.readOrchestrationControlPlane = async (options?: OrchestrationControlPlaneOptions) => {
+    await ensureTaskDispatcherRecovery();
     const teamName = normalizeOptionalString(options?.teamName);
     hydratePersistedOrchestrationLedgersIntoStore({ ...(teamName ? { teamName } : {}) });
     if (teamName) {
@@ -4624,6 +4647,7 @@ export function query(
   };
 
   queryObj.listTaskDispatchers = async (options?: TaskDispatcherListOptions) => {
+    await ensureTaskDispatcherRecovery();
     const teamName = normalizeOptionalString(options?.teamName);
     const status = options?.status;
     const merged = new Map<string, TaskDispatcherRecord>();
@@ -4647,6 +4671,7 @@ export function query(
   };
 
   queryObj.getTaskDispatcher = async (dispatcherId: string) => {
+    await ensureTaskDispatcherRecovery();
     const normalizedDispatcherId = normalizeOptionalString(dispatcherId);
     if (!normalizedDispatcherId) {
       throw new Error('dispatcherId is required to inspect a task dispatcher.');
@@ -4658,6 +4683,7 @@ export function query(
     dispatcherId: string,
     options?: TaskDispatcherHealthOptions,
   ): Promise<TaskDispatcherHealthReport | null> => {
+    await ensureTaskDispatcherRecovery();
     const dispatcher = await queryObj.getTaskDispatcher(dispatcherId);
     if (!dispatcher) {
       return null;
@@ -4788,6 +4814,7 @@ export function query(
   };
 
   queryObj.getTaskDispatcherDiagnosis = async (dispatcherId: string) => {
+    await ensureTaskDispatcherRecovery();
     const normalizedDispatcherId = normalizeOptionalString(dispatcherId);
     if (!normalizedDispatcherId) {
       throw new Error('dispatcherId is required to inspect a dispatcher diagnosis.');
@@ -4800,6 +4827,7 @@ export function query(
   };
 
   queryObj.listTaskDispatcherDiagnoses = async (options?: TaskDispatcherDiagnosisListOptions) => {
+    await ensureTaskDispatcherRecovery();
     const merged = new Map<string, TaskDispatcherHealthReport>();
     for (const diagnosis of Object.values(appStore.getState().dispatcherDiagnoses)) {
       merged.set(diagnosis.dispatcherId, JSON.parse(JSON.stringify(diagnosis.payload)) as TaskDispatcherHealthReport);

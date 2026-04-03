@@ -627,7 +627,7 @@ describe('createSession()', () => {
 
       await expect(resumed.getTaskDispatcher(dispatcher.dispatcherId)).resolves.toMatchObject({
         dispatcherId: dispatcher.dispatcherId,
-        source: 'ledger',
+        source: 'live',
         status: 'draining',
       });
       const recoveredHealth = await resumed.inspectTaskDispatcherHealth(dispatcher.dispatcherId, {
