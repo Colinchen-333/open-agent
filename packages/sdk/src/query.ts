@@ -14,7 +14,15 @@ import type {
   SDKPromptSuggestionMessage,
 } from '@open-agent/core';
 import { ConversationLoop, SessionManager, buildSystemPrompt, FileCheckpoint, isGitRepository, buildTaskOrchestrationTemplates, loadPromptContext, buildCoordinatorContext } from '@open-agent/core';
-import { createStore, createDefaultAppState } from '@open-agent/state';
+import {
+  createStore,
+  createDefaultAppState,
+  setActiveTeamControlPlane,
+  syncMcpServerState,
+  syncRuntimeControlPlane,
+  syncSessionControlPlane,
+  syncToolRegistryState,
+} from '@open-agent/state';
 import type { AppState } from '@open-agent/state';
 import { AgentLoader, AgentExecutor, TeamManager, TaskManager } from '@open-agent/agents';
 import type { SubagentStreamEvent, AgentSession, TaskItem, TeamConfig, TeamInboxEntry, TeamMember, TeamMessage } from '@open-agent/agents';
@@ -1541,6 +1549,26 @@ export function query(
     verbose: options.debug ?? false,
   }));
 
+  const mapAppStateMcpServers = () => runtime.listMcpServerStatus().map((server) => ({
+    name: server.name,
+    status: mapMcpStatus(server.status) as AppState['mcpServers'][number]['status'],
+    toolCount: server.tools.length,
+    ...(server.error ? { error: server.error } : {}),
+  }));
+
+  const syncAppRuntimeControlPlane = () => {
+    const runtimeSnapshot = runtime.buildSnapshot();
+    appStore.setState((prev) => {
+      let next = syncToolRegistryState(prev, toolRegistry.list());
+      next = syncMcpServerState(next, mapAppStateMcpServers());
+      next = syncRuntimeControlPlane(next, runtimeSnapshot);
+      next = setActiveTeamControlPlane(next, activeTeamName);
+      return next;
+    });
+  };
+
+  syncAppRuntimeControlPlane();
+
   const loop = new ConversationLoop({
     provider,
     tools: new Map(toolRegistry.list().map((t) => [t.name, t])),
@@ -1566,6 +1594,7 @@ export function query(
 
   const syncLoopToolsFromRegistry = () => {
     loop.setTools(new Map(toolRegistry.list().map((t) => [t.name, t])));
+    syncAppRuntimeControlPlane();
   };
   const refreshManagedSystemPrompt = () => {
     if (typeof options.systemPrompt === 'string') {
@@ -1573,6 +1602,7 @@ export function query(
     }
     systemPrompt = buildManagedSystemPrompt();
     loop.setSystemPrompt(systemPrompt);
+    syncAppRuntimeControlPlane();
   };
 
   // ------------------------------------------------------------------
@@ -2402,6 +2432,9 @@ export function query(
         );
       }
       loop.setPermissionMode(mode);
+      appStore.setState((prev) => syncSessionControlPlane(prev, {
+        permissionMode: mode,
+      }));
       try {
         sessionMgr?.updateSession(cwd, sessionId, { permissionMode: mode }, { touch: false });
       } catch {
@@ -2417,6 +2450,9 @@ export function query(
       }
       activeModel = newModel;
       loop.setModel(newModel);
+      appStore.setState((prev) => syncSessionControlPlane(prev, {
+        model: newModel,
+      }));
       refreshManagedSystemPrompt();
       try {
         sessionMgr?.updateSession(cwd, sessionId, { model: newModel }, { touch: false });
@@ -2432,8 +2468,14 @@ export function query(
         throw new Error('setMaxThinkingTokens(maxThinkingTokens) requires a positive finite number or null.');
       }
       loop.setThinking({ type: 'enabled', budgetTokens: tokens });
+      appStore.setState((prev) => syncSessionControlPlane(prev, {
+        thinkingConfig: { type: 'enabled', budgetTokens: tokens },
+      }));
     } else {
       loop.setThinking({ type: 'disabled' });
+      appStore.setState((prev) => syncSessionControlPlane(prev, {
+        thinkingConfig: { type: 'disabled' },
+      }));
     }
   };
 
@@ -2517,6 +2559,7 @@ export function query(
     getTaskManager(team.name);
     if (input.setActive !== false) {
       activeTeamName = team.name;
+      appStore.setState((prev) => setActiveTeamControlPlane(prev, activeTeamName));
     }
     return toTeamRecord(team);
   };
@@ -2527,6 +2570,7 @@ export function query(
     rmSync(join(cwd, '.open-agent', 'tasks', name), { recursive: true, force: true });
     if (activeTeamName === name) {
       activeTeamName = null;
+      appStore.setState((prev) => setActiveTeamControlPlane(prev, activeTeamName));
     }
     return { success: existed };
   };
@@ -2542,6 +2586,7 @@ export function query(
   queryObj.setActiveTeam = async (name: string | null) => {
     if (name === null) {
       activeTeamName = null;
+      appStore.setState((prev) => setActiveTeamControlPlane(prev, activeTeamName));
       return null;
     }
     const team = sdkTeamManager.getTeam(name);
@@ -2549,6 +2594,7 @@ export function query(
       throw new Error(`Team not found: ${name}`);
     }
     activeTeamName = name;
+    appStore.setState((prev) => setActiveTeamControlPlane(prev, activeTeamName));
     return toTeamRecord(team);
   };
 
@@ -3867,6 +3913,7 @@ export function query(
     mcpReadyPromise = runtime.waitForMcpReady();
     refreshManagedSystemPrompt();
     syncLoopToolsFromRegistry();
+    syncAppRuntimeControlPlane();
     const status = runtime.listMcpServerStatus().find((conn) => conn.name === serverName);
     if (!status) {
       throw new Error(`MCP server '${serverName}' not found after reconnect.`);
@@ -3885,6 +3932,7 @@ export function query(
     mcpReadyPromise = runtime.waitForMcpReady();
     refreshManagedSystemPrompt();
     syncLoopToolsFromRegistry();
+    syncAppRuntimeControlPlane();
     if (enabled) {
       const status = runtime.listMcpServerStatus().find((conn) => conn.name === serverName);
       if (!status) {
@@ -3903,6 +3951,7 @@ export function query(
     mcpReadyPromise = runtime.waitForMcpReady();
     refreshManagedSystemPrompt();
     syncLoopToolsFromRegistry();
+    syncAppRuntimeControlPlane();
     return result;
   };
 

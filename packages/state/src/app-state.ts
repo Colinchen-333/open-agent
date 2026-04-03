@@ -48,6 +48,47 @@ export interface TokenUsage {
   costUsd: number;
 }
 
+export interface RuntimePluginState {
+  name: string;
+  path: string;
+  version: string;
+  enabled: boolean;
+  agentCount: number;
+  skillCount: number;
+  commandCount: number;
+  mcpServerCount: number;
+  hookEventCount: number;
+  hookCount: number;
+}
+
+export interface RuntimeHookState {
+  event: string;
+  count: number;
+  sources: string[];
+}
+
+export interface RuntimeDiagnosticState {
+  code: string;
+  message: string;
+  severity: 'info' | 'warning' | 'error';
+  source?: string;
+}
+
+export interface RuntimeCapabilitySummaryState {
+  totalTools: number;
+  mcpTools: number;
+  dynamicTools: number;
+}
+
+export interface RuntimeControlPlaneState {
+  agentNames: string[];
+  skillNames: string[];
+  plugins: RuntimePluginState[];
+  hooks: RuntimeHookState[];
+  diagnostics: RuntimeDiagnosticState[];
+  capabilitySummary: RuntimeCapabilitySummaryState;
+}
+
 export interface AppState {
   // Session
   sessionId: string;
@@ -70,6 +111,10 @@ export interface AppState {
   tasks: Record<string, TaskItem>;
   teammates: Map<string, AgentInstance>;
   agentNameRegistry: Map<string, string>;
+  activeTeamName: string | null;
+
+  // Runtime control plane
+  runtime: RuntimeControlPlaneState;
 
   // Settings
   thinkingConfig: ThinkingConfig;
@@ -93,6 +138,19 @@ export function createDefaultAppState(overrides: Partial<AppState> = {}): AppSta
     tasks: {},
     teammates: new Map(),
     agentNameRegistry: new Map(),
+    activeTeamName: null,
+    runtime: {
+      agentNames: [],
+      skillNames: [],
+      plugins: [],
+      hooks: [],
+      diagnostics: [],
+      capabilitySummary: {
+        totalTools: 0,
+        mcpTools: 0,
+        dynamicTools: 0,
+      },
+    },
     thinkingConfig: { type: 'adaptive' },
     verbose: false,
     ...overrides,

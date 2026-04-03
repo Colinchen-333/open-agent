@@ -45,5 +45,19 @@ export {
   type McpServerStatus,
   type TokenUsage,
   type FileReadTracker,
+  type RuntimePluginState,
+  type RuntimeHookState,
+  type RuntimeDiagnosticState,
+  type RuntimeCapabilitySummaryState,
+  type RuntimeControlPlaneState,
   createDefaultAppState,
 } from './app-state.js';
+
+export {
+  syncSessionControlPlane,
+  syncToolRegistryState,
+  syncMcpServerState,
+  syncRuntimeControlPlane,
+  setActiveTeamControlPlane,
+  type RuntimeControlPlaneSnapshotInput,
+} from './control-plane.js';
