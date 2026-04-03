@@ -1,12 +1,21 @@
-import { describe, it, expect, beforeEach } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 import { AgentLoader } from '../agent-loader.js';
 
 describe('AgentLoader', () => {
   let loader: AgentLoader;
+  let cwd: string;
 
   beforeEach(() => {
+    cwd = mkdtempSync(join(tmpdir(), 'open-agent-agent-loader-'));
     loader = new AgentLoader();
-    loader.loadDefaults('/tmp');
+    loader.loadDefaults(cwd);
+  });
+
+  afterEach(() => {
+    rmSync(cwd, { recursive: true, force: true });
   });
 
   it('loads all built-in agent types including verifier', () => {
@@ -260,6 +269,55 @@ describe('AgentLoader', () => {
       });
       const agent = loader.get('Explore');
       expect(agent!.description).toBe('Overridden Explore');
+    });
+  });
+
+  describe('diagnostics', () => {
+    it('reports invalid project agent definitions and skips loading them', () => {
+      const agentDir = join(cwd, '.open-agent', 'agents');
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, 'broken.md'), `---
+description: Broken local agent
+tools: Read,Write
+---
+`);
+
+      const freshLoader = new AgentLoader();
+      freshLoader.loadDefaults(cwd);
+
+      expect(freshLoader.get('broken')).toBeUndefined();
+      expect(freshLoader.getDiagnostics()).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          code: 'agent_invalid_definition',
+          source: 'agent',
+          agentName: 'broken',
+          layer: 'project',
+        }),
+      ]));
+    });
+
+    it('reports when project agents override built-in agent names', () => {
+      const agentDir = join(cwd, '.open-agent', 'agents');
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, 'Explore.md'), `---
+description: Custom Explore
+tools: [Read]
+---
+You are a custom explore agent.
+`);
+
+      const freshLoader = new AgentLoader();
+      freshLoader.loadDefaults(cwd);
+
+      expect(freshLoader.get('Explore')?.description).toBe('Custom Explore');
+      expect(freshLoader.getDiagnostics()).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          code: 'agent_override',
+          source: 'agent',
+          agentName: 'Explore',
+          layer: 'project',
+        }),
+      ]));
     });
   });
 });

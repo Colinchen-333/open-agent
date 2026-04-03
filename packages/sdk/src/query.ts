@@ -29,6 +29,7 @@ import {
 } from '@open-agent/state';
 import type { AppState } from '@open-agent/state';
 import { AgentLoader, AgentExecutor, TeamManager, TaskManager } from '@open-agent/agents';
+import type { AgentLoaderDiagnostic } from '@open-agent/agents';
 import type { SubagentStreamEvent, AgentSession, TaskItem, TeamConfig, TeamInboxEntry, TeamMember, TeamMessage } from '@open-agent/agents';
 import {
   createDefaultToolRegistry,
@@ -209,10 +210,12 @@ export function query(
   const shouldPersist = options.persistSession !== false;
   const sharedSessionManager = options.sessionManager ?? null;
   const pluginRuntime = loadConfiguredPlugins(cwd, options.plugins);
-  const availableAgents = loadAvailableAgents(cwd, {
+  const agentRuntime = loadAvailableAgents(cwd, {
     ...pluginRuntime.agents,
     ...(options.agents ?? {}),
   });
+  const runtimeDiagnostics = [...pluginRuntime.diagnostics, ...agentRuntime.diagnostics];
+  const availableAgents = agentRuntime.availableAgents;
   const selectedAgent = resolveSelectedAgent(options.agent, availableAgents);
   const supportedAgentInfos = buildAgentInfoList(availableAgents);
   const selectedAgentModel = resolveAgentModel(selectedAgent?.model);
@@ -369,7 +372,7 @@ export function query(
     includePluginSkills: options.includePluginSkills,
     plugins: pluginRuntime.plugins,
     hooks: pluginRuntime.hooks,
-    diagnostics: pluginRuntime.diagnostics,
+    diagnostics: runtimeDiagnostics,
     mcp: {
       shouldRegisterTool: (toolName) => isToolAllowedByPolicy(toolName),
       restoreTool: (toolName) => baseTools.get(toolName),
@@ -1242,8 +1245,8 @@ export function query(
               path: plugin.path,
             })),
           } : {}),
-          ...(pluginRuntime.diagnostics.length > 0 ? {
-            runtimeDiagnostics: pluginRuntime.diagnostics.map((entry) => ({
+          ...(runtimeDiagnostics.length > 0 ? {
+            runtimeDiagnostics: runtimeDiagnostics.map((entry) => ({
               code: entry.code,
               message: entry.message,
               severity: entry.severity,
@@ -4838,10 +4841,24 @@ function mergeMcpServerConfigs(
   return Object.assign({}, ...configs.filter((config): config is Record<string, McpServerConfig> => Boolean(config)));
 }
 
+function mapAgentLoaderDiagnostics(
+  diagnostics: AgentLoaderDiagnostic[],
+): RuntimeDiagnostic[] {
+  return diagnostics.map((entry) => ({
+    code: entry.code,
+    message: entry.message,
+    severity: entry.severity,
+    source: entry.source,
+  }));
+}
+
 function loadAvailableAgents(
   cwd: string,
   overrides?: Record<string, AgentDefinition>,
-): Map<string, AgentDefinition> {
+): {
+  availableAgents: Map<string, AgentDefinition>;
+  diagnostics: RuntimeDiagnostic[];
+} {
   const loader = new AgentLoader();
   loader.loadDefaults(cwd);
   if (overrides) {
@@ -4849,7 +4866,10 @@ function loadAvailableAgents(
       loader.register(name, definition);
     }
   }
-  return new Map(loader.list());
+  return {
+    availableAgents: new Map(loader.list()),
+    diagnostics: mapAgentLoaderDiagnostics(loader.getDiagnostics()),
+  };
 }
 
 function resolveSelectedAgent(

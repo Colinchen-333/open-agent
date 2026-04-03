@@ -101,6 +101,22 @@ You are the valid plugin agent.`);
   return pluginDir;
 }
 
+function createInvalidLocalAgentFixture(cwd: string) {
+  const agentDir = join(cwd, '.open-agent', 'agents');
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(join(agentDir, 'broken-local.md'), `---
+description: Broken local agent
+tools: Read,Write
+---
+`);
+  writeFileSync(join(agentDir, 'Explore.md'), `---
+description: Project Explore override
+tools: [Read]
+---
+You are the project Explore override.
+`);
+}
+
 // ---------------------------------------------------------------------------
 // Tests for new QueryOptions fields:
 //   - canUseTool: callback is called, returning false denies
@@ -883,6 +899,28 @@ describe('QueryOptions unsupported official placeholders', () => {
       'plugin_invalid_skill_definition',
       'plugin_invalid_command_definition',
       'plugin_invalid_agent_definition',
+    ]));
+    q.close();
+  });
+
+  it('surfaces local agent loader diagnostics and filters invalid local agents from supportedAgents', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-local-agent-query-'));
+    createInvalidLocalAgentFixture(cwd);
+    const q = query('test local agent diagnostics', {
+      cwd,
+      model: 'claude-sonnet-4-6',
+    });
+
+    const [agents, info] = await Promise.all([
+      q.supportedAgents(),
+      q.sessionInfo(),
+    ]);
+
+    expect(agents.some((agent) => agent.name === 'broken-local')).toBe(false);
+    expect(agents.find((agent) => agent.name === 'Explore')?.description).toBe('Project Explore override');
+    expect(info?.runtimeDiagnostics?.map((entry) => entry.code)).toEqual(expect.arrayContaining([
+      'agent_invalid_definition',
+      'agent_override',
     ]));
     q.close();
   });
