@@ -85,6 +85,22 @@ async function waitForWorkerStatus(
   }
 }
 
+async function waitForDispatcher(
+  getDispatcher: (dispatcherId: string) => Promise<{ status?: string; activeAssignments?: unknown[] } | null>,
+  dispatcherId: string,
+  predicate: (dispatcher: { status?: string; activeAssignments?: unknown[] }) => boolean,
+): Promise<{ status?: string; activeAssignments?: unknown[] }> {
+  const timeoutAt = Date.now() + 2_000;
+  while (Date.now() < timeoutAt) {
+    const dispatcher = await getDispatcher(dispatcherId);
+    if (dispatcher && predicate(dispatcher)) {
+      return dispatcher;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for dispatcher ${dispatcherId}`);
+}
+
 async function readEventOfType(
   iterator: AsyncIterator<any>,
   expectedType: string,
@@ -128,6 +144,7 @@ describe('createSession()', () => {
     expect(typeof session.startTaskDispatcher).toBe('function');
     expect(typeof session.getTaskDispatcher).toBe('function');
     expect(typeof session.listTaskDispatchers).toBe('function');
+    expect(typeof session.requeueTaskDispatcherAssignment).toBe('function');
     expect(typeof session.stopTaskDispatcher).toBe('function');
     expect(typeof session.stopTask).toBe('function');
     expect(typeof session.streamInput).toBe('function');
@@ -437,6 +454,72 @@ describe('createSession()', () => {
     expect(await session.stopWorker(resumed.workerId)).toEqual({ success: true });
     await waitForWorkerStatus((workerId) => session.getWorker(workerId), resumed.workerId, 'shutdown');
     await eventIterator.return?.();
+    session.close();
+  });
+
+  it('forwards dispatcher inspection and requeue control through the stable session handle', async () => {
+    const teamName = `alpha-team-${Date.now()}`;
+    const session = createSession({
+      model: 'mock-model',
+      provider: makeBackgroundControlProvider(),
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
+    } as any);
+
+    await session.createTeam({ name: teamName, setActive: true });
+    const task = await session.createTask({
+      teamName,
+      subject: 'Session dispatcher requeue',
+      description: 'Force one dispatcher assignment back to pending.',
+      priority: 1,
+    });
+
+    const dispatcher = await session.startTaskDispatcher({
+      dispatcherId: `dispatcher-${Date.now()}`,
+      owner: 'dispatcher-owner',
+      teamName,
+      pollIntervalMs: 25,
+      leaseMs: 500,
+    });
+
+    const activeDispatcher = await waitForDispatcher(
+      (dispatcherId) => session.getTaskDispatcher(dispatcherId),
+      dispatcher.dispatcherId,
+      (item) => item.status === 'running' && Array.isArray(item.activeAssignments) && item.activeAssignments.length === 1,
+    );
+    const assignment = activeDispatcher.activeAssignments![0] as {
+      taskId?: string;
+      workerId?: string;
+    };
+    expect(assignment.taskId).toBe(task.id);
+    expect(assignment.workerId).toBeTruthy();
+
+    await expect(session.stopTaskDispatcher(dispatcher.dispatcherId)).resolves.toMatchObject({
+      success: true,
+      dispatcher: { status: 'draining' },
+    });
+
+    const requeued = await session.requeueTaskDispatcherAssignment({
+      dispatcherId: dispatcher.dispatcherId,
+      taskId: task.id,
+    });
+    expect(requeued.success).toBe(true);
+    expect(requeued.workerStop?.success).toBe(true);
+    expect(requeued.task?.status).toBe('pending');
+    expect(requeued.dispatcher?.status).toBe('stopped');
+    expect(requeued.dispatcher?.activeAssignments).toEqual([]);
+
+    await expect(session.getTaskDispatcher(dispatcher.dispatcherId)).resolves.toMatchObject({
+      dispatcherId: dispatcher.dispatcherId,
+      status: 'stopped',
+      activeAssignments: [],
+    });
+    await expect(session.getTask(task.id, { teamName })).resolves.toMatchObject({
+      id: task.id,
+      teamName,
+      status: 'pending',
+    });
+
     session.close();
   });
 
