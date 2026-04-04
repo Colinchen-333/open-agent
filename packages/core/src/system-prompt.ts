@@ -594,6 +594,33 @@ function buildRuntimeContextSection(
 
   if (snapshot.diagnostics && snapshot.diagnostics.length > 0) {
     lines.push('## Runtime diagnostics');
+    const summary = snapshot.diagnostics.reduce<{
+      total: number;
+      info: number;
+      warning: number;
+      error: number;
+      bySource: Record<string, number>;
+    }>((acc, diagnostic) => {
+      acc.total += 1;
+      acc[diagnostic.severity] += 1;
+      if (diagnostic.source) {
+        acc.bySource[diagnostic.source] = (acc.bySource[diagnostic.source] ?? 0) + 1;
+      }
+      return acc;
+    }, {
+      total: 0,
+      info: 0,
+      warning: 0,
+      error: 0,
+      bySource: {},
+    });
+    lines.push(`- Summary: ${summary.total} total (${summary.info} info, ${summary.warning} warning, ${summary.error} error)`);
+    const sourceSummary = Object.entries(summary.bySource)
+      .map(([source, count]) => `${source}: ${count}`)
+      .join(', ');
+    if (sourceSummary) {
+      lines.push(`- Sources: ${sourceSummary}`);
+    }
     for (const diagnostic of snapshot.diagnostics.slice(0, 8)) {
       const prefix = diagnostic.source ? `[${diagnostic.source}] ` : '';
       lines.push(`- **${diagnostic.severity}** ${prefix}${diagnostic.message}`);

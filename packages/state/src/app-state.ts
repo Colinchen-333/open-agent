@@ -83,6 +83,14 @@ export interface RuntimeDiagnosticState {
   source?: string;
 }
 
+export interface RuntimeDiagnosticSummaryState {
+  total: number;
+  info: number;
+  warning: number;
+  error: number;
+  bySource: Record<string, number>;
+}
+
 export interface RuntimeCapabilitySummaryState {
   totalTools: number;
   mcpTools: number;
@@ -95,6 +103,7 @@ export interface RuntimeControlPlaneState {
   plugins: RuntimePluginState[];
   hooks: RuntimeHookState[];
   diagnostics: RuntimeDiagnosticState[];
+  diagnosticSummary: RuntimeDiagnosticSummaryState;
   capabilitySummary: RuntimeCapabilitySummaryState;
 }
 
@@ -234,6 +243,13 @@ export function createDefaultAppState(overrides: Partial<AppState> = {}): AppSta
       plugins: [],
       hooks: [],
       diagnostics: [],
+      diagnosticSummary: {
+        total: 0,
+        info: 0,
+        warning: 0,
+        error: 0,
+        bySource: {},
+      },
       capabilitySummary: {
         totalTools: 0,
         mcpTools: 0,

@@ -196,6 +196,7 @@ describe('OpenAgentRuntime MCP wiring', () => {
     const snapshot = runtime.buildSnapshot();
     expect(snapshot.capabilitySnapshot.presets.map((preset) => preset.name)).toContain('integration');
     expect(snapshot.capabilitySnapshot.summary.mcpTools).toBeGreaterThan(0);
+    expect(snapshot.diagnosticSummary.total).toBe(0);
   });
 
   it('maps MCP annotations into runtime tool capability metadata', async () => {
@@ -227,6 +228,13 @@ describe('OpenAgentRuntime MCP wiring', () => {
     expect(profile?.source).toBe('mcp');
     expect(profile?.risk).toBe('high');
     expect(profile?.tags).toEqual(expect.arrayContaining(['external', 'network']));
+    expect(snapshot.diagnosticSummary).toEqual({
+      total: 0,
+      info: 0,
+      warning: 0,
+      error: 0,
+      bySource: {},
+    });
   });
 
   it('maps read-only MCP annotations into runtime access metadata', async () => {
@@ -337,5 +345,12 @@ describe('OpenAgentRuntime MCP wiring', () => {
       severity: 'warning',
       source: 'plugin',
     }]);
+    expect(snapshot.diagnosticSummary).toEqual({
+      total: 1,
+      info: 0,
+      warning: 1,
+      error: 0,
+      bySource: { plugin: 1 },
+    });
   });
 });

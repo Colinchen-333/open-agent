@@ -83,6 +83,14 @@ export interface RuntimeDiagnostic {
   source?: 'plugin' | 'hook' | 'agent' | 'runtime';
 }
 
+export interface RuntimeDiagnosticSummary {
+  total: number;
+  info: number;
+  warning: number;
+  error: number;
+  bySource: Record<string, number>;
+}
+
 export interface RuntimeSnapshot {
   tools: string[];
   agents: { name: string; description: string; model?: string }[];
@@ -92,6 +100,7 @@ export interface RuntimeSnapshot {
   plugins: RuntimePluginSummary[];
   hooks: RuntimeHookSummary[];
   diagnostics: RuntimeDiagnostic[];
+  diagnosticSummary: RuntimeDiagnosticSummary;
 }
 
 export interface RuntimeMcpOptions {
@@ -270,6 +279,21 @@ export class OpenAgentRuntime {
   buildSnapshot(): RuntimeSnapshot {
     const capabilityEntries = this.options.toolRegistry.listCapabilities();
     const capabilitySnapshot = buildCapabilitySnapshot(capabilityEntries);
+    const diagnostics = this.options.diagnostics ? this.options.diagnostics.map((entry) => ({ ...entry })) : [];
+    const diagnosticSummary = diagnostics.reduce<RuntimeDiagnosticSummary>((acc, entry) => {
+      acc.total += 1;
+      acc[entry.severity] += 1;
+      if (entry.source) {
+        acc.bySource[entry.source] = (acc.bySource[entry.source] ?? 0) + 1;
+      }
+      return acc;
+    }, {
+      total: 0,
+      info: 0,
+      warning: 0,
+      error: 0,
+      bySource: {},
+    });
 
     return {
       tools: capabilityEntries.map((entry) => entry.name),
@@ -289,7 +313,8 @@ export class OpenAgentRuntime {
         ...hook,
         sources: [...hook.sources],
       })) : [],
-      diagnostics: this.options.diagnostics ? this.options.diagnostics.map((entry) => ({ ...entry })) : [],
+      diagnostics,
+      diagnosticSummary,
     };
   }
 

@@ -14,6 +14,7 @@ import type {
   TimelineControlPlaneItemState,
   TaskItem,
   WorkerControlPlaneState,
+  RuntimeDiagnosticSummaryState,
 } from './app-state.js';
 
 export interface RuntimeControlPlaneSnapshotInput {
@@ -29,6 +30,25 @@ export interface RuntimeControlPlaneSnapshotInput {
       dynamicTools: number;
     };
   };
+}
+
+function summarizeRuntimeDiagnostics(
+  diagnostics: RuntimeDiagnosticState[] = [],
+): RuntimeDiagnosticSummaryState {
+  return diagnostics.reduce<RuntimeDiagnosticSummaryState>((acc, entry) => {
+    acc.total += 1;
+    acc[entry.severity] += 1;
+    if (entry.source) {
+      acc.bySource[entry.source] = (acc.bySource[entry.source] ?? 0) + 1;
+    }
+    return acc;
+  }, {
+    total: 0,
+    info: 0,
+    warning: 0,
+    error: 0,
+    bySource: {},
+  });
 }
 
 export function syncSessionControlPlane(
@@ -84,6 +104,7 @@ export function syncRuntimeControlPlane(
         sources: [...entry.sources],
       })),
       diagnostics: (snapshot.diagnostics ?? []).map((entry) => ({ ...entry })),
+      diagnosticSummary: summarizeRuntimeDiagnostics(snapshot.diagnostics ?? []),
       capabilitySummary: {
         totalTools: snapshot.capabilitySnapshot?.totalTools ?? 0,
         mcpTools: snapshot.capabilitySnapshot?.summary.mcpTools ?? 0,

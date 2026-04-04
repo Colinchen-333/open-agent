@@ -91,6 +91,13 @@ describe('state control plane helpers', () => {
     expect(withTeam.runtime.plugins[0]?.name).toBe('review-kit');
     expect(withTeam.runtime.hooks[0]?.event).toBe('PreToolUse');
     expect(withTeam.runtime.diagnostics[0]?.code).toBe('plugin_agent_collision');
+    expect(withTeam.runtime.diagnosticSummary).toEqual({
+      total: 1,
+      info: 0,
+      warning: 1,
+      error: 0,
+      bySource: { plugin: 1 },
+    });
     expect(withTeam.runtime.capabilitySummary).toEqual({
       totalTools: 5,
       mcpTools: 2,

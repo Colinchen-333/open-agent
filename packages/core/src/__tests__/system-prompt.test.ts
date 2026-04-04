@@ -12,6 +12,12 @@ describe('buildSystemPrompt runtime snapshot', () => {
         agents: [{ name: 'explorer', description: 'Read-only codebase research', model: 'claude-haiku-4-5' }],
         skills: [{ name: 'review-pr', description: 'Review a pull request' }],
         mcpServers: [{ name: 'linear', status: 'connected' }],
+        diagnostics: [{
+          code: 'plugin_agent_collision',
+          message: 'collision',
+          severity: 'warning',
+          source: 'plugin',
+        }],
         capabilitySnapshot: {
           summary: {
             accessCounts: {
@@ -63,6 +69,9 @@ describe('buildSystemPrompt runtime snapshot', () => {
     expect(prompt).toContain('**linear**');
     expect(prompt).toContain('## Coordination');
     expect(prompt).toContain('## Tool capability layers');
+    expect(prompt).toContain('## Runtime diagnostics');
+    expect(prompt).toContain('Summary: 1 total (0 info, 1 warning, 0 error)');
+    expect(prompt).toContain('Sources: plugin: 1');
     expect(prompt).toContain('High-risk tools: Bash');
     expect(prompt).toContain('Open-world MCP tools can reach beyond the workspace');
     expect(prompt).toContain('Worker tool pool: Read, Edit, Bash');

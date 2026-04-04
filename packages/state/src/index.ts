@@ -48,6 +48,7 @@ export {
   type RuntimePluginState,
   type RuntimeHookState,
   type RuntimeDiagnosticState,
+  type RuntimeDiagnosticSummaryState,
   type RuntimeCapabilitySummaryState,
   type RuntimeControlPlaneState,
   type DispatcherDiagnosisControlPlaneState,
