@@ -7,6 +7,7 @@ import type { SDKMessage } from '@open-agent/core';
  */
 export function emitStreamJsonInit(info: {
   tools: string[];
+  capabilitySnapshot?: unknown;
   model: string;
   cwd: string;
   permissionMode: string;
@@ -16,6 +17,7 @@ export function emitStreamJsonInit(info: {
     type: 'system',
     subtype: 'init',
     tools: info.tools,
+    ...(info.capabilitySnapshot ? { capability_snapshot: info.capabilitySnapshot } : {}),
     model: info.model,
     cwd: info.cwd,
     permissionMode: info.permissionMode,

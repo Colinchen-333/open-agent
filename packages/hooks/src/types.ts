@@ -96,6 +96,21 @@ export interface PermissionRequestHookInput extends BaseHookInput {
   hook_event_name: 'PermissionRequest';
   tool_name: string;
   tool_input: unknown;
+  tool_use_id: string;
+  reason?: string;
+  stage: 'before_prompt';
+  metadata?: {
+    readOnly?: boolean;
+    destructive?: boolean;
+    openWorld?: boolean;
+    source?: 'builtin' | 'dynamic' | 'mcp';
+    serverName?: string;
+    capability?: {
+      category?: string;
+      risk?: 'low' | 'medium' | 'high';
+      needsWorkspaceWrite?: boolean;
+    };
+  };
 }
 
 export interface SetupHookInput extends BaseHookInput {

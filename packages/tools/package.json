@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@open-agent/core": "workspace:*",
+    "@open-agent/skills": "workspace:*",
     "fast-glob": "^3.3.3"
   }
 }

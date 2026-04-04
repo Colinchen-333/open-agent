@@ -9,6 +9,7 @@ import { McpStdioClient } from './stdio-transport';
 import { McpHttpClient } from './http-transport';
 import { McpSseClient } from './sse-transport';
 import type { McpServerConnection, McpToolInfo, McpResourceInfo } from './types';
+import { normalizeMcpToolInfo } from './tool-info';
 
 function isAuthError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -114,12 +115,12 @@ export class McpManager {
           const handlerMap = new Map<string, (args: Record<string, unknown>, extra: unknown) => Promise<unknown>>();
           connection.tools = instance.tools.map((t: any) => {
             handlerMap.set(t.name, t.handler);
-            return {
+            return normalizeMcpToolInfo(name, {
               name: t.name,
               description: t.description ?? '',
-              inputSchema: t.inputSchema ?? { type: 'object', properties: {} },
-              serverName: name,
-            } as McpToolInfo;
+              inputSchema: t.inputSchema,
+              annotations: t.annotations,
+            }) as McpToolInfo;
           });
           this._sdkToolHandlers.set(name, handlerMap);
         } else {

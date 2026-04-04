@@ -6,6 +6,30 @@ import { join } from 'path';
 import type { ListSessionsOptions, SessionSummary } from './types.js';
 
 function toSummary(sm: SessionManager, session: SessionInfo): SessionSummary {
+  const metadataSummary = session.summary ?? session.title ?? session.createdFromPrompt;
+  if (metadataSummary) {
+    return {
+      sessionId: session.id,
+      summary: metadataSummary.slice(0, 200),
+      lastModified: new Date(session.lastActiveAt).getTime(),
+      messageCount: (() => {
+        try {
+          return sm.readTranscript(session.cwd, session.id).length;
+        } catch {
+          return 0;
+        }
+      })(),
+      fileSize: (() => {
+        try {
+          return Buffer.byteLength(JSON.stringify(sm.readTranscript(session.cwd, session.id)), 'utf-8');
+        } catch {
+          return 0;
+        }
+      })(),
+      cwd: session.cwd,
+    };
+  }
+
   let transcript: unknown[] = [];
   try {
     transcript = sm.readTranscript(session.cwd, session.id);

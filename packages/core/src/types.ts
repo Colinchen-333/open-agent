@@ -1,3 +1,5 @@
+import type { TaskNotificationStatus, TaskOrchestrationTemplates } from './task-notification.js';
+
 // Permission types
 export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk';
 export type PermissionBehavior = 'allow' | 'deny' | 'ask';
@@ -223,6 +225,7 @@ export interface SDKSystemMessage {
   type: 'system';
   subtype: 'init';
   tools: string[];
+  capability_snapshot?: unknown;
   model: string;
   permissionMode: PermissionMode;
   cwd: string;
@@ -311,9 +314,14 @@ export interface SDKTaskNotificationMessage {
   subtype: 'task_notification';
   task_id: string;
   tool_use_id?: string;
-  status: 'completed' | 'failed' | 'stopped';
+  status: TaskNotificationStatus;
+  team_name?: string;
+  completed_at?: string;
   output_file: string;
   summary: string;
+  result?: string;
+  description?: string;
+  orchestration_templates?: TaskOrchestrationTemplates;
   usage?: {
     total_tokens: number;
     tool_uses: number;
@@ -413,6 +421,77 @@ export interface SDKRateLimitEvent {
 export interface SDKPromptSuggestionMessage {
   type: 'prompt_suggestion';
   suggestion: string;
+  scaffold?: {
+    kind:
+      | 'resume_worker'
+      | 'launch_verifier'
+      | 'retry_worker'
+      | 'stopped_worker_followup'
+      | 'generic_followup';
+    title?: string;
+    agent_type?: string;
+    prompt?: string;
+    source_task_id?: string;
+    resume_task_id?: string;
+    task_status?: TaskNotificationStatus;
+    action?: {
+      tool: 'Task' | 'SendMessage' | 'TaskDispatcher';
+      arguments: Record<string, unknown>;
+    };
+  };
+  uuid: string;
+  session_id: string;
+}
+
+export interface SDKSystemInformationalMessage {
+  type: 'system';
+  subtype: 'informational';
+  message: string;
+  uuid: string;
+  session_id: string;
+}
+
+export interface SDKSystemApiErrorMessage {
+  type: 'system';
+  subtype: 'api_error';
+  message: string;
+  error: { status: number; message: string };
+  uuid: string;
+  session_id: string;
+}
+
+export interface SDKSystemThinkingMessage {
+  type: 'system';
+  subtype: 'thinking';
+  message: string;
+  uuid: string;
+  session_id: string;
+}
+
+export interface SDKSystemTurnDurationMessage {
+  type: 'system';
+  subtype: 'turn_duration';
+  message: string;
+  durationMs: number;
+  uuid: string;
+  session_id: string;
+}
+
+/** Streaming tool progress (Bash stdout chunks, MCP call progress, etc.) */
+export interface SDKProgressMessage {
+  type: 'progress';
+  toolUseId: string;
+  toolName: string;
+  data: unknown;
+  uuid: string;
+  session_id: string;
+}
+
+/** Placeholder for deleted/redacted/compacted messages */
+export interface SDKTombstoneMessage {
+  type: 'tombstone';
+  originalMessageId: string;
+  reason: 'deleted' | 'redacted' | 'compacted';
   uuid: string;
   session_id: string;
 }
@@ -438,7 +517,13 @@ export type SDKMessage =
   | SDKFilesPersistedEvent
   | SDKToolUseSummaryMessage
   | SDKRateLimitEvent
-  | SDKPromptSuggestionMessage;
+  | SDKPromptSuggestionMessage
+  | SDKSystemInformationalMessage
+  | SDKSystemApiErrorMessage
+  | SDKSystemThinkingMessage
+  | SDKSystemTurnDurationMessage
+  | SDKProgressMessage
+  | SDKTombstoneMessage;
 
 // Slash command definition
 export interface SlashCommand {

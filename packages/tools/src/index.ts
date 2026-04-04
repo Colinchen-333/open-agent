@@ -14,9 +14,16 @@ export type {
   ToolDefinition,
   ToolContext,
   FileReadTracker,
+  ToolCapability,
+  ToolCapabilityCategory,
+  ToolCapabilityExportEntry,
+  ToolCapabilityManifest,
+  ToolCapabilityRisk,
+  ResolvedToolCapability,
 } from './types.js';
 
 export { ToolRegistry, createDefaultToolRegistry } from './registry.js';
+export { describeToolCapability, resolveToolCapability } from './capability.js';
 export { createReadTool } from './read.js';
 export { createWriteTool } from './write.js';
 export { createEditTool } from './edit.js';
@@ -61,6 +68,13 @@ export {
   type BackgroundAgentInfo,
   type TaskManagementDeps,
 } from './task-management.js';
+export {
+  savePersistedBackgroundTask,
+  listPersistedBackgroundTasks,
+  loadPersistedBackgroundTask,
+  type PersistedBackgroundTask,
+  type PersistedBackgroundTaskStatus,
+} from './background-task-store.js';
 export { createToolSearchTool, type ToolSearchDeps } from './tool-search.js';
 export { createSkillTool, type SkillDeps } from './skill-tool.js';
 export { getToolPromptDescriptions } from './tool-descriptions.js';

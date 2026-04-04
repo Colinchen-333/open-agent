@@ -1,6 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { McpToolInfo, McpResourceInfo } from './types';
+import { normalizeMcpToolInfo } from './tool-info';
 
 export class McpStdioClient {
   private client: Client;
@@ -29,11 +30,11 @@ export class McpStdioClient {
 
   async listTools(): Promise<McpToolInfo[]> {
     const result = await this.client.listTools();
-    return (result.tools || []).map(t => ({
+    return (result.tools || []).map(t => normalizeMcpToolInfo(this.serverName, {
       name: t.name,
       description: t.description,
       inputSchema: t.inputSchema as Record<string, any>,
-      serverName: this.serverName,
+      annotations: t.annotations as any,
     }));
   }
 

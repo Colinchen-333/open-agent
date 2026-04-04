@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { createBashTool } from '../bash.js';
+import { createTaskOutputTool } from '../task-management.js';
+import { BASH_SANDBOX_POLICY_FIELD, buildBashSandboxPolicy } from '../../../permissions/src/sandbox-adapter.js';
 
 describe('Bash tool', () => {
   let tmpDir: string;
@@ -21,6 +23,25 @@ describe('Bash tool', () => {
     cwd: cwd ?? tmpDir,
     sessionId: 'test-bash',
   });
+
+  const makeStatefulCtx = (cwd?: string) => {
+    const state: any = {
+      runtime: {
+        diagnostics: [],
+      },
+    };
+    return {
+      cwd: cwd ?? tmpDir,
+      sessionId: 'test-bash',
+      getAppState: () => state,
+      setAppState: (updater: (prev: any) => any) => {
+        Object.assign(state, updater(state));
+      },
+      get diagnostics() {
+        return state.runtime.diagnostics as Array<Record<string, unknown>>;
+      },
+    };
+  };
 
   // ---------------------------------------------------------------------------
   // Basic execution
@@ -143,5 +164,111 @@ describe('Bash tool', () => {
     const result = await tool.execute({ command: 'true' }, makeCtx()) as string;
     // `true` exits 0 with no stdout/stderr
     expect(result).toBe('(no output)');
+  });
+
+  it('supports background execution with retrievable output', async () => {
+    const started = await tool.execute(
+      { command: 'echo "background hello"', run_in_background: true },
+      makeCtx(),
+    );
+    const match = String(started).match(/id:\s*(bg_[^\)\s]+)/i);
+    expect(match).not.toBeNull();
+
+    const outputTool = createTaskOutputTool();
+    const raw = await outputTool.execute({
+      task_id: match![1],
+      block: true,
+      timeout: 5000,
+    }, makeCtx() as any);
+    const result = JSON.parse(raw);
+
+    expect(result.type).toBe('bash');
+    expect(['running', 'completed']).toContain(result.status);
+    expect(result.output).toContain('background hello');
+    expect(typeof result.output_file).toBe('string');
+  });
+
+  it('records sandbox provenance into app state for successful execution', async () => {
+    const ctx = makeStatefulCtx();
+
+    const result = await tool.execute({ command: 'echo "sandbox provenance"' }, ctx as any);
+
+    expect(result).toContain('sandbox provenance');
+    expect(ctx.diagnostics.length).toBeGreaterThanOrEqual(2);
+
+    const started = ctx.diagnostics[0];
+    const finished = ctx.diagnostics[ctx.diagnostics.length - 1];
+    expect(started).toEqual(expect.objectContaining({
+      code: 'bash_sandbox_execution',
+      severity: 'info',
+      source: 'runtime',
+      payload: expect.objectContaining({
+        outcome: 'started',
+        provenance: expect.objectContaining({
+          command: 'echo "sandbox provenance"',
+          runInBackground: false,
+          wrappedWithSandboxExec: false,
+        }),
+      }),
+    }));
+    expect(finished).toEqual(expect.objectContaining({
+      code: 'bash_sandbox_execution',
+      payload: expect.objectContaining({
+        outcome: 'success',
+        provenance: expect.objectContaining({
+          command: 'echo "sandbox provenance"',
+          runInBackground: false,
+        }),
+      }),
+    }));
+  });
+
+  it('surfaces structured sandbox execution data on preflight block', async () => {
+    const ctx = makeStatefulCtx();
+    const policy = buildBashSandboxPolicy({
+      sandbox: {
+        enabled: true,
+        filesystem: {
+          allowWrite: [join(tmpDir, 'allowed')],
+        },
+      },
+      cwd: tmpDir,
+    });
+
+    let error: any;
+    try {
+      await tool.execute({
+        command: 'echo "blocked" > ./blocked.txt',
+        [BASH_SANDBOX_POLICY_FIELD]: policy,
+      }, ctx as any);
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error.sandboxViolation).toEqual(expect.objectContaining({
+      phase: 'preflight',
+      code: 'write_outside_allowed_paths',
+      feature: 'writePaths',
+    }));
+    expect(error.sandboxExecution?.outcome).toBe('blocked');
+    expect(error.sandboxExecution?.findings[0]).toEqual(expect.objectContaining({
+      stage: 'preflight',
+      scope: 'filesystem',
+      code: 'write_outside_allowed_paths',
+      severity: 'error',
+    }));
+    expect(error.sandboxExecution?.provenance).toEqual(expect.objectContaining({
+      command: 'echo "blocked" > ./blocked.txt',
+      runInBackground: false,
+      boundaryKind: expect.any(String),
+    }));
+    expect(ctx.diagnostics[0]).toEqual(expect.objectContaining({
+      code: 'bash_sandbox_execution',
+      severity: 'error',
+      payload: expect.objectContaining({
+        outcome: 'blocked',
+      }),
+    }));
   });
 });

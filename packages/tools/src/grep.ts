@@ -1,10 +1,15 @@
 import type { ToolDefinition, ToolContext, GrepInput, GrepOutput } from './types.js';
 import { exec } from '@open-agent/core';
+import { truncateSummary } from './tool-summary.js';
 
 export function createGrepTool(): ToolDefinition {
   return {
     name: 'Grep',
     description: 'Search file contents using ripgrep (rg). Supports content, files_with_matches, and count output modes.',
+    isReadOnly: true,
+    getToolUseSummary(input: GrepInput) {
+      return `Searched ${truncateSummary(input.pattern, 40)}`;
+    },
     inputSchema: {
       type: 'object',
       properties: {

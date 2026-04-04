@@ -228,6 +228,20 @@ describe('AgentExecutor', () => {
       const agents = executor.listAgents();
       expect(agents.length).toBe(2);
     });
+
+    it('listPersistedAgents includes sessions restored from disk', async () => {
+      const { agentId } = await executor.execute({
+        definition: mockDefinition,
+        provider: mockProvider as any,
+        tools: mockTools,
+        prompt: 'Persisted task',
+        cwd: '/tmp',
+      });
+
+      const freshExecutor = new AgentExecutor();
+      const agents = freshExecutor.listPersistedAgents();
+      expect(agents.some((agent) => agent.agentId === agentId)).toBe(true);
+    });
   });
 
   describe('stopAgent()', () => {

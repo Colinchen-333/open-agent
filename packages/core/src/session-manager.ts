@@ -19,6 +19,67 @@ export interface SessionInfo {
   model: string;
   createdAt: string;
   lastActiveAt: string;
+  title?: string;
+  summary?: string;
+  createdFromPrompt?: string;
+  language?: string;
+  outputStyle?: string;
+  permissionMode?: string;
+  agent?: string;
+  parentSessionId?: string;
+  forkedFromSessionId?: string;
+  resumeSource?: 'new' | 'continue' | 'resume' | 'resume_at' | 'fork';
+  resumeSessionAt?: string;
+  plugins?: { name: string; path: string }[];
+  runtimeDiagnostics?: Array<{
+    code: string;
+    message: string;
+    severity: 'info' | 'warning' | 'error';
+    source?: string;
+  }>;
+}
+
+export interface SessionCreateMetadata {
+  title?: string;
+  summary?: string;
+  createdFromPrompt?: string;
+  language?: string;
+  outputStyle?: string;
+  permissionMode?: string;
+  agent?: string;
+  parentSessionId?: string;
+  forkedFromSessionId?: string;
+  resumeSource?: 'new' | 'continue' | 'resume' | 'resume_at' | 'fork';
+  resumeSessionAt?: string;
+  plugins?: { name: string; path: string }[];
+  runtimeDiagnostics?: Array<{
+    code: string;
+    message: string;
+    severity: 'info' | 'warning' | 'error';
+    source?: string;
+  }>;
+}
+
+export interface SessionUpdate {
+  model?: string;
+  title?: string;
+  summary?: string;
+  createdFromPrompt?: string;
+  language?: string;
+  outputStyle?: string;
+  permissionMode?: string;
+  agent?: string;
+  parentSessionId?: string;
+  forkedFromSessionId?: string;
+  resumeSource?: 'new' | 'continue' | 'resume' | 'resume_at' | 'fork';
+  resumeSessionAt?: string;
+  plugins?: { name: string; path: string }[];
+  runtimeDiagnostics?: Array<{
+    code: string;
+    message: string;
+    severity: 'info' | 'warning' | 'error';
+    source?: string;
+  }>;
 }
 
 /**
@@ -126,6 +187,72 @@ export class SessionManager {
     return join(projectDir, `${sessionId}.jsonl`);
   }
 
+  private sanitizeSessionUpdate(update?: SessionCreateMetadata | SessionUpdate): Partial<SessionInfo> {
+    if (!update) return {};
+
+    const next: Partial<SessionInfo> = {};
+    const assignString = (
+      key: keyof SessionInfo,
+      value: unknown,
+      options?: { allowEmpty?: boolean },
+    ) => {
+      if (typeof value !== 'string') return;
+      if (!options?.allowEmpty && value.trim().length === 0) return;
+      (next as Record<string, unknown>)[key] = value;
+    };
+
+    assignString('title', update.title);
+    assignString('summary', update.summary);
+    assignString('createdFromPrompt', update.createdFromPrompt);
+    assignString('language', update.language);
+    assignString('outputStyle', update.outputStyle);
+    assignString('permissionMode', update.permissionMode);
+    assignString('agent', update.agent);
+    assignString('parentSessionId', update.parentSessionId);
+    assignString('forkedFromSessionId', update.forkedFromSessionId);
+    assignString('resumeSessionAt', update.resumeSessionAt);
+    assignString('model', (update as SessionUpdate).model);
+    if (Array.isArray(update.plugins)) {
+      next.plugins = update.plugins
+        .filter((plugin): plugin is { name: string; path: string } =>
+          Boolean(plugin)
+          && typeof plugin.name === 'string'
+          && plugin.name.trim().length > 0
+          && typeof plugin.path === 'string'
+          && plugin.path.trim().length > 0)
+        .map((plugin) => ({ name: plugin.name, path: plugin.path }));
+    }
+    if (Array.isArray(update.runtimeDiagnostics)) {
+      next.runtimeDiagnostics = update.runtimeDiagnostics
+        .filter((entry): entry is NonNullable<SessionInfo['runtimeDiagnostics']>[number] =>
+          Boolean(entry)
+          && typeof entry.code === 'string'
+          && entry.code.trim().length > 0
+          && typeof entry.message === 'string'
+          && entry.message.trim().length > 0
+          && (entry.severity === 'info' || entry.severity === 'warning' || entry.severity === 'error'))
+        .map((entry) => ({
+          code: entry.code,
+          message: entry.message,
+          severity: entry.severity,
+          ...(typeof entry.source === 'string' && entry.source.trim().length > 0 ? { source: entry.source } : {}),
+        }));
+    }
+
+    const resumeSource = update.resumeSource;
+    if (
+      resumeSource === 'new' ||
+      resumeSource === 'continue' ||
+      resumeSource === 'resume' ||
+      resumeSource === 'resume_at' ||
+      resumeSource === 'fork'
+    ) {
+      next.resumeSource = resumeSource;
+    }
+
+    return next;
+  }
+
   // ---------------------------------------------------------------------------
   // Public API
   // ---------------------------------------------------------------------------
@@ -134,10 +261,17 @@ export class SessionManager {
    * Create a new session for the given working directory and model.
    * Writes a `.meta.json` file and returns the session metadata.
    */
-  createSession(cwd: string, model: string): SessionInfo {
+  createSession(cwd: string, model: string, metadata?: SessionCreateMetadata): SessionInfo {
     const id = randomUUID();
     const now = new Date().toISOString();
-    const info: SessionInfo = { id, cwd, model, createdAt: now, lastActiveAt: now };
+    const info: SessionInfo = {
+      id,
+      cwd,
+      model,
+      createdAt: now,
+      lastActiveAt: now,
+      ...this.sanitizeSessionUpdate(metadata),
+    };
 
     const projectDir = this.getProjectDir(cwd);
     // writeFileSync is used here to keep the implementation runtime-agnostic.
@@ -154,11 +288,23 @@ export class SessionManager {
    * Ensure a specific session id has metadata on disk.
    * If it already exists, updates `lastActiveAt`; otherwise creates it.
    */
-  ensureSession(cwd: string, sessionId: string, model: string): SessionInfo {
+  ensureSession(
+    cwd: string,
+    sessionId: string,
+    model: string,
+    metadata?: SessionCreateMetadata,
+  ): SessionInfo {
     const existing = this.getSession(cwd, sessionId);
     if (existing) {
-      this.touchSession(cwd, sessionId);
-      return this.getSession(cwd, sessionId) ?? existing;
+      return this.updateSession(
+        cwd,
+        sessionId,
+        {
+          model,
+          ...this.sanitizeSessionUpdate(metadata),
+        },
+        { touch: true },
+      ) ?? existing;
     }
 
     const now = new Date().toISOString();
@@ -168,6 +314,7 @@ export class SessionManager {
       model,
       createdAt: now,
       lastActiveAt: now,
+      ...this.sanitizeSessionUpdate(metadata),
     };
     const projectDir = this.getProjectDir(cwd);
     writeFileSync(this.metaPath(projectDir, sessionId), JSON.stringify(info, null, 2));
@@ -180,17 +327,32 @@ export class SessionManager {
    * Silently does nothing if the session metadata file is not found.
    */
   touchSession(cwd: string, sessionId: string): void {
+    this.updateSession(cwd, sessionId, {}, { touch: true });
+  }
+
+  updateSession(
+    cwd: string,
+    sessionId: string,
+    update: SessionUpdate,
+    options?: { touch?: boolean },
+  ): SessionInfo | null {
     const session = this.getSession(cwd, sessionId);
-    if (!session) return;
+    if (!session) return null;
     const path = this.findMetaPathInCwd(session.cwd ?? cwd, sessionId);
-    if (!path) return;
+    if (!path) return null;
 
     try {
       const info: SessionInfo = JSON.parse(readFileSync(path, 'utf-8'));
-      info.lastActiveAt = new Date().toISOString();
-      writeFileSync(path, JSON.stringify(info, null, 2));
+      const merged: SessionInfo = {
+        ...info,
+        ...this.sanitizeSessionUpdate(update),
+        ...(options?.touch !== false ? { lastActiveAt: new Date().toISOString() } : {}),
+      };
+      writeFileSync(path, JSON.stringify(merged, null, 2));
+      this.updateGlobalIndex(sessionId, merged.cwd);
+      return merged;
     } catch {
-      // Ignore parse/write errors — the transcript is still valuable.
+      return null;
     }
   }
 
@@ -226,6 +388,87 @@ export class SessionManager {
       }
     }
     return parsed;
+  }
+
+  private formatTaskNotificationMessage(entry: Record<string, unknown>): string {
+    const escapeXml = (value: string): string =>
+      value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
+    const taskId = typeof entry.task_id === 'string' ? entry.task_id : 'unknown-task';
+    const status = typeof entry.status === 'string' ? entry.status : 'completed';
+    const teamName = typeof entry.team_name === 'string' ? entry.team_name : '';
+    const description = typeof entry.description === 'string' ? entry.description : '';
+    const completedAt = typeof entry.completed_at === 'string' ? entry.completed_at : '';
+    const outputFile = typeof entry.output_file === 'string' ? entry.output_file : '';
+    const summary = typeof entry.summary === 'string' ? entry.summary : 'No summary available.';
+    const result = typeof entry.result === 'string' ? entry.result : '';
+    const orchestrationTemplates = entry.orchestration_templates && typeof entry.orchestration_templates === 'object'
+      ? entry.orchestration_templates as Record<string, unknown>
+      : null;
+    const usage = entry.usage && typeof entry.usage === 'object'
+      ? entry.usage as Record<string, unknown>
+      : null;
+
+    const lines = [
+      '<task-notification>',
+      `<task-id>${escapeXml(taskId)}</task-id>`,
+      ...(teamName.trim().length > 0 ? [`<team-name>${escapeXml(teamName)}</team-name>`] : []),
+      ...(description.trim().length > 0 ? [`<description>${escapeXml(description)}</description>`] : []),
+      `<status>${escapeXml(status)}</status>`,
+      ...(completedAt.trim().length > 0 ? [`<completed-at>${escapeXml(completedAt)}</completed-at>`] : []),
+      ...(outputFile.trim().length > 0 ? [`<output-file>${escapeXml(outputFile)}</output-file>`] : []),
+      `<summary>${escapeXml(summary)}</summary>`,
+    ];
+
+    if (result.trim().length > 0) {
+      lines.push(`<result>${escapeXml(result)}</result>`);
+    }
+
+    if (usage) {
+      lines.push('<usage>');
+      if (typeof usage.total_tokens === 'number') {
+        lines.push(`  <total_tokens>${usage.total_tokens}</total_tokens>`);
+      }
+      if (typeof usage.tool_uses === 'number') {
+        lines.push(`  <tool_uses>${usage.tool_uses}</tool_uses>`);
+      }
+      if (typeof usage.duration_ms === 'number') {
+        lines.push(`  <duration_ms>${usage.duration_ms}</duration_ms>`);
+      }
+      lines.push('</usage>');
+    }
+
+    if (orchestrationTemplates) {
+      const resumePrompt = typeof orchestrationTemplates.resume_prompt_template === 'string'
+        ? orchestrationTemplates.resume_prompt_template
+        : '';
+      const verificationPrompt = typeof orchestrationTemplates.verification_prompt_template === 'string'
+        ? orchestrationTemplates.verification_prompt_template
+        : '';
+      const retryPrompt = typeof orchestrationTemplates.retry_prompt_template === 'string'
+        ? orchestrationTemplates.retry_prompt_template
+        : '';
+
+      if (resumePrompt || verificationPrompt || retryPrompt) {
+        lines.push('<orchestration-templates>');
+        if (resumePrompt) {
+          lines.push(`<resume-prompt-template>${escapeXml(resumePrompt)}</resume-prompt-template>`);
+        }
+        if (verificationPrompt) {
+          lines.push(`<verification-prompt-template>${escapeXml(verificationPrompt)}</verification-prompt-template>`);
+        }
+        if (retryPrompt) {
+          lines.push(`<retry-prompt-template>${escapeXml(retryPrompt)}</retry-prompt-template>`);
+        }
+        lines.push('</orchestration-templates>');
+      }
+    }
+
+    lines.push('</task-notification>');
+    return lines.join('\n');
   }
 
   private toConversationMessages(raw: SDKMessage[]): Message[] {
@@ -305,7 +548,16 @@ export class SessionManager {
           messages.push({ role: 'user', content: [toolResultBlock] as any });
         }
       }
-      // stream_event, result, system messages are skipped (informational only).
+      if (
+        entry.type === 'system'
+        && (entry as any).subtype === 'task_notification'
+      ) {
+        messages.push({
+          role: 'user',
+          content: this.formatTaskNotificationMessage(entry as unknown as Record<string, unknown>),
+        });
+      }
+      // stream_event and result messages are skipped (informational only).
     }
 
     return messages;
@@ -330,9 +582,11 @@ export class SessionManager {
    * provider-compatible `Message` objects suitable for passing as `initialMessages`
    * to `ConversationLoop`.
    *
-   * Only 'user' and 'assistant' SDKMessages are included — stream_event,
-   * tool_result, result, and system messages are skipped because they are
-   * informational records, not conversation turns.
+   * 'user' and 'assistant' SDKMessages are included directly. `tool_result`
+   * entries are reconstructed as user tool_result blocks, and
+   * `system.task_notification` entries are reconstructed as synthetic
+   * user-role `<task-notification>` messages so resumed coordinator sessions
+   * can continue from finished worker results.
    *
    * For assistant messages the content blocks (text, thinking, tool_use) are
    * pulled from `message.message.content`.  For user messages the raw string
@@ -410,6 +664,15 @@ export class SessionManager {
       mkdirSync(dir, { recursive: true });
     }
     return dir;
+  }
+
+  /**
+   * Return the transcript JSONL path for the given session.
+   * Useful for hook payloads and diagnostics that need the durable transcript location.
+   */
+  getTranscriptPath(cwd: string, sessionId: string): string {
+    const projectDir = this.resolveSessionProjectDir(cwd, sessionId);
+    return this.transcriptPath(projectDir, sessionId);
   }
 
   /**

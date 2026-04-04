@@ -491,6 +491,88 @@ export class TerminalRenderer {
     );
   }
 
+  renderTaskStarted(description: string, taskId?: string): void {
+    this.stopSpinner();
+    const suffix = taskId ? ` ${C.dim}(${taskId})${C.reset}` : '';
+    process.stdout.write(`  ${C.cyan}↳ Started${C.reset} ${description}${suffix}\n`);
+  }
+
+  renderTaskProgress(
+    description: string,
+    usage?: { total_tokens?: number; tool_uses?: number; duration_ms?: number },
+    lastToolName?: string,
+  ): void {
+    this.stopSpinner();
+    const detail: string[] = [];
+    if (lastToolName) detail.push(lastToolName);
+    if (usage?.tool_uses !== undefined) detail.push(`${usage.tool_uses} tools`);
+    if (usage?.duration_ms !== undefined) detail.push(`${usage.duration_ms}ms`);
+    const suffix = detail.length > 0 ? ` ${C.dim}(${detail.join(' · ')})${C.reset}` : '';
+    process.stdout.write(`  ${C.gray}↳${C.reset} ${description}${suffix}\n`);
+  }
+
+  renderTaskNotification(
+    status: 'completed' | 'failed' | 'stopped',
+    summary: string,
+    usage?: { total_tokens?: number; tool_uses?: number; duration_ms?: number },
+  ): void {
+    this.stopSpinner();
+    const icon = status === 'completed' ? `${C.green}✓${C.reset}` : status === 'failed' ? `${C.red}✗${C.reset}` : `${C.yellow}■${C.reset}`;
+    const detail: string[] = [];
+    if (usage?.tool_uses !== undefined) detail.push(`${usage.tool_uses} tools`);
+    if (usage?.duration_ms !== undefined) detail.push(`${usage.duration_ms}ms`);
+    const suffix = detail.length > 0 ? ` ${C.dim}(${detail.join(' · ')})${C.reset}` : '';
+    process.stdout.write(`  ${icon} ${summary}${suffix}\n`);
+  }
+
+  renderPromptSuggestion(
+    suggestion: string,
+    scaffold?: {
+      title?: string;
+      agent_type?: string;
+      resume_task_id?: string;
+      prompt?: string;
+      action?: {
+        tool?: string;
+        arguments?: Record<string, unknown>;
+      };
+    },
+  ): void {
+    this.stopSpinner();
+    process.stdout.write(`  ${C.magenta}→${C.reset} ${suggestion}\n`);
+    if (!scaffold) return;
+    const detail: string[] = [];
+    if (scaffold.title) detail.push(scaffold.title);
+    if (scaffold.agent_type) detail.push(`agent:${scaffold.agent_type}`);
+    if (scaffold.resume_task_id) detail.push(`resume:${scaffold.resume_task_id}`);
+    if (detail.length > 0) {
+      process.stdout.write(`    ${C.dim}${detail.join(' · ')}${C.reset}\n`);
+    }
+    if (scaffold.action?.tool) {
+      const args = scaffold.action.arguments ?? {};
+      const toolDetail: string[] = [`tool:${scaffold.action.tool}`];
+      if (typeof args['subagent_type'] === 'string') toolDetail.push(`type:${args['subagent_type']}`);
+      if (typeof args['resume'] === 'string') toolDetail.push(`resume:${args['resume']}`);
+      if (typeof args['recipient'] === 'string') toolDetail.push(`recipient:${args['recipient']}`);
+      process.stdout.write(`    ${C.dim}${toolDetail.join(' · ')}${C.reset}\n`);
+    }
+    if (scaffold.prompt) {
+      const preview = scaffold.prompt.length > 160 ? `${scaffold.prompt.slice(0, 159)}…` : scaffold.prompt;
+      process.stdout.write(`    ${C.dim}${preview}${C.reset}\n`);
+    }
+  }
+
+  renderToolUseSummary(summary: string): void {
+    this.stopSpinner();
+    process.stdout.write(`  ${C.blue}⋯${C.reset} ${summary}\n`);
+  }
+
+  renderCompactBoundary(preTokens: number, trigger: 'manual' | 'auto'): void {
+    this.stopSpinner();
+    const triggerLabel = trigger === 'manual' ? 'manual' : 'auto';
+    process.stdout.write(`  ${C.yellow}↺${C.reset} Context compacted ${C.dim}(${triggerLabel} · ~${preTokens} tokens)${C.reset}\n`);
+  }
+
   // ── Welcome message ───────────────────────────────────────────────
   renderWelcome(model: string, cwd?: string): void {
     const VERSION = '0.1.0';

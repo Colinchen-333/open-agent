@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { existsSync, mkdirSync, writeFileSync, readFileSync, appendFileSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, appendFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir, homedir } from 'os';
 import type { AgentDefinition } from '@open-agent/core';
@@ -16,6 +16,8 @@ export interface AgentSession {
   agentType: string;
   name?: string;
   state: AgentState;
+  parentToolUseId?: string;
+  parentSessionId?: string;
   startedAt: string;
   completedAt?: string;
   model: string;
@@ -47,6 +49,8 @@ export interface ExecuteOptions {
   isolation?: string;
   runInBackground?: boolean;
   resume?: string;
+  parentToolUseId?: string;
+  parentSessionId?: string;
   /** Pre-created worktree path — when set, agent runs inside this worktree */
   worktreePath?: string;
   /** Callback to clean up the worktree after background agent completes */
@@ -106,6 +110,8 @@ export class AgentExecutor {
       agentType,
       name: options.name,
       state: 'spawning',
+      parentToolUseId: options.parentToolUseId,
+      parentSessionId: options.parentSessionId,
       startedAt: new Date().toISOString(),
       model: options.model ?? 'default',
       mode: options.mode,
@@ -124,7 +130,15 @@ export class AgentExecutor {
     await this.fireSubagentStart(agentId, agentType, options.cwd);
 
     // Emit launched event
-    try { options.onEvent?.({ type: 'launched', agentId, description: options.name }); } catch { /* non-fatal */ }
+    try {
+      options.onEvent?.({
+        type: 'launched',
+        protocol: 'task_notification_v1',
+        agentId,
+        taskId: agentId,
+        description: options.name,
+      });
+    } catch { /* non-fatal */ }
 
     try {
       // Import AgentRunner dynamically to avoid circular deps
@@ -145,6 +159,7 @@ export class AgentExecutor {
         provider: options.provider,
         tools: options.tools,
         cwd: options.cwd,
+        agentId,
         maxTurns: options.maxTurns,
         mode: options.mode,
         model: options.model,
@@ -179,14 +194,54 @@ export class AgentExecutor {
 
       if (agentResult.isError) {
         // Emit failed event
-        try { options.onEvent?.({ type: 'failed', agentId, error: agentResult.result, durationMs: session.durationMs }); } catch { /* non-fatal */ }
+        try {
+          options.onEvent?.({
+            type: 'failed',
+            protocol: 'task_notification_v1',
+            agentId,
+            taskId: agentId,
+            teamName: options.teamName,
+            description: options.name,
+            status: 'failed',
+            error: agentResult.result,
+            output: agentResult.result,
+            summary: this.summarizeResult(agentResult.result),
+            durationMs: session.durationMs,
+            completedAt: session.completedAt,
+            usage: {
+              total_tokens: agentResult.totalTokens,
+              tool_uses: agentResult.totalToolUseCount,
+              duration_ms: session.durationMs,
+            },
+          });
+        } catch { /* non-fatal */ }
         const err = new Error(agentResult.result || 'Agent execution failed');
         (err as any).__lifecycleEmitted = true;
         throw err;
       }
 
       // Emit completed event
-      try { options.onEvent?.({ type: 'completed', agentId, durationMs: session.durationMs, totalToolUseCount: agentResult.totalToolUseCount }); } catch { /* non-fatal */ }
+      try {
+        options.onEvent?.({
+          type: 'completed',
+          protocol: 'task_notification_v1',
+          agentId,
+          taskId: agentId,
+          teamName: options.teamName,
+          description: options.name,
+          status: 'completed',
+          output: agentResult.result,
+          summary: this.summarizeResult(agentResult.result),
+          durationMs: session.durationMs,
+          completedAt: session.completedAt,
+          totalToolUseCount: agentResult.totalToolUseCount,
+          usage: {
+            total_tokens: agentResult.totalTokens,
+            tool_uses: agentResult.totalToolUseCount,
+            duration_ms: session.durationMs,
+          },
+        });
+      } catch { /* non-fatal */ }
 
       // Notify team lead that this agent is now idle (if running in a team).
       if (options.teamName && options.name) {
@@ -209,7 +264,27 @@ export class AgentExecutor {
 
       // Emit failed event only if not already emitted (isError case already emitted above)
       if (!(error as any).__lifecycleEmitted) {
-        try { options.onEvent?.({ type: 'failed', agentId, error: session.error, durationMs: session.durationMs }); } catch { /* non-fatal */ }
+        try {
+          options.onEvent?.({
+            type: 'failed',
+            protocol: 'task_notification_v1',
+            agentId,
+            taskId: agentId,
+            teamName: options.teamName,
+            description: options.name,
+            status: 'failed',
+            error: session.error,
+            output: session.error,
+            summary: this.summarizeResult(session.error),
+            durationMs: session.durationMs,
+            completedAt: session.completedAt,
+            usage: {
+              total_tokens: session.totalTokens ?? 0,
+              tool_uses: session.totalToolUseCount ?? 0,
+              duration_ms: session.durationMs,
+            },
+          });
+        } catch { /* non-fatal */ }
       }
 
       throw error;
@@ -230,6 +305,8 @@ export class AgentExecutor {
       agentType,
       name: options.name,
       state: 'spawning',
+      parentToolUseId: options.parentToolUseId,
+      parentSessionId: options.parentSessionId,
       startedAt: new Date().toISOString(),
       model: options.model ?? 'default',
       mode: options.mode,
@@ -263,7 +340,16 @@ export class AgentExecutor {
     this.agentAbortControllers.set(agentId, abortController);
 
     // Emit launched event
-    try { options.onEvent?.({ type: 'launched', agentId, description: options.name }); } catch { /* non-fatal */ }
+    try {
+      options.onEvent?.({
+        type: 'launched',
+        protocol: 'task_notification_v1',
+        agentId,
+        taskId: agentId,
+        description: options.name,
+        outputFile,
+      });
+    } catch { /* non-fatal */ }
 
     // Fire and forget — run in background
     (async () => {
@@ -285,6 +371,7 @@ export class AgentExecutor {
           provider: options.provider,
           tools: options.tools,
           cwd: options.cwd,
+          agentId,
           maxTurns: options.maxTurns,
           mode: options.mode,
           model: options.model,
@@ -327,10 +414,52 @@ export class AgentExecutor {
 
         if (agentResult.isError) {
           appendFileSync(outputFile, `\n--- Agent failed ---\n${agentResult.result}\n`);
-          try { options.onEvent?.({ type: 'failed', agentId, error: agentResult.result, durationMs: session.durationMs }); } catch { /* non-fatal */ }
+          try {
+            options.onEvent?.({
+              type: 'failed',
+              protocol: 'task_notification_v1',
+              agentId,
+              taskId: agentId,
+              teamName: options.teamName,
+              description: options.name,
+              status: 'failed',
+              outputFile,
+              error: agentResult.result,
+              output: agentResult.result,
+              summary: this.summarizeResult(agentResult.result),
+              durationMs: session.durationMs,
+              completedAt: session.completedAt,
+              usage: {
+                total_tokens: agentResult.totalTokens,
+                tool_uses: agentResult.totalToolUseCount,
+                duration_ms: session.durationMs,
+              },
+            });
+          } catch { /* non-fatal */ }
         } else {
           appendFileSync(outputFile, `\n--- Agent completed ---\n${agentResult.result}\n`);
-          try { options.onEvent?.({ type: 'completed', agentId, durationMs: session.durationMs, totalToolUseCount: agentResult.totalToolUseCount }); } catch { /* non-fatal */ }
+          try {
+            options.onEvent?.({
+              type: 'completed',
+              protocol: 'task_notification_v1',
+              agentId,
+              taskId: agentId,
+              teamName: options.teamName,
+              description: options.name,
+              status: 'completed',
+              outputFile,
+              output: agentResult.result,
+              summary: this.summarizeResult(agentResult.result),
+              durationMs: session.durationMs,
+              completedAt: session.completedAt,
+              totalToolUseCount: agentResult.totalToolUseCount,
+              usage: {
+                total_tokens: agentResult.totalTokens,
+                tool_uses: agentResult.totalToolUseCount,
+                duration_ms: session.durationMs,
+              },
+            });
+          } catch { /* non-fatal */ }
           // Notify team lead that this background agent is now idle.
           if (options.teamName && options.name) {
             try {
@@ -356,7 +485,27 @@ export class AgentExecutor {
         // Fire SubagentStop hook on failure
         await this.fireSubagentStop(agentId, agentType, session.error, options.cwd);
 
-        try { options.onEvent?.({ type: 'failed', agentId, error: session.error, durationMs: session.durationMs }); } catch { /* non-fatal */ }
+        try {
+          options.onEvent?.({
+            type: 'failed',
+            protocol: 'task_notification_v1',
+            agentId,
+            taskId: agentId,
+            description: options.name,
+            status: 'failed',
+            outputFile,
+            error: session.error,
+            output: session.error,
+            summary: this.summarizeResult(session.error),
+            durationMs: session.durationMs,
+            completedAt: session.completedAt,
+            usage: {
+              total_tokens: session.totalTokens ?? 0,
+              tool_uses: session.totalToolUseCount ?? 0,
+              duration_ms: session.durationMs,
+            },
+          });
+        } catch { /* non-fatal */ }
       }
 
       // Clean up abort controller entry for this agent
@@ -397,6 +546,37 @@ export class AgentExecutor {
     return Array.from(this.agents.values());
   }
 
+  /** List all persisted agent sessions from disk, merged with in-memory state. */
+  listPersistedAgents(): AgentSession[] {
+    const merged = new Map<string, AgentSession>();
+
+    for (const session of this.agents.values()) {
+      merged.set(session.agentId, session);
+    }
+
+    if (!existsSync(this.baseDir)) {
+      return [...merged.values()];
+    }
+
+    for (const entry of readdirSync(this.baseDir)) {
+      const session = this.loadSession(entry);
+      if (!session) continue;
+      const existing = merged.get(session.agentId);
+      if (!existing) {
+        merged.set(session.agentId, session);
+        continue;
+      }
+
+      const existingCompletedAt = existing.completedAt ? new Date(existing.completedAt).getTime() : 0;
+      const nextCompletedAt = session.completedAt ? new Date(session.completedAt).getTime() : 0;
+      if (nextCompletedAt >= existingCompletedAt) {
+        merged.set(session.agentId, session);
+      }
+    }
+
+    return [...merged.values()];
+  }
+
   /** Stop a background agent by sending an abort signal */
   stopAgent(agentId: string): boolean {
     const session = this.agents.get(agentId);
@@ -414,13 +594,37 @@ export class AgentExecutor {
     session.durationMs = Math.max(0, Date.now() - new Date(session.startedAt).getTime());
     try {
       const cb = this.backgroundEventCallbacks.get(agentId);
-      cb?.({ type: 'shutdown', agentId, durationMs: session.durationMs });
+      cb?.({
+        type: 'shutdown',
+        protocol: 'task_notification_v1',
+        agentId,
+        taskId: agentId,
+        teamName: session.teamName,
+        description: session.name,
+        status: 'stopped',
+        outputFile: session.outputFile,
+        output: session.result ?? session.error,
+        summary: this.summarizeResult(session.result ?? session.error ?? 'Subagent stopped.'),
+        durationMs: session.durationMs,
+        completedAt: session.completedAt,
+        usage: {
+          total_tokens: session.totalTokens ?? 0,
+          tool_uses: session.totalToolUseCount ?? 0,
+          duration_ms: session.durationMs,
+        },
+      });
     } catch {
       // non-fatal
     }
     this.backgroundEventCallbacks.delete(agentId);
     this.saveSession(session);
     return true;
+  }
+
+  private summarizeResult(text?: string): string {
+    const raw = typeof text === 'string' ? text.trim() : '';
+    if (!raw) return 'Subagent finished without a summary.';
+    return raw.length > 200 ? `${raw.slice(0, 200)}…` : raw;
   }
 
   // --- Hook helpers ---

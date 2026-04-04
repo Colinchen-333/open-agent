@@ -1,6 +1,7 @@
 import { statSync, readFileSync } from 'fs';
 import type { ToolDefinition, ToolContext, FileReadInput } from './types.js';
 import { readText, fileExists, fileSize, exec } from '@open-agent/core';
+import { summarizeFilePath } from './tool-summary.js';
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
 const DEFAULT_LINE_LIMIT = 2000;
@@ -27,6 +28,10 @@ export function createReadTool(): ToolDefinition {
     name: 'Read',
     description:
       'Read a file from the filesystem. Returns file contents with line numbers (cat -n style). For images returns metadata and file info. For PDF files returns size information and extraction instructions. Supports Jupyter notebooks (.ipynb), offset and limit for partial reads.',
+    isReadOnly: true,
+    getToolUseSummary(input: FileReadInput) {
+      return `Read ${summarizeFilePath(input.file_path) ?? 'file'}`;
+    },
     inputSchema: {
       type: 'object',
       properties: {

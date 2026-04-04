@@ -4,8 +4,19 @@ import { homedir } from 'os';
 import type { AgentDefinition } from '@open-agent/core';
 import { BUILTIN_AGENT_TYPES } from './types';
 
+export interface AgentLoaderDiagnostic {
+  code: 'agent_invalid_definition' | 'agent_parse_failed' | 'agent_override';
+  message: string;
+  severity: 'warning' | 'error';
+  source: 'agent';
+  agentName?: string;
+  filePath?: string;
+  layer?: 'builtin' | 'user' | 'project';
+}
+
 export class AgentLoader {
   private agents: Map<string, AgentDefinition> = new Map();
+  private diagnostics: AgentLoaderDiagnostic[] = [];
 
   constructor() {
     // Load built-in agents
@@ -23,16 +34,52 @@ export class AgentLoader {
   }
 
   // Load custom agents from .md files in a directory
-  loadFromDirectory(dir: string): void {
+  loadFromDirectory(dir: string, layer: 'user' | 'project' = 'project'): void {
     if (!existsSync(dir)) return;
     const files = readdirSync(dir).filter(f => f.endsWith('.md'));
 
     for (const file of files) {
-      const content = readFileSync(join(dir, file), 'utf-8');
-      const agent = this.parseAgentMd(content);
-      if (agent) {
-        const name = file.replace('.md', '');
-        this.agents.set(name, agent);
+      const filePath = join(dir, file);
+      const name = file.replace('.md', '');
+      try {
+        const content = readFileSync(filePath, 'utf-8');
+        const agent = this.parseAgentMd(content);
+        if (agent) {
+          if (!this.isValidAgentDefinition(agent)) {
+            this.diagnostics.push({
+              code: 'agent_invalid_definition',
+              message: `Agent "${name}" from ${filePath} is missing required schema fields.`,
+              severity: 'warning',
+              source: 'agent',
+              agentName: name,
+              filePath,
+              layer,
+            });
+            continue;
+          }
+          if (this.agents.has(name)) {
+            this.diagnostics.push({
+              code: 'agent_override',
+              message: `Agent "${name}" from ${filePath} overrides an earlier ${this.isBuiltinAgent(name) ? 'builtin' : 'loaded'} definition.`,
+              severity: 'warning',
+              source: 'agent',
+              agentName: name,
+              filePath,
+              layer,
+            });
+          }
+          this.agents.set(name, agent);
+        }
+      } catch {
+        this.diagnostics.push({
+          code: 'agent_parse_failed',
+          message: `Failed to parse agent "${name}" from ${filePath}.`,
+          severity: 'warning',
+          source: 'agent',
+          agentName: name,
+          filePath,
+          layer,
+        });
       }
     }
   }
@@ -45,9 +92,9 @@ export class AgentLoader {
       this.agents.set(name, def);
     }
     // 2. User-level agents (~/.open-agent/agents/) overlay built-ins
-    this.loadFromDirectory(join(homedir(), '.open-agent', 'agents'));
+    this.loadFromDirectory(join(homedir(), '.open-agent', 'agents'), 'user');
     // 3. Project-level agents (.open-agent/agents/) overlay everything above
-    this.loadFromDirectory(join(cwd, '.open-agent', 'agents'));
+    this.loadFromDirectory(join(cwd, '.open-agent', 'agents'), 'project');
   }
 
   // Parse .md format agent definition (YAML frontmatter + prompt body)
@@ -115,6 +162,20 @@ export class AgentLoader {
     };
   }
 
+  private isValidAgentDefinition(definition: AgentDefinition): boolean {
+    if (!definition || typeof definition !== 'object') return false;
+    if (typeof definition.description !== 'string') return false;
+    if (typeof definition.prompt !== 'string' || definition.prompt.trim().length === 0) return false;
+    if (definition.tools !== undefined && !Array.isArray(definition.tools)) return false;
+    if (definition.disallowedTools !== undefined && !Array.isArray(definition.disallowedTools)) return false;
+    if (definition.skills !== undefined && !Array.isArray(definition.skills)) return false;
+    return true;
+  }
+
+  private isBuiltinAgent(name: string): boolean {
+    return Object.prototype.hasOwnProperty.call(BUILTIN_AGENT_TYPES, name);
+  }
+
   // Programmatically register an agent
   register(name: string, definition: AgentDefinition): void {
     this.agents.set(name, definition);
@@ -126,5 +187,9 @@ export class AgentLoader {
 
   list(): [string, AgentDefinition][] {
     return Array.from(this.agents.entries());
+  }
+
+  getDiagnostics(): AgentLoaderDiagnostic[] {
+    return this.diagnostics.map((entry) => ({ ...entry }));
   }
 }

@@ -24,6 +24,7 @@ export interface CliArgs {
   inputFormat?: 'text' | 'stream-json';
   addDirs?: string[];
   permissionPromptTool?: string;
+  ink?: boolean;
 }
 
 /**
@@ -106,7 +107,7 @@ export function parseArgs(argv: string[]): CliArgs {
 
 /** Flags that are purely boolean and never consume the next token. */
 function isBooleanFlag(key: string): boolean {
-  return ['continue', 'print', 'help', 'version', 'verbose', 'debug', 'dangerouslySkipPermissions', 'json', 'no-markdown', 'noMarkdown'].includes(key);
+  return ['continue', 'print', 'help', 'version', 'verbose', 'debug', 'dangerouslySkipPermissions', 'json', 'no-markdown', 'noMarkdown', 'ink'].includes(key);
 }
 
 function isBooleanShort(key: string): boolean {
@@ -204,6 +205,9 @@ function applyLongFlag(result: CliArgs, key: string, value: string | undefined):
     case 'permission-prompt-tool':
     case 'permissionPromptTool':
       result.permissionPromptTool = value;
+      break;
+    case 'ink':
+      result.ink = value !== 'false';
       break;
     // Unknown flags are silently ignored
   }

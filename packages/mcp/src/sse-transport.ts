@@ -2,6 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import type { McpToolInfo, McpResourceInfo } from './types';
+import { normalizeMcpToolInfo } from './tool-info';
 
 /**
  * SSE MCP client that connects to an SSE-based MCP server.
@@ -144,11 +145,11 @@ export class McpSseClient {
 
   async listTools(): Promise<McpToolInfo[]> {
     const result = await this.client.listTools();
-    return (result.tools || []).map(t => ({
+    return (result.tools || []).map(t => normalizeMcpToolInfo(this.serverName, {
       name: t.name,
       description: t.description,
       inputSchema: t.inputSchema as Record<string, any>,
-      serverName: this.serverName,
+      annotations: t.annotations as any,
     }));
   }
 

@@ -2,6 +2,7 @@ import fg from 'fast-glob';
 import { statSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import type { ToolDefinition, ToolContext, GlobInput, GlobOutput } from './types.js';
+import { truncateSummary } from './tool-summary.js';
 
 const MAX_FILES = 100;
 
@@ -29,6 +30,10 @@ export function createGlobTool(): ToolDefinition {
   return {
     name: 'Glob',
     description: 'Find files matching a glob pattern, sorted by modification time (newest first). Returns up to 100 results.',
+    isReadOnly: true,
+    getToolUseSummary(input: GlobInput) {
+      return `Matched ${truncateSummary(input.pattern, 40)}`;
+    },
     inputSchema: {
       type: 'object',
       properties: {

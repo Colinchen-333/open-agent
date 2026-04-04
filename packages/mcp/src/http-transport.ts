@@ -1,4 +1,5 @@
 import type { McpToolInfo, McpResourceInfo } from './types';
+import { normalizeMcpToolInfo } from './tool-info';
 
 /**
  * Minimal HTTP MCP client.
@@ -65,12 +66,7 @@ export class McpHttpClient {
 
   async listTools(): Promise<McpToolInfo[]> {
     const result = await this.rpc('tools/list');
-    return (result?.tools ?? []).map((t: any) => ({
-      name: t.name,
-      description: t.description,
-      inputSchema: t.inputSchema ?? { type: 'object', properties: {} },
-      serverName: this.serverName,
-    }));
+    return (result?.tools ?? []).map((t: any) => normalizeMcpToolInfo(this.serverName, t));
   }
 
   async callTool(name: string, args: Record<string, unknown>): Promise<any> {

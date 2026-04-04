@@ -1,0 +1,20 @@
+{
+  "name": "@open-agent/skills",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "types": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "echo 'No build step for skills'",
+    "dev": "echo 'No dev step for skills'"
+  },
+  "dependencies": {
+    "@open-agent/plugins": "workspace:*"
+  }
+}

@@ -34,6 +34,28 @@ function makeMockProvider(
   };
 }
 
+function makeRecordingProvider(
+  responses: StreamEvent[][],
+  seenMessages: Message[][],
+): LLMProvider {
+  let callIndex = 0;
+
+  return {
+    name: 'mock-recording',
+    async *chat(messages: Message[], _options: ChatOptions): AsyncGenerator<StreamEvent> {
+      seenMessages.push(messages.map((message) => JSON.parse(JSON.stringify(message))));
+      const events = responses[Math.min(callIndex, responses.length - 1)];
+      callIndex++;
+      for (const evt of events) {
+        yield evt;
+      }
+    },
+    async listModels(): Promise<ModelInfo[]> {
+      return [];
+    },
+  };
+}
+
 /** Build a simple text-only response (no tool calls). */
 function textResponse(text: string): StreamEvent[] {
   return [
@@ -157,6 +179,35 @@ describe('ConversationLoop', () => {
       expect(result.usage.input_tokens).toBe(7);
       expect(result.usage.output_tokens).toBe(11);
     });
+
+    it('continues automatically after max_tokens with a stronger recovery prompt', async () => {
+      const seenMessages: Message[][] = [];
+      const provider = makeRecordingProvider(
+        [
+          [
+            { type: 'text_delta', text: 'Partial answer. ' },
+            { type: 'message_delta', delta: { stop_reason: 'max_tokens' } } as any,
+            {
+              type: 'message_end',
+              message: {},
+              usage: { input_tokens: 10, output_tokens: 20 },
+            },
+          ],
+          textResponse('Resumed cleanly.'),
+        ],
+        seenMessages,
+      );
+      const loop = new ConversationLoop(baseOptions(provider));
+
+      const messages = await collectMessages(loop.run('Explain the result'));
+      const result = messages.find((m) => m.type === 'result') as any;
+
+      expect(result.result).toBe('Resumed cleanly.');
+      expect(seenMessages).toHaveLength(2);
+      expect(seenMessages[1].at(-1)?.role).toBe('user');
+      expect(seenMessages[1].at(-1)?.content).toContain('Output token limit hit');
+      expect(seenMessages[1].at(-1)?.content).toContain('no apology');
+    });
   });
 
   describe('tool call → tool result → follow-up response', () => {
@@ -168,6 +219,9 @@ describe('ConversationLoop', () => {
         name: 'EchoTool',
         description: 'Echoes input',
         inputSchema: { type: 'object', properties: { msg: { type: 'string' } }, required: ['msg'] },
+        getToolUseSummary(input: any) {
+          return `Echoed ${input.msg}`;
+        },
         async execute(input: any) {
           executedWith.push(input);
           return `echo: ${input.msg}`;
@@ -195,6 +249,11 @@ describe('ConversationLoop', () => {
       expect(toolResult.tool_name).toBe('EchoTool');
       expect(toolResult.is_error).toBe(false);
       expect(toolResult.result).toContain('echo: hello');
+
+      const toolSummary = messages.find((m) => m.type === 'tool_use_summary') as any;
+      expect(toolSummary).toBeDefined();
+      expect(toolSummary.preceding_tool_use_ids).toEqual([toolId]);
+      expect(toolSummary.summary).toBe('Echoed hello');
 
       // Final result should be success
       const result = messages.find((m) => m.type === 'result') as any;
@@ -535,6 +594,52 @@ describe('ConversationLoop', () => {
       expect(finalHistory.length).toBeGreaterThanOrEqual(3);
       expect(finalHistory[0].content).toBe('previous question');
     });
+
+    it('emits compact status and compact_boundary when pre-run compaction happens', async () => {
+      const provider = makeMockProvider([
+        textResponse('Summary of older context.'),
+        textResponse('Done after compact.'),
+      ]);
+
+      const longText = 'x'.repeat(600);
+      const initialMessages: Message[] = [
+        { role: 'user', content: longText },
+        { role: 'assistant', content: [{ type: 'text', text: longText }] },
+        { role: 'user', content: longText },
+        { role: 'assistant', content: [{ type: 'text', text: longText }] },
+        { role: 'user', content: longText },
+        { role: 'assistant', content: [{ type: 'text', text: longText }] },
+        { role: 'user', content: 'recent question' },
+        { role: 'assistant', content: [{ type: 'text', text: 'recent answer' }] },
+      ];
+
+      const loop = new ConversationLoop(
+        baseOptions(provider, new Map(), {
+          initialMessages,
+          compactThreshold: 100,
+        }),
+      );
+
+      const messages = await collectMessages(loop.run('continue working'));
+      const compacting = messages.find(
+        (message) =>
+          message.type === 'system' &&
+          (message as any).subtype === 'status' &&
+          (message as any).status === 'compacting',
+      ) as any;
+      const boundary = messages.find(
+        (message) =>
+          message.type === 'system' &&
+          (message as any).subtype === 'compact_boundary',
+      ) as any;
+      const result = messages.find((message) => message.type === 'result') as any;
+
+      expect(compacting).toBeDefined();
+      expect(boundary).toBeDefined();
+      expect(boundary.compact_metadata.trigger).toBe('auto');
+      expect(boundary.compact_metadata.pre_tokens).toBeGreaterThan(100);
+      expect(result.result).toBe('Done after compact.');
+    });
   });
 
   describe('abort signal', () => {
@@ -600,7 +705,7 @@ describe('ConversationLoop', () => {
     });
   });
 
-  describe('pre-tool hook blocked execution', () => {
+  describe('tool lifecycle hooks', () => {
     it('emits top-level tool_result for blocked tool use and continues', async () => {
       const toolId = 'blocked-by-hook';
       const tool = {
@@ -637,6 +742,124 @@ describe('ConversationLoop', () => {
       expect(result).toBeDefined();
       expect(result.subtype).toBe('success');
       expect(result.result).toBe('Hook blocked handled.');
+    });
+
+    it('emits post-tool hooks with transcript and permission context', async () => {
+      const captured: Array<{ event: string; input: Record<string, unknown> }> = [];
+      const successTool = {
+        name: 'HookedSuccess',
+        description: 'Succeeds',
+        inputSchema: { type: 'object', properties: { value: { type: 'string' } } },
+        async execute(input: any) { return { echoed: input.value }; },
+      };
+      const failTool = {
+        name: 'HookedFailure',
+        description: 'Fails',
+        inputSchema: { type: 'object', properties: {} },
+        async execute() { throw new Error('boom'); },
+      };
+
+      const provider = makeMockProvider([
+        [
+          ...toolUseResponse('ok-1', 'HookedSuccess', { value: 'hi' }),
+        ],
+        [
+          ...toolUseResponse('fail-1', 'HookedFailure', {}),
+        ],
+        textResponse('done'),
+      ]);
+
+      const loop = new ConversationLoop(baseOptions(
+        provider,
+        new Map([
+          ['HookedSuccess', successTool],
+          ['HookedFailure', failTool],
+        ]),
+        {
+          getAppState: () => ({ permissionMode: 'plan' } as any),
+          hookExecutor: {
+            async execute(event, input) {
+              captured.push({ event, input });
+              if (event === 'PostToolUse') {
+                return { additionalContext: 'success hook context' };
+              }
+              if (event === 'PostToolUseFailure') {
+                return { additionalContext: 'failure hook context' };
+              }
+              return { continue: true };
+            },
+          },
+        },
+      ));
+
+      const messages = await collectMessages(loop.run('run both tools'));
+      const toolResults = messages.filter((message) => message.type === 'tool_result') as any[];
+      expect(toolResults.some((message) => message.tool_name === 'HookedSuccess' && message.result.includes('success hook context'))).toBe(true);
+      expect(toolResults.some((message) => message.tool_name === 'HookedFailure' && message.result.includes('failure hook context'))).toBe(true);
+
+      const preTool = captured.find((entry) => entry.event === 'PreToolUse');
+      expect(preTool?.input.transcript_path).toContain('test-session-id.jsonl');
+      expect(preTool?.input.permission_mode).toBe('plan');
+
+      const postTool = captured.find((entry) => entry.event === 'PostToolUse');
+      expect(postTool?.input.tool_name).toBe('HookedSuccess');
+      expect(postTool?.input.tool_response).toContain('echoed');
+
+      const postFailure = captured.find((entry) => entry.event === 'PostToolUseFailure');
+      expect(postFailure?.input.tool_name).toBe('HookedFailure');
+      expect(postFailure?.input.error).toContain('boom');
+    });
+
+    it('lets PermissionRequest hook approve ask-mode tools without a prompter', async () => {
+      const captured: Array<{ event: string; input: Record<string, unknown> }> = [];
+      const tool = {
+        name: 'NeedsApproval',
+        description: 'Needs approval',
+        inputSchema: { type: 'object', properties: {} },
+        async execute() { return 'approved by hook'; },
+      };
+      const provider = makeMockProvider([
+        toolUseResponse('approve-1', 'NeedsApproval', {}),
+        textResponse('done'),
+      ]);
+      const permissionEngine: PermissionChecker = {
+        evaluate: async () => ({ behavior: 'ask', reason: 'needs review' }),
+        addRule() {},
+      };
+
+      const loop = new ConversationLoop(baseOptions(
+        provider,
+        new Map([['NeedsApproval', tool]]),
+        {
+          permissionEngine,
+          hookExecutor: {
+            async execute(event, input) {
+              captured.push({ event, input });
+              if (event === 'PermissionRequest') {
+                return { permissionDecision: 'allow' };
+              }
+              return { continue: true };
+            },
+          },
+        },
+      ));
+
+      const messages = await collectMessages(loop.run('approve via hook'));
+      const toolResult = messages.find((message) => message.type === 'tool_result') as any;
+      expect(toolResult).toBeDefined();
+      expect(toolResult.is_error).toBe(false);
+      expect(toolResult.result).toContain('approved by hook');
+
+      const permissionRequest = captured.find((entry) => entry.event === 'PermissionRequest');
+      expect(permissionRequest?.input.tool_use_id).toBe('approve-1');
+      expect(permissionRequest?.input.stage).toBe('before_prompt');
+      expect(permissionRequest?.input.reason).toBe('needs review');
+      expect(permissionRequest?.input.metadata).toEqual(expect.objectContaining({
+        readOnly: false,
+        destructive: false,
+        openWorld: false,
+        source: 'builtin',
+      }));
     });
   });
 

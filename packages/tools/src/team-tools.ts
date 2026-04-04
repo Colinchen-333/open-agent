@@ -1,7 +1,8 @@
 import type { ToolDefinition, ToolContext } from './types.js';
+import { truncateSummary } from './tool-summary.js';
 
 export interface TeamToolsDeps {
-  createTeam: (name: string, description?: string) => Promise<{ teamName: string; configPath: string }>;
+  createTeam: (name: string, description?: string) => Promise<{ teamName: string; configPath: string; scratchpadPath?: string }>;
   deleteTeam: (name: string) => Promise<{ success: boolean }>;
   getActiveTeam?: () => string | null;
   sendMessage: (params: {
@@ -18,6 +19,10 @@ export function createTeamCreateTool(deps: TeamToolsDeps): ToolDefinition {
   return {
     name: 'TeamCreate',
     description: 'Create a new team to coordinate multiple agents working on a project.',
+    getToolUseSummary(input: { team_name?: string }, _result, isError) {
+      const teamName = truncateSummary(input.team_name || 'team', 40);
+      return isError ? `Team creation failed: ${teamName}` : `Created team ${teamName}`;
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -38,6 +43,9 @@ export function createTeamDeleteTool(deps: TeamToolsDeps): ToolDefinition {
   return {
     name: 'TeamDelete',
     description: 'Remove team and task directories when work is complete. The active team is automatically determined from the session context.',
+    getToolUseSummary(_input: Record<string, never>, _result, isError) {
+      return isError ? 'Team deletion failed' : 'Deleted active team';
+    },
     inputSchema: {
       type: 'object',
       properties: {},
@@ -67,6 +75,35 @@ Message types:
 - "shutdown_response"      → approve or reject a shutdown request (request_id + approve required)
 - "plan_approval_response" → approve or reject a teammate's plan (request_id + approve required)
 - "plan_approval_request"  → send a plan for approval (recipient required)`,
+    getToolUseSummary(
+      input: { type?: string; recipient?: string; summary?: string; content?: string },
+      _result,
+      isError,
+    ) {
+      const target = truncateSummary(input.recipient || 'team', 30);
+      const preview = truncateSummary(input.summary || input.content || '', 35);
+
+      switch (input.type) {
+        case 'message':
+          return isError
+            ? `Message failed: ${target}`
+            : `Messaged ${target}${preview ? `: ${preview}` : ''}`;
+        case 'broadcast':
+          return isError
+            ? 'Broadcast failed'
+            : `Broadcast to team${preview ? `: ${preview}` : ''}`;
+        case 'shutdown_request':
+          return isError ? `Shutdown request failed: ${target}` : `Requested shutdown from ${target}`;
+        case 'shutdown_response':
+          return isError ? 'Shutdown response failed' : 'Sent shutdown response';
+        case 'plan_approval_request':
+          return isError ? `Plan request failed: ${target}` : `Requested plan approval from ${target}`;
+        case 'plan_approval_response':
+          return isError ? 'Plan response failed' : 'Sent plan approval response';
+        default:
+          return isError ? 'Team message failed' : 'Sent team message';
+      }
+    },
     inputSchema: {
       type: 'object',
       properties: {

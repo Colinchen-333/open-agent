@@ -6,6 +6,7 @@ import type {
   PermissionRule,
   SandboxConfig,
 } from './types';
+import { classifyBashCommand } from './bash-policy.js';
 
 // Read-only tools that are always safe for informational access
 const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion'];
@@ -16,36 +17,25 @@ const EDIT_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit', 'We
 // Tools that are always safe regardless of mode (never destructive)
 const SAFE_TOOLS = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion'];
 
-// Patterns that indicate a potentially destructive or privileged command.
-// Matches Claude Code's dangerous command detection list.
-const DANGEROUS_COMMAND_PATTERNS = [
-  /\brm\s+(-rf?|-r\s+-f|-f\s+-r|--recursive)\b/,
-  /\bgit\s+push(\s+--force|-f)\b/,
-  /\bgit\s+push\b/,
-  /\bgit\s+reset\s+--hard\b/,
-  /\bgit\s+checkout\s+\.\b/,
-  /\bgit\s+clean\b/,
-  /\bsudo\b/,
-  /\bchmod\b/,
-  /\bchown\b/,
-  /\bmkfs\b/,
-  /\bdd\s+/,
-  /\bkill\s+-9\b/,
-  /\bpkill\b/,
-  />\s*\/dev\//,
-  // Output redirection to a file (> or >>). Require the > to appear after a
-  // space, pipe, semicolon, or at the start of the command to avoid matching
-  // shell comparison operators like `[ "$a" > "$b" ]`.
-  /(?:^|[|;&\s])>{1,2}\s*\S/,
-  /\bcurl\b.*\|\s*bash\b/,
-  /\bwget\b.*\|\s*bash\b/,
-  // Command substitution with network commands — potential remote code exec
-  /\$\(\s*(curl|wget)\b/,
-  /\beval\b/,
-];
-
 // File-system tools that operate on paths — subject to allowedPaths/deniedPaths checks
 const FILE_SYSTEM_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit'];
+
+function isMetadataReadOnly(request: PermissionRequest): boolean {
+  return request.metadata?.readOnly === true;
+}
+
+function isMetadataDestructive(request: PermissionRequest): boolean {
+  return request.metadata?.destructive === true || request.metadata?.capability?.risk === 'high';
+}
+
+function isMetadataOpenWorld(request: PermissionRequest): boolean {
+  return request.metadata?.openWorld === true;
+}
+
+function dynamicReadOnlyReason(request: PermissionRequest): string {
+  const source = request.metadata?.source === 'mcp' ? 'read-only MCP tool' : 'read-only tool';
+  return `${source}${request.metadata?.serverName ? ` from ${request.metadata.serverName}` : ''}`;
+}
 
 export class PermissionEngine {
   private mode: PermissionMode;
@@ -108,6 +98,9 @@ export class PermissionEngine {
       if (READ_ONLY_TOOLS.includes(request.toolName)) {
         return { behavior: 'allow', reason: 'read-only in plan mode' };
       }
+      if (isMetadataReadOnly(request) && !isMetadataOpenWorld(request) && !isMetadataDestructive(request)) {
+        return { behavior: 'allow', reason: `${dynamicReadOnlyReason(request)} in plan mode` };
+      }
       return { behavior: 'deny', reason: 'plan mode: only read-only tools allowed' };
     }
 
@@ -145,21 +138,81 @@ export class PermissionEngine {
         return { behavior: 'allow', reason: 'safe tool' };
       }
 
+      if (isMetadataDestructive(request)) {
+        return { behavior: 'ask', reason: 'destructive tool requires approval' };
+      }
+
+      if (isMetadataOpenWorld(request)) {
+        return { behavior: 'ask', reason: 'open-world tool requires approval' };
+      }
+
+      if (isMetadataReadOnly(request)) {
+        return { behavior: 'allow', reason: dynamicReadOnlyReason(request) };
+      }
+
       // Bash commands are audited for destructive patterns
       if (request.toolName === 'Bash') {
         const cmd = String((request.input as Record<string, unknown>)?.command ?? '');
-        if (this.isDangerousCommand(cmd)) {
+        const disableSandbox = Boolean((request.input as Record<string, unknown>)?.dangerouslyDisableSandbox);
+        if (disableSandbox) {
           return {
             behavior: 'ask',
-            reason: `potentially dangerous command: ${cmd.slice(0, 100)}`,
+            reason: 'sandbox bypass requires explicit approval',
           };
         }
-        // In acceptEdits mode, non-dangerous Bash is allowed automatically
-        if (this.mode === 'acceptEdits') {
-          return { behavior: 'allow', reason: 'acceptEdits mode: non-dangerous bash' };
+
+        const classification = classifyBashCommand(cmd);
+        if (classification.level === 'destructive') {
+          return {
+            behavior: 'ask',
+            reason: `destructive bash command (${classification.reason})`,
+          };
         }
-        // In default mode, ask before running any Bash command
-        return { behavior: 'ask', reason: 'requires approval in default mode' };
+        if (classification.level === 'system') {
+          return {
+            behavior: 'ask',
+            reason: `system-level bash command (${classification.reason})`,
+          };
+        }
+        if (classification.level === 'network-pipe') {
+          return {
+            behavior: 'ask',
+            reason: `network piping command requires approval (${classification.reason})`,
+          };
+        }
+
+        if (this.mode === 'default') {
+          if (classification.level === 'read-only') {
+            return {
+              behavior: 'allow',
+              reason: `read-only bash command (${classification.reason})`,
+            };
+          }
+          return {
+            behavior: 'ask',
+            reason: `bash command requires approval (${classification.level}: ${classification.reason})`,
+          };
+        }
+
+        // In acceptEdits mode, local workspace commands are allowed automatically.
+        if (this.mode === 'acceptEdits') {
+          if (classification.level === 'network') {
+            return {
+              behavior: 'ask',
+              reason: `networked bash command requires approval (${classification.reason})`,
+            };
+          }
+          if (classification.level === 'unknown') {
+            return {
+              behavior: 'ask',
+              reason: `unclassified bash command requires approval (${classification.reason})`,
+            };
+          }
+          return {
+            behavior: 'allow',
+            reason: `acceptEdits mode: ${classification.level} bash`,
+          };
+        }
       }
 
       // Write/Edit/other tools need user confirmation in default mode
@@ -193,6 +246,13 @@ export class PermissionEngine {
 
       if (request.toolName === 'Bash') {
         const cmd = String((request.input as Record<string, unknown>)?.command ?? '');
+        const classification = classifyBashCommand(cmd);
+        if (rule.ruleContent.startsWith('risk:')) {
+          return classification.level === rule.ruleContent.slice('risk:'.length);
+        }
+        if (rule.ruleContent.startsWith('category:')) {
+          return classification.categories.includes(rule.ruleContent.slice('category:'.length));
+        }
         return this.matchesStringPattern(cmd, rule.ruleContent);
       }
 
@@ -222,13 +282,6 @@ export class PermissionEngine {
     } catch {
       return value.includes(pattern);
     }
-  }
-
-  /**
-   * Return true when a Bash command matches at least one known-dangerous pattern.
-   */
-  private isDangerousCommand(cmd: string): boolean {
-    return DANGEROUS_COMMAND_PATTERNS.some(re => re.test(cmd));
   }
 
   // ── Dynamic rule management ─────────────────────────────────────────────────
@@ -383,9 +436,19 @@ export class PermissionEngine {
       }
     }
 
-    // Sandbox: auto-allow Bash if autoAllowBashIfSandboxed is set
+    // Sandbox: auto-allow only non-destructive Bash if explicitly enabled.
     if (this.sandbox.autoAllowBashIfSandboxed && request.toolName === 'Bash') {
-      return { behavior: 'allow', reason: 'sandbox: auto-allow bash (sandboxed)' };
+      if (Array.isArray(fs?.denyRead) && fs.denyRead.length > 0) {
+        return null;
+      }
+      const cmd = String((inp?.command ?? ''));
+      const classification = classifyBashCommand(cmd);
+      if (classification.level === 'read-only' || classification.level === 'workspace-write') {
+        return {
+          behavior: 'allow',
+          reason: `sandbox: auto-allow ${classification.level} bash (${classification.reason})`,
+        };
+      }
     }
 
     return null;

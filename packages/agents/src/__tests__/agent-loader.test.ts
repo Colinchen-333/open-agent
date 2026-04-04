@@ -1,26 +1,36 @@
-import { describe, it, expect, beforeEach } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 import { AgentLoader } from '../agent-loader.js';
 
 describe('AgentLoader', () => {
   let loader: AgentLoader;
+  let cwd: string;
 
   beforeEach(() => {
+    cwd = mkdtempSync(join(tmpdir(), 'open-agent-agent-loader-'));
     loader = new AgentLoader();
-    loader.loadDefaults('/tmp');
+    loader.loadDefaults(cwd);
   });
 
-  it('loads all 8 built-in agent types', () => {
+  afterEach(() => {
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it('loads all built-in agent types including verifier', () => {
     const agents = loader.list();
     const names = agents.map(([name]) => name);
     expect(names).toContain('Explore');
     expect(names).toContain('Plan');
     expect(names).toContain('code-writer');
     expect(names).toContain('general-purpose');
+    expect(names).toContain('verifier');
     expect(names).toContain('architecture-logic-reviewer');
     expect(names).toContain('Bash');
     expect(names).toContain('open-agent-guide');
     expect(names).toContain('statusline-setup');
-    expect(agents.length).toBeGreaterThanOrEqual(8);
+    expect(agents.length).toBeGreaterThanOrEqual(9);
   });
 
   describe('get()', () => {
@@ -221,6 +231,26 @@ describe('AgentLoader', () => {
     });
   });
 
+  describe('verifier agent', () => {
+    it('is defined', () => {
+      const agent = loader.get('verifier');
+      expect(agent).toBeDefined();
+    });
+
+    it('is read-only plus bash validation', () => {
+      const agent = loader.get('verifier')!;
+      expect(agent.tools).toEqual(['Read', 'Glob', 'Grep', 'Bash']);
+      expect(agent.disallowedTools).toContain('Edit');
+      expect(agent.disallowedTools).toContain('Write');
+      expect(agent.disallowedTools).toContain('Task');
+    });
+
+    it('has mode set to default', () => {
+      const agent = loader.get('verifier')!;
+      expect(agent.mode).toBe('default');
+    });
+  });
+
   describe('register()', () => {
     it('can register a custom agent', () => {
       loader.register('custom-test-agent', {
@@ -239,6 +269,55 @@ describe('AgentLoader', () => {
       });
       const agent = loader.get('Explore');
       expect(agent!.description).toBe('Overridden Explore');
+    });
+  });
+
+  describe('diagnostics', () => {
+    it('reports invalid project agent definitions and skips loading them', () => {
+      const agentDir = join(cwd, '.open-agent', 'agents');
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, 'broken.md'), `---
+description: Broken local agent
+tools: Read,Write
+---
+`);
+
+      const freshLoader = new AgentLoader();
+      freshLoader.loadDefaults(cwd);
+
+      expect(freshLoader.get('broken')).toBeUndefined();
+      expect(freshLoader.getDiagnostics()).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          code: 'agent_invalid_definition',
+          source: 'agent',
+          agentName: 'broken',
+          layer: 'project',
+        }),
+      ]));
+    });
+
+    it('reports when project agents override built-in agent names', () => {
+      const agentDir = join(cwd, '.open-agent', 'agents');
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, 'Explore.md'), `---
+description: Custom Explore
+tools: [Read]
+---
+You are a custom explore agent.
+`);
+
+      const freshLoader = new AgentLoader();
+      freshLoader.loadDefaults(cwd);
+
+      expect(freshLoader.get('Explore')?.description).toBe('Custom Explore');
+      expect(freshLoader.getDiagnostics()).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          code: 'agent_override',
+          source: 'agent',
+          agentName: 'Explore',
+          layer: 'project',
+        }),
+      ]));
     });
   });
 });

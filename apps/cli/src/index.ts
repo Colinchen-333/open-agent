@@ -1,6 +1,9 @@
 #!/usr/bin/env bun
 import { parseArgs, TerminalRenderer, REPL, emitStreamJson, emitStreamJsonInit, TerminalPermissionPrompter, handleSlashCommand } from '@open-agent/cli';
-import { ConversationLoop, SessionManager, ConfigLoader, AutoMemory, buildSystemPrompt, isGitRepository, FileCheckpoint } from '@open-agent/core';
+import { ConversationLoop, SessionManager, ConfigLoader, buildSystemPrompt, isGitRepository, FileCheckpoint, buildTaskOrchestrationTemplates, loadPromptContext } from '@open-agent/core';
+import { createStore, createDefaultAppState } from '@open-agent/state';
+import type { AppState } from '@open-agent/state';
+import { renderApp } from '@open-agent/ink';
 import { createProvider, autoDetectProvider, calculateCost } from '@open-agent/providers';
 import {
   createDefaultToolRegistry,
@@ -9,8 +12,6 @@ import {
   createTaskStopTool,
   createEnterPlanModeTool,
   createExitPlanModeTool,
-  createListMcpResourcesTool,
-  createReadMcpResourceTool,
   createTaskCreateTool,
   createTaskUpdateTool,
   createTaskGetTool,
@@ -18,22 +19,22 @@ import {
   createTeamCreateTool,
   createTeamDeleteTool,
   createSendMessageTool,
-  createToolSearchTool,
-  createSkillTool,
   getToolPromptDescriptions,
   createWorktree,
   cleanupWorktree,
   hasWorktreeChanges,
 } from '@open-agent/tools';
 import { AgentLoader, AgentExecutor, TaskManager, TeamManager } from '@open-agent/agents';
-import { McpManager } from '@open-agent/mcp';
+import type { AgentSession } from '@open-agent/agents';
 import { PermissionEngine } from '@open-agent/permissions';
 import { HookExecutor } from '@open-agent/hooks';
-import type { SDKMessage } from '@open-agent/core';
+import { OpenAgentRuntime, filterCapabilitySnapshot } from '@open-agent/runtime';
+import type { SDKMessage, AgentDefinition, SDKTaskNotificationMessage } from '@open-agent/core';
 import type { PermissionMode } from '@open-agent/core';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
+import { randomUUID } from 'crypto';
 
 const VERSION = '0.1.0';
 
@@ -78,6 +79,7 @@ async function main(): Promise<void> {
   // Model selection — CLI flag > settings.json > provider default
   // ------------------------------------------------------------------
   const model = args.model ?? (settings.defaultModel as string | undefined) ?? getDefaultModel(provider.name);
+  const cliOutputStyle = args.outputFormat === 'stream-json' || args.json === true ? 'stream-json' : 'text';
 
   // ------------------------------------------------------------------
   // Tool registry
@@ -89,6 +91,30 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------
   const agentLoader = new AgentLoader();
   agentLoader.loadDefaults(cwd);
+  const configuredSkillDirs = Array.isArray(settings.skillDirectories)
+    ? (settings.skillDirectories as unknown[])
+        .filter((dir): dir is string => typeof dir === 'string')
+        .map((dir) => require('path').resolve(cwd, dir))
+    : undefined;
+  const runtime = new OpenAgentRuntime({
+    cwd,
+    toolRegistry,
+    availableAgents: new Map(agentLoader.list() as [string, AgentDefinition][]),
+    ...(configuredSkillDirs ? { skillDirectories: configuredSkillDirs } : {}),
+    mcp: {
+      toolNameStyle: 'namespaced',
+      formatResult: (result) => (typeof result === 'string' ? result : JSON.stringify(result)),
+      onToolRegistered: (tool) => {
+        if ((globalThis as any).__openAgentLoop) {
+          (globalThis as any).__openAgentLoop.addTool(tool);
+        }
+      },
+    },
+  });
+  await runtime.initialize();
+  runtime.registerSkillTool();
+  runtime.registerMcpResourceTools();
+  runtime.registerToolSearchTool();
 
   // agentExecutor is initialized after hookExecutor is built (below) so it
   // can receive the hook executor for SubagentStart/Stop events.
@@ -146,6 +172,13 @@ async function main(): Promise<void> {
           prompt,
           outputFile,
           canReadOutputFile: true,
+          task_event: {
+            type: 'system',
+            subtype: 'task_started',
+            task_id: agentId,
+            description: name ?? subagentType,
+            task_type: 'agent',
+          },
           ...(worktreePath ? { worktree_path: worktreePath, worktree_branch: worktreeBranch } : {}),
         });
       }
@@ -168,6 +201,13 @@ async function main(): Promise<void> {
       }
 
       const defaultUsage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: null, cache_read_input_tokens: null, server_tool_use: null, service_tier: null, cache_creation: null };
+      const orchestrationTemplates = buildTaskOrchestrationTemplates({
+        taskId: agentId,
+        status: 'completed',
+        description: name ?? subagentType,
+        summary: summarizePlainText(result),
+        result,
+      });
       return JSON.stringify({
         status: 'completed',
         agentId,
@@ -177,6 +217,23 @@ async function main(): Promise<void> {
         totalTokens: session.totalTokens ?? 0,
         usage: session.usage ?? defaultUsage,
         prompt,
+        orchestration_templates: orchestrationTemplates,
+        task_event: {
+          type: 'system',
+          subtype: 'task_notification',
+          task_id: agentId,
+          status: 'completed',
+          ...(teamName ? { team_name: teamName } : {}),
+          ...(name ? { description: name } : {}),
+          output_file: session.outputFile ?? '',
+          summary: summarizePlainText(result),
+          orchestration_templates: orchestrationTemplates,
+          usage: {
+            total_tokens: session.totalTokens ?? 0,
+            tool_uses: session.totalToolUseCount ?? 0,
+            duration_ms: session.durationMs,
+          },
+        },
         ...(worktreePath ? { worktree_path: worktreePath, worktree_branch: worktreeBranch, worktree_cleaned_up: worktreeCleanedUp } : {}),
       });
     },
@@ -184,9 +241,23 @@ async function main(): Promise<void> {
       const session = agentExecutor.getAgent(agentId);
       if (!session) return null;
       return {
-        status: session.state === 'running' ? 'running' : session.state === 'completed' ? 'completed' : 'failed',
+        status: session.state === 'running'
+          ? 'running'
+          : session.state === 'completed'
+            ? 'completed'
+            : session.state === 'shutdown'
+              ? 'stopped'
+              : 'failed',
         output_file: session.outputFile ?? '',
         result: session.result,
+        summary: summarizePlainText(session.result ?? session.error),
+        team_name: session.teamName,
+        description: session.name ?? session.agentType,
+        usage: {
+          total_tokens: session.totalTokens ?? 0,
+          tool_uses: session.totalToolUseCount ?? 0,
+          duration_ms: session.durationMs,
+        },
       };
     },
   });
@@ -201,9 +272,25 @@ async function main(): Promise<void> {
       const session = agentExecutor.getAgent(agentId);
       if (!session) return null;
       return {
-        status: (session.state === 'running' ? 'running' : session.state === 'completed' ? 'completed' : 'failed') as 'running' | 'completed' | 'failed',
+        status: (
+          session.state === 'running'
+            ? 'running'
+            : session.state === 'completed'
+              ? 'completed'
+              : session.state === 'shutdown'
+                ? 'stopped'
+                : 'failed'
+        ) as 'running' | 'completed' | 'failed' | 'stopped',
         output_file: session.outputFile ?? '',
         result: session.result,
+        summary: summarizePlainText(session.result ?? session.error),
+        team_name: session.teamName,
+        description: session.name ?? session.agentType,
+        usage: {
+          total_tokens: session.totalTokens ?? 0,
+          tool_uses: session.totalToolUseCount ?? 0,
+          duration_ms: session.durationMs,
+        },
       };
     },
     stopBackgroundAgent: (agentId: string) => agentExecutor.stopAgent(agentId),
@@ -229,7 +316,10 @@ async function main(): Promise<void> {
       _savedTools = allTools;
       const readOnlyMap = new Map<string, import('@open-agent/tools').ToolDefinition>();
       for (const [name, tool] of allTools) {
-        if (READ_ONLY_TOOLS.has(name) || name.startsWith('mcp__')) {
+        const isReadOnly = typeof tool.isReadOnly === 'function'
+          ? tool.isReadOnly({})
+          : tool.isReadOnly === true;
+        if (isReadOnly || READ_ONLY_TOOLS.has(name) || name.startsWith('mcp__')) {
           readOnlyMap.set(name, tool);
         }
       }
@@ -253,63 +343,17 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------
   // MCP tools
   // ------------------------------------------------------------------
-  const mcpManager = new McpManager();
-
   // Load MCP server configs from settings (key: mcpServers)
   const mcpServers = (settings.mcpServers ?? {}) as Record<string, any>;
-  const registerMcpTools = async (): Promise<void> => {
-    try {
-      const mcpTools = mcpManager.getAllTools();
-      for (const mcpTool of mcpTools) {
-        // Namespace MCP tools as mcp__<server>__<tool> to match Claude Code convention.
-        const namespacedName = `mcp__${mcpTool.serverName}__${mcpTool.name}`;
-        // Avoid overwriting built-in or already-registered tools.
-        if (toolRegistry.get(namespacedName)) continue;
-        toolRegistry.register({
-          name: namespacedName,
-          description: mcpTool.description ?? '',
-          inputSchema: mcpTool.inputSchema ?? { type: 'object', properties: {} },
-          execute: async (input: any) => {
-            const result = await mcpManager.callTool(mcpTool.serverName, mcpTool.name, input);
-            return typeof result === 'string' ? result : JSON.stringify(result);
-          },
-        });
-      }
-    } catch {
-      // MCP tool registration failed — not fatal, continue without them.
-    }
-  };
   let mcpReadyPromise: Promise<void> | undefined;
   if (Object.keys(mcpServers).length > 0) {
     // Ensure MCP tools are ready before loop creation so they appear in the
     // system prompt and initial tool map from the first turn.
-    mcpReadyPromise = mcpManager
-      .setServers(mcpServers)
-      .then(registerMcpTools)
+    mcpReadyPromise = runtime
+      .setMcpServers(mcpServers)
+      .then(() => undefined)
       .catch(() => {});
   }
-
-  toolRegistry.register(createListMcpResourcesTool({
-    listResources: async (server?: string) => {
-      const all = await mcpManager.getAllResources();
-      return server ? all.filter(r => r.server === server) : all;
-    },
-    readResource: async (server: string, uri: string) => {
-      const result = await mcpManager.readResource(server, uri);
-      return typeof result === 'string' ? result : JSON.stringify(result);
-    },
-  }));
-
-  toolRegistry.register(createReadMcpResourceTool({
-    listResources: async (server?: string) => {
-      const all = await mcpManager.getAllResources();
-      return server ? all.filter(r => r.server === server) : all;
-    },
-    readResource: async (server: string, uri: string) => {
-      const result = await mcpManager.readResource(server, uri);
-      return typeof result === 'string' ? result : JSON.stringify(result);
-    },
-  }));
 
   // ------------------------------------------------------------------
   // Task management tools (TaskCreate / TaskUpdate / TaskGet / TaskList)
@@ -320,8 +364,20 @@ async function main(): Promise<void> {
   const taskManager = new TaskManager(defaultTeamName);
 
   const taskToolsDeps = {
-    createTask: async (params: { subject: string; description: string; activeForm?: string; metadata?: Record<string, unknown> }) => {
-      const item = taskManager.create(params.subject, params.description, params.activeForm, params.metadata);
+    createTask: async (params: {
+      subject: string;
+      description: string;
+      activeForm?: string;
+      metadata?: Record<string, unknown>;
+      priority?: number;
+    }) => {
+      const item = taskManager.create(
+        params.subject,
+        params.description,
+        params.activeForm,
+        params.metadata,
+        params.priority,
+      );
       return { id: item.id, subject: item.subject };
     },
     updateTask: async (params: { taskId: string; [key: string]: unknown }) => {
@@ -341,16 +397,23 @@ async function main(): Promise<void> {
   // Team tools (TeamCreate / TeamDelete / SendMessage)
   // ------------------------------------------------------------------
   const teamManager = new TeamManager();
+  let activeTeamName: string | null = (settings.activeTeam as string | undefined) ?? null;
   const teamToolsDeps = {
     createTeam: async (name: string, description?: string) => {
       teamManager.createTeam(name, description);
+      activeTeamName = name;
       const configPath = join(homedir(), '.open-agent', 'teams', name, 'config.json');
-      return { teamName: name, configPath };
+      const scratchpadPath = teamManager.getScratchpadDir(name);
+      return { teamName: name, configPath, scratchpadPath };
     },
     deleteTeam: async (name: string) => {
       teamManager.deleteTeam(name);
+      if (activeTeamName === name) {
+        activeTeamName = null;
+      }
       return { success: true };
     },
+    getActiveTeam: () => activeTeamName ?? defaultTeamName,
     sendMessage: async (params: {
       type: 'message' | 'broadcast' | 'shutdown_request' | 'shutdown_response' | 'plan_approval_response' | 'plan_approval_request';
       recipient?: string;
@@ -361,7 +424,7 @@ async function main(): Promise<void> {
     }) => {
       // In standalone CLI mode there is no active team context, so we write
       // to the default team inbox so that actual teammate processes can pick it up.
-      const activeTeam = (settings.activeTeam as string) ?? defaultTeamName;
+      const activeTeam = activeTeamName ?? (settings.activeTeam as string | undefined) ?? defaultTeamName;
 
       const msg = {
         type: params.type,
@@ -393,117 +456,10 @@ async function main(): Promise<void> {
   toolRegistry.register(createSendMessageTool(teamToolsDeps));
 
   // ------------------------------------------------------------------
-  // ToolSearch tool — enables deferred/lazy tool loading
-  // Searches both registered tools AND MCP tools (even if not yet registered).
-  // ------------------------------------------------------------------
-  toolRegistry.register(createToolSearchTool({
-    searchTools: async (query: string) => {
-      const q = query.toLowerCase();
-
-      // Search registered tools first
-      const registered = toolRegistry.list()
-        .filter(t => t.name.toLowerCase().includes(q) || t.description.toLowerCase().includes(q))
-        .map(t => ({ name: t.name, description: t.description }));
-
-      // Also search MCP tools that may not yet be in the registry
-      const mcpTools = mcpManager.getAllTools()
-        .filter(t => {
-          const namespacedName = `mcp__${t.serverName}__${t.name}`;
-          return namespacedName.toLowerCase().includes(q) ||
-            t.name.toLowerCase().includes(q) ||
-            (t.description ?? '').toLowerCase().includes(q);
-        })
-        .filter(t => !toolRegistry.get(`mcp__${t.serverName}__${t.name}`))
-        .map(t => ({ name: `mcp__${t.serverName}__${t.name}`, description: t.description ?? `MCP tool from ${t.serverName}` }));
-
-      return [...registered, ...mcpTools];
-    },
-    selectTool: async (name: string) => {
-      // First try the registry
-      const existing = toolRegistry.get(name);
-      if (existing) return existing;
-
-      // Fall back: find in MCP tools and dynamically create a ToolDefinition.
-      // Accept both namespaced (mcp__server__tool) and raw tool names.
-      const mcpTool = mcpManager.getAllTools().find(t =>
-        `mcp__${t.serverName}__${t.name}` === name || t.name === name
-      );
-      if (mcpTool) {
-        const namespacedName = `mcp__${mcpTool.serverName}__${mcpTool.name}`;
-        const tool = {
-          name: namespacedName,
-          description: mcpTool.description ?? '',
-          inputSchema: mcpTool.inputSchema ?? { type: 'object', properties: {} },
-          execute: async (input: any) => {
-            const result = await mcpManager.callTool(mcpTool.serverName, mcpTool.name, input);
-            return typeof result === 'string' ? result : JSON.stringify(result);
-          },
-        };
-        // Register in both the registry and the live loop's tool map
-        toolRegistry.register(tool);
-        if ((globalThis as any).__openAgentLoop) {
-          (globalThis as any).__openAgentLoop.addTool(tool);
-        }
-        return tool;
-      }
-
-      return null;
-    },
-  }));
-
-  // ------------------------------------------------------------------
-  // Skill tool — execute named slash-command skills
-  // ------------------------------------------------------------------
-  toolRegistry.register(createSkillTool({
-    executeSkill: async (name: string, skillArgs?: string) => {
-      // Skills are stored as markdown files under ~/.open-agent/skills/ or
-      // <cwd>/.open-agent/skills/.  For now we return a stub so the tool is
-      // registered and the LLM can call it; a full executor can be wired later.
-      const skillDirs = [
-        join(homedir(), '.open-agent', 'skills'),
-        join(cwd, '.open-agent', 'skills'),
-      ];
-      for (const dir of skillDirs) {
-        const skillPath = join(dir, `${name}.md`);
-        if (existsSync(skillPath)) {
-          let content = readFileSync(skillPath, 'utf-8');
-          // Substitute $ARGUMENTS placeholder with actual args
-          if (skillArgs) {
-            content = content.replace(/\$ARGUMENTS/g, skillArgs);
-          }
-          // Return as a rendered prompt for the LLM to act on
-          return `<skill name="${name}">\n${content}\n</skill>`;
-        }
-      }
-      return `Skill "${name}" not found. Searched: ${skillDirs.join(', ')}`;
-    },
-    listSkills: () => {
-      const skills: { name: string; description: string }[] = [];
-      const skillDirs = [
-        join(homedir(), '.open-agent', 'skills'),
-        join(cwd, '.open-agent', 'skills'),
-      ];
-      for (const dir of skillDirs) {
-        if (existsSync(dir)) {
-          try {
-            const { readdirSync: readDir } = require('fs') as typeof import('fs');
-            const files = readDir(dir).filter((f: string) => f.endsWith('.md'));
-            for (const f of files) {
-              skills.push({ name: f.replace(/\.md$/, ''), description: `Skill from ${dir}` });
-            }
-          } catch {
-            // Directory unreadable — skip
-          }
-        }
-      }
-      return skills;
-    },
-  }));
-
-  // ------------------------------------------------------------------
   // Session management
   // ------------------------------------------------------------------
   const sessionMgr = new SessionManager();
+  const pendingNotificationExecutor = new AgentExecutor();
   let sessionId: string;
   let initialMessages: import('@open-agent/providers').Message[] = [];
 
@@ -511,13 +467,31 @@ async function main(): Promise<void> {
     // Resume an explicit session by ID — restore its conversation history.
     // Uses cross-CWD fallback so --resume works even from a different directory.
     sessionId = args.resume;
-    initialMessages = sessionMgr.loadTranscriptAnyCwd(sessionId, cwd);
+    const transcriptCwd = sessionMgr.getSession(cwd, sessionId)?.cwd ?? cwd;
+    const pendingTaskNotifications = collectPendingTaskNotificationsForSession(
+      sessionId,
+      sessionMgr.readTranscript(transcriptCwd, sessionId),
+      pendingNotificationExecutor.listPersistedAgents(),
+    );
+    for (const message of pendingTaskNotifications) {
+      sessionMgr.appendToTranscript(transcriptCwd, sessionId, message);
+    }
+    initialMessages = sessionMgr.loadTranscriptAnyCwd(sessionId, transcriptCwd);
   } else if (args.continue) {
     // Continue from the most recent session for this CWD, or create one.
     const latest = sessionMgr.getLatestSession(cwd);
     if (latest) {
       sessionId = latest.id;
-      initialMessages = sessionMgr.loadTranscript(cwd, sessionId);
+      const transcriptCwd = latest.cwd ?? cwd;
+      const pendingTaskNotifications = collectPendingTaskNotificationsForSession(
+        sessionId,
+        sessionMgr.readTranscript(transcriptCwd, sessionId),
+        pendingNotificationExecutor.listPersistedAgents(),
+      );
+      for (const message of pendingTaskNotifications) {
+        sessionMgr.appendToTranscript(transcriptCwd, sessionId, message);
+      }
+      initialMessages = sessionMgr.loadTranscript(transcriptCwd, sessionId);
     } else {
       sessionId = sessionMgr.createSession(cwd, model).id;
     }
@@ -555,6 +529,19 @@ async function main(): Promise<void> {
     (args.permissionMode as PermissionMode | undefined) ??
     (settings.permissionMode as PermissionMode | undefined) ??
     'default';
+  try {
+    sessionMgr.updateSession(
+      cwd,
+      sessionId,
+      {
+        permissionMode: effectivePermissionMode,
+        outputStyle: cliOutputStyle,
+      },
+      { touch: false },
+    );
+  } catch {
+    // Non-fatal
+  }
 
   const permissionEngine = new PermissionEngine({
     mode: effectivePermissionMode,
@@ -587,9 +574,6 @@ async function main(): Promise<void> {
   // AGENT.md config and Auto-Memory
   // ------------------------------------------------------------------
   const agentInstructions = configLoader.loadAgentMd(cwd);
-  const autoMemory = new AutoMemory(cwd);
-  const memoryContent = autoMemory.readMemory();
-
   // ------------------------------------------------------------------
   // File checkpoint — records file states before Write/Edit operations
   // so the user can /rewind to any prior state.
@@ -726,10 +710,35 @@ async function main(): Promise<void> {
   const isPrintMode = Boolean(args.print && args.prompt);
   const availableTools = isPrintMode ? [] : toolRegistry.list();
   const toolNames = availableTools.map(t => t.name);
+  const runtimeSnapshot = runtime.buildSnapshot();
+  const promptCapabilitySnapshot = filterCapabilitySnapshot(runtimeSnapshot.capabilitySnapshot, toolNames);
+  const isGitRepo = isGitRepository(cwd);
+  const promptContext = loadPromptContext({
+    cwd,
+    includeGit: isGitRepo,
+    includeMemory: true,
+    includeAgentInstructions: true,
+    additionalDirectories,
+  });
+  const connectedMcpServers = runtimeSnapshot.mcpServers.filter((server) => server.status === 'connected');
+  const configuredActiveTeam = activeTeamName ?? (settings.activeTeam as string | undefined) ?? defaultTeamName;
+  const coordinatorScratchpadDir = teamManager.getTeam(configuredActiveTeam)
+    ? teamManager.getScratchpadDir(configuredActiveTeam)
+    : join(cwd, '.open-agent', 'scratchpad');
 
   // ------------------------------------------------------------------
   // Conversation loop
   // ------------------------------------------------------------------
+  const appStore = createStore<AppState>(createDefaultAppState({
+    sessionId,
+    cwd,
+    model,
+    permissionMode: effectivePermissionMode,
+    tools: new Map(availableTools.map((t) => [t.name, t])),
+    thinkingConfig: effectiveThinking,
+    verbose: args.verbose ?? false,
+  }));
+
   const loop = new ConversationLoop({
     provider,
     // Pass the full tool map; ConversationLoop expects Map<name, ToolDefinition>.
@@ -741,16 +750,29 @@ async function main(): Promise<void> {
       tools: toolNames,
       permissionMode: effectivePermissionMode,
       agentInstructions: [
-        ...agentInstructions,
+        ...promptContext.agentInstructions,
         ...customInstructionsList,
-        ...(additionalDirectories.length > 0
-          ? [`Additional working directories:\n${additionalDirectories.map((d: string) => `  - ${d}`).join('\n')}\nYou may read, search, and edit files in these directories in addition to the primary working directory.`]
-          : []),
       ],
-      memoryContent,
-      memoryDir: autoMemory.getDir(),
-      isGitRepo: isGitRepository(cwd),
+      memoryContent: promptContext.memoryContent,
+      memoryDir: promptContext.memoryDir,
+      isGitRepo,
+      gitContext: promptContext.gitContext,
+      contextSections: promptContext.sections,
       toolDescriptions: getToolPromptDescriptions(),
+      runtimeSnapshot: {
+        agents: runtimeSnapshot.agents,
+        skills: runtimeSnapshot.skills,
+        mcpServers: runtimeSnapshot.mcpServers,
+        capabilitySnapshot: promptCapabilitySnapshot,
+        coordinator: {
+          workerTools: toolNames.filter((name) => name !== 'Task').sort(),
+          activeTeam: teamManager.getTeam(configuredActiveTeam) ? configuredActiveTeam : undefined,
+          scratchpadDir: coordinatorScratchpadDir,
+          canUseSkills: toolNames.includes('Skill') && runtimeSnapshot.skills.length > 0,
+          canUseMcpTools: connectedMcpServers.length > 0,
+        },
+      },
+      outputStyle: cliOutputStyle,
       knowledgeCutoff: 'August 2025',
     }),
     maxTurns: effectiveMaxTurns,
@@ -764,6 +786,8 @@ async function main(): Promise<void> {
     hookExecutor,
     costCalculator: calculateCost,
     initialMessages: initialMessages.length > 0 ? initialMessages : undefined,
+    getAppState: () => appStore.getState(),
+    setAppState: (updater) => appStore.setState(updater),
   });
 
   // Expose loop for plan mode tool access
@@ -811,7 +835,14 @@ async function main(): Promise<void> {
     // Print mode: one-shot with full tools, streams only text to stdout.
     // Matches Claude Code's `-p` behavior — runs agent loop then exits.
     if (isStreamJson) {
-      emitStreamJsonInit({ tools: toolNames, model, cwd, permissionMode: effectivePermissionMode, sessionId });
+      emitStreamJsonInit({
+        tools: toolNames,
+        capabilitySnapshot: runtime.buildSnapshot().capabilitySnapshot,
+        model,
+        cwd,
+        permissionMode: effectivePermissionMode,
+        sessionId,
+      });
     }
     for await (const message of loop.run(args.prompt)) {
       if (isStreamJson) {
@@ -837,7 +868,14 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------
   if (args.prompt) {
     if (isStreamJson) {
-      emitStreamJsonInit({ tools: toolNames, model, cwd, permissionMode: effectivePermissionMode, sessionId });
+      emitStreamJsonInit({
+        tools: toolNames,
+        capabilitySnapshot: runtime.buildSnapshot().capabilitySnapshot,
+        model,
+        cwd,
+        permissionMode: effectivePermissionMode,
+        sessionId,
+      });
     }
     await executePrompt(loop, args.prompt, renderer, isStreamJson, sessionMgr, cwd, sessionId);
     // Fire SessionEnd before exiting single-prompt mode.
@@ -862,6 +900,19 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------
   // Interactive REPL mode
   // ------------------------------------------------------------------
+
+  // Experimental Ink UI mode (--ink flag)
+  if (args.ink) {
+    const waitUntilExit = renderApp({
+      store: appStore,
+      loop,
+      model,
+      cwd,
+    });
+    await waitUntilExit();
+    process.exit(0);
+  }
+
   renderer.renderWelcome(model, cwd);
   const repl = new REPL(model);
 
@@ -884,6 +935,7 @@ async function main(): Promise<void> {
         model,
         sessionId,
         tools: toolNames,
+        capabilities: runtime.buildSnapshot().capabilitySnapshot,
         checkpoint,
         sessionMgr,
         permissionMode: effectivePermissionMode,
@@ -893,11 +945,41 @@ async function main(): Promise<void> {
           name,
           description: def.description,
         })),
-        mcpStatus: mcpManager.getServerStatus().map((s: any) => ({
+        skills: runtime.listSkills().map((skill) => ({
+          name: skill.name,
+          description: skill.description,
+          source: skill.source,
+        })),
+        mcpStatus: runtime.listMcpServerStatus().map((s: any) => ({
           name: s.name,
           status: s.status,
         })),
         permissionEngine,
+        listBackgroundAgents: () =>
+          agentExecutor.listPersistedAgents().map((session) => ({
+            task_id: session.agentId,
+            info: {
+              status: session.state === 'running'
+                ? 'running'
+                : session.state === 'completed'
+                  ? 'completed'
+                  : session.state === 'shutdown'
+                    ? 'stopped'
+                    : 'failed',
+              output_file: session.outputFile ?? '',
+              result: session.result,
+              summary: summarizePlainText(session.result ?? session.error),
+              team_name: session.teamName,
+              description: session.name ?? session.agentType,
+              usage: {
+                total_tokens: session.totalTokens ?? 0,
+                tool_uses: session.totalToolUseCount ?? 0,
+                duration_ms: session.durationMs,
+              },
+            },
+          })),
+        getBackgroundAgent: agentManagementDeps.getBackgroundAgent,
+        stopBackgroundAgent: agentManagementDeps.stopBackgroundAgent,
       });
       if (result) {
         if (result.shouldExit) break;
@@ -951,6 +1033,19 @@ async function executePrompt(
   cwd: string,
   sessionId: string,
 ): Promise<void> {
+  try {
+    const current = sessionMgr.getSession(cwd, sessionId);
+    if (!current?.createdFromPrompt) {
+      sessionMgr.updateSession(
+        cwd,
+        sessionId,
+        buildPromptSessionMetadata(prompt),
+        { touch: false },
+      );
+    }
+  } catch {
+    // Non-fatal
+  }
   if (!isStreamJson) {
     renderer.startSpinner('Thinking');
   }
@@ -985,11 +1080,32 @@ function renderMessage(renderer: TerminalRenderer, message: SDKMessage): void {
     case 'result':
       renderer.renderResult(message as Record<string, any>);
       break;
+    case 'prompt_suggestion':
+      renderer.renderPromptSuggestion((message as any).suggestion, (message as any).scaffold);
+      break;
+    case 'tool_use_summary':
+      renderer.renderToolUseSummary((message as any).summary);
+      break;
     case 'system':
       // Per-turn cost/token summary emitted by the conversation loop.
       if ((message as any).turn_cost !== undefined) {
         const tc = message as any;
         renderer.renderTurnCost(tc.turn_input_tokens, tc.turn_output_tokens, tc.cumulative_cost);
+      } else if ((message as any).subtype === 'compact_boundary') {
+        renderer.renderCompactBoundary(
+          (message as any).compact_metadata?.pre_tokens ?? 0,
+          (message as any).compact_metadata?.trigger ?? 'auto',
+        );
+      } else if ((message as any).subtype === 'task_started') {
+        renderer.renderTaskStarted((message as any).description, (message as any).task_id);
+      } else if ((message as any).subtype === 'task_progress') {
+        renderer.renderTaskProgress((message as any).description, (message as any).usage, (message as any).last_tool_name);
+      } else if ((message as any).subtype === 'task_notification') {
+        renderer.renderTaskNotification(
+          (message as any).status,
+          (message as any).summary,
+          (message as any).usage,
+        );
       }
       break;
     // 'user', 'assistant' messages are informational only; no
@@ -1000,6 +1116,120 @@ function renderMessage(renderer: TerminalRenderer, message: SDKMessage): void {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+function buildTaskNotificationFingerprint(input: {
+  task_id?: unknown;
+  status?: unknown;
+  completed_at?: unknown;
+}): string | null {
+  if (typeof input.task_id !== 'string' || typeof input.status !== 'string') {
+    return null;
+  }
+  const completedAt = typeof input.completed_at === 'string' ? input.completed_at : '';
+  return `${input.task_id}::${input.status}::${completedAt}`;
+}
+
+function mapAgentStateToTaskStatus(
+  state: AgentSession['state'],
+): SDKTaskNotificationMessage['status'] | null {
+  if (state === 'completed') return 'completed';
+  if (state === 'failed') return 'failed';
+  if (state === 'shutdown') return 'stopped';
+  return null;
+}
+
+function collectPendingTaskNotificationsForSession(
+  sessionId: string,
+  transcriptEntries: unknown[],
+  childSessions: AgentSession[],
+): SDKTaskNotificationMessage[] {
+  const seen = new Set<string>();
+
+  for (const entry of transcriptEntries) {
+    if (!entry || typeof entry !== 'object') continue;
+    const record = entry as Record<string, unknown>;
+    if (record.type !== 'system' || record.subtype !== 'task_notification') continue;
+    const fingerprint = buildTaskNotificationFingerprint(record);
+    if (fingerprint) {
+      seen.add(fingerprint);
+    }
+  }
+
+  return childSessions
+    .filter((session) => session.parentSessionId === sessionId)
+    .filter((session) => mapAgentStateToTaskStatus(session.state) !== null)
+    .filter((session) => typeof session.completedAt === 'string' && session.completedAt.length > 0)
+    .sort((left, right) => new Date(left.completedAt ?? 0).getTime() - new Date(right.completedAt ?? 0).getTime())
+    .filter((session) => {
+      const fingerprint = buildTaskNotificationFingerprint({
+        task_id: session.agentId,
+        status: mapAgentStateToTaskStatus(session.state),
+        completed_at: session.completedAt,
+      });
+      return fingerprint ? !seen.has(fingerprint) : false;
+    })
+    .map((session) => {
+      const status = mapAgentStateToTaskStatus(session.state)!;
+      return {
+        type: 'system' as const,
+        subtype: 'task_notification' as const,
+        task_id: session.agentId,
+        status,
+        ...(session.teamName ? { team_name: session.teamName } : {}),
+        completed_at: session.completedAt,
+        output_file: session.outputFile ?? '',
+        summary: summarizePlainText(session.result ?? session.error),
+        ...(session.result ?? session.error ? { result: session.result ?? session.error } : {}),
+        ...(session.name ?? session.agentType ? { description: session.name ?? session.agentType } : {}),
+        orchestration_templates: buildTaskOrchestrationTemplates({
+          taskId: session.agentId,
+          status,
+          description: session.name ?? session.agentType,
+          summary: summarizePlainText(session.result ?? session.error),
+          result: session.result ?? session.error,
+        }),
+        ...(session.totalTokens !== undefined || session.totalToolUseCount !== undefined || session.durationMs !== undefined
+          ? {
+              usage: {
+                total_tokens: session.totalTokens ?? 0,
+                tool_uses: session.totalToolUseCount ?? 0,
+                duration_ms: session.durationMs ?? 0,
+              },
+            }
+          : {}),
+        uuid: randomUUID(),
+        session_id: sessionId,
+      };
+    });
+}
+
+function normalizeOptionalString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function truncateText(text: string, maxLength: number): string {
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function summarizePlainText(text?: string): string {
+  const normalized = normalizeOptionalString(text);
+  if (!normalized) return 'No summary available.';
+  return truncateText(normalized.replace(/\s+/g, ' '), 200);
+}
+
+function buildPromptSessionMetadata(
+  prompt: string,
+): { title?: string; summary?: string; createdFromPrompt?: string } {
+  const normalized = normalizeOptionalString(prompt);
+  if (!normalized) return {};
+  return {
+    title: truncateText(normalized.split('\n')[0].replace(/\s+/g, ' '), 80),
+    summary: truncateText(normalized.replace(/\s+/g, ' '), 200),
+    createdFromPrompt: truncateText(normalized, 4000),
+  };
+}
+
 function getDefaultModel(providerName: string): string {
   switch (providerName) {
     case 'anthropic':

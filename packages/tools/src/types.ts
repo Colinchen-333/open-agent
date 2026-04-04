@@ -24,6 +24,7 @@ export interface BashInput {
   timeout?: number;
   description?: string;
   run_in_background?: boolean;
+  dangerouslyDisableSandbox?: boolean;
 }
 
 export interface GlobInput {
@@ -77,14 +78,64 @@ export interface GrepOutput {
   numMatches?: number;
 }
 
+export type ToolCapabilityCategory =
+  | 'filesystem'
+  | 'shell'
+  | 'search'
+  | 'web'
+  | 'task'
+  | 'agent'
+  | 'workspace'
+  | 'configuration'
+  | 'skill'
+  | 'planning'
+  | 'mcp'
+  | 'utility'
+  | 'other';
+
+export type ToolCapabilityRisk = 'low' | 'medium' | 'high';
+
+export interface ToolCapability {
+  category: ToolCapabilityCategory;
+  tags?: string[];
+  risk?: ToolCapabilityRisk;
+  needsWorkspaceWrite?: boolean;
+  concurrencySafe?: boolean;
+  readOnly?: boolean;
+}
+
+export interface ResolvedToolCapability extends ToolCapability {
+  source: 'explicit' | 'derived';
+}
+
+export interface ToolCapabilityExportEntry {
+  name: string;
+  description: string;
+  capability: ResolvedToolCapability;
+}
+
+export interface ToolCapabilityManifest {
+  tools: ToolCapabilityExportEntry[];
+}
+
 // Tool definition interface
 export interface ToolDefinition {
   name: string;
   description: string;
   inputSchema: Record<string, any>; // JSON Schema
   execute(input: any, context: ToolContext): Promise<any>;
+  /** Optional short past-tense summary label used for tool_use_summary events. */
+  getToolUseSummary?: (input: any, result?: unknown, isError?: boolean) => string | null;
   /** Custom timeout in milliseconds. Overrides the default 60s timeout in ConversationLoop. */
   timeout?: number;
+  /** Optional JSON schema describing the structured result shape. */
+  outputSchema?: Record<string, any>;
+  /** Whether this tool is read-only for the given invocation. Defaults to false when omitted. */
+  isReadOnly?: boolean | ((input: any) => boolean);
+  /** Whether this tool may safely run in parallel with other tools. Defaults to true when omitted. */
+  isConcurrencySafe?: boolean | ((input: any) => boolean);
+  /** Optional capability metadata for plan, routing, and export layers. */
+  capability?: ToolCapability;
 }
 
 export interface ToolContext {
@@ -98,6 +149,10 @@ export interface ToolContext {
    * Edit/Write tools use this to enforce "read before edit" safety.
    */
   fileReadTracker?: FileReadTracker;
+  /** Reactive state store getter — provided when a store is wired in. */
+  getAppState?: () => any;
+  /** Reactive state store updater — provided when a store is wired in. */
+  setAppState?: (updater: (prev: any) => any) => void;
 }
 
 /**

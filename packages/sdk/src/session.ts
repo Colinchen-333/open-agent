@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import type { SDKMessage, SDKUserMessage, SDKResultMessage } from '@open-agent/core';
 import { SessionManager } from '@open-agent/core';
 import type { Message } from '@open-agent/providers';
-import type { SessionOptions, Session, QueryOptions } from './types.js';
+import type { SessionOptions, Session, Query, QueryOptions } from './types.js';
 import { query } from './query.js';
 
 // --------------------------------------------------------------------------
@@ -86,7 +86,73 @@ export function forkSession(sessionId: string, options?: QueryOptions): SDKSessi
  * The session handle returned by `createSession` / `resumeSession`.
  * Each call to `send()` runs one conversation turn and yields SDK messages.
  */
-export interface SDKSession {
+type SessionControlMethods = Pick<
+  Query,
+  | 'interrupt'
+  | 'setPermissionMode'
+  | 'setModel'
+  | 'setMaxThinkingTokens'
+  | 'supportedCommands'
+  | 'supportedModels'
+  | 'supportedAgents'
+  | 'supportedSkills'
+  | 'readRuntimeControlPlane'
+  | 'listRuntimeDiagnostics'
+  | 'readOrchestrationControlPlane'
+  | 'mcpServerStatus'
+  | 'accountInfo'
+  | 'initializationResult'
+  | 'sessionInfo'
+  | 'listTeams'
+  | 'getTeam'
+  | 'createTeam'
+  | 'deleteTeam'
+  | 'getActiveTeam'
+  | 'setActiveTeam'
+  | 'sendTeamMessage'
+  | 'readTeamInbox'
+  | 'acknowledgeTeamInbox'
+  | 'listPendingTeamApprovals'
+  | 'respondToTeamApproval'
+  | 'getTeamInboxCount'
+  | 'readTimelineInbox'
+  | 'subscribeOrchestrationEvents'
+  | 'subscribeTimeline'
+  | 'executeFollowUp'
+  | 'listWorkers'
+  | 'getWorker'
+  | 'getWorkerFollowUps'
+  | 'launchWorker'
+  | 'launchVerifier'
+  | 'resumeWorker'
+  | 'stopWorker'
+  | 'listTasks'
+  | 'getTask'
+  | 'createTask'
+  | 'updateTask'
+  | 'claimNextTask'
+  | 'heartbeatTask'
+  | 'releaseTask'
+  | 'startTaskDispatcher'
+  | 'resumeTaskDispatcher'
+  | 'getTaskDispatcher'
+  | 'listTaskDispatchers'
+  | 'inspectTaskDispatcherHealth'
+  | 'getTaskDispatcherDiagnosis'
+  | 'listTaskDispatcherDiagnoses'
+  | 'requeueTaskDispatcherAssignment'
+  | 'stopTaskDispatcher'
+  | 'listBackgroundTasks'
+  | 'getBackgroundTask'
+  | 'stopTask'
+  | 'streamInput'
+  | 'reconnectMcpServer'
+  | 'toggleMcpServer'
+  | 'setMcpServers'
+  | 'rewindFiles'
+>;
+
+export interface SDKSession extends SessionControlMethods {
   /** Stable identifier for this session. */
   readonly sessionId: string;
   /**
@@ -187,8 +253,10 @@ function _buildSession(
 ): SDKSession {
   let closed = false;
   const abortController = options?.abortController ?? new AbortController();
-  // Conversation history accumulates across turns so the model retains context.
-  const history: Message[] = initialMessages ? [...initialMessages] : [];
+  let activeTurn = false;
+  const messageQueue: SDKUserMessage[] = [];
+  let resolveNext: ((msg: SDKUserMessage) => void) | null = null;
+  let rejectNext: ((err: Error) => void) | null = null;
 
   // Session manager for persisting transcripts when requested.
   const shouldPersist = options?.persistSession ?? false;
@@ -196,11 +264,76 @@ function _buildSession(
   const cwd = options?.cwd ?? process.cwd();
   if (sessionMgr) {
     try {
-      sessionMgr.ensureSession(cwd, sessionId, options?.model ?? 'unknown');
+      sessionMgr.ensureSession(cwd, sessionId, options?.model ?? 'unknown', {
+        ...(options?.permissionMode ? { permissionMode: options.permissionMode } : {}),
+        ...(options?.outputStyle ? { outputStyle: options.outputStyle } : {}),
+        ...(options?.language ? { language: options.language } : {}),
+        ...(options?.sessionTitle ? { title: options.sessionTitle, summary: options.sessionTitle } : {}),
+      });
     } catch {
       // Non-critical: keep session usable even if metadata initialization fails.
     }
   }
+
+  async function* userMessages(): AsyncIterable<SDKUserMessage> {
+    while (!closed) {
+      if (messageQueue.length > 0) {
+        yield messageQueue.shift()!;
+      } else {
+        try {
+          yield await new Promise<SDKUserMessage>((resolve, reject) => {
+            resolveNext = resolve;
+            rejectNext = reject;
+          });
+        } catch {
+          return;
+        }
+      }
+    }
+  }
+
+  const q = query({
+    prompt: userMessages(),
+    options: {
+      ...options,
+      sessionId,
+      abortController,
+      ...(initialMessages && initialMessages.length > 0 ? { initialMessages } : {}),
+      persistSession: false,
+      ...(sessionMgr ? { sessionManager: sessionMgr } : {}),
+    },
+  });
+
+  const enqueueMessage = (message: SDKUserMessage): void => {
+    if (resolveNext) {
+      const resolve = resolveNext;
+      resolveNext = null;
+      rejectNext = null;
+      resolve(message);
+    } else {
+      messageQueue.push(message);
+    }
+  };
+
+  const persistTurnMessage = (msg: SDKMessage): void => {
+    if (!sessionMgr) return;
+    if (msg.type === 'user' || msg.type === 'assistant' || msg.type === 'tool_result') {
+      try {
+        sessionMgr.appendToTranscript(cwd, sessionId, msg);
+      } catch {
+        // Non-critical
+      }
+      return;
+    }
+    if (msg.type === 'result') {
+      try {
+        sessionMgr.appendToTranscript(cwd, sessionId, msg);
+        sessionMgr.touchSession(cwd, sessionId);
+      } catch {
+        // Non-critical
+      }
+    }
+  };
 
   return {
     get sessionId(): string {
@@ -211,56 +344,169 @@ function _buildSession(
       if (closed) {
         throw new Error(`Session ${sessionId} is closed.`);
       }
+      if (activeTurn) {
+        throw new Error(`Session ${sessionId} already has an active turn.`);
+      }
 
-      // Each send() uses a fresh query() call with accumulated history
-      // so the ConversationLoop sees the full prior context.
-      const q = query(
-        message,
-        __internal_buildSessionTurnQueryOptions(options, sessionId, abortController, history),
-      );
-
-      try {
-        for await (const msg of q) {
-          // Capture user/assistant turns into history for the next send().
-          if (msg.type === 'user' || msg.type === 'assistant' || msg.type === 'tool_result') {
-            __internal_appendSdkMessageToHistory(history, msg);
-            // Persist to disk if requested.
-            if (sessionMgr) {
-              try {
-                sessionMgr.appendToTranscript(cwd, sessionId, msg);
-              } catch {
-                // Non-critical: don't crash if disk write fails.
-              }
-            }
+       if (sessionMgr) {
+        try {
+          const current = sessionMgr.getSession(cwd, sessionId);
+          if (!current?.createdFromPrompt) {
+            sessionMgr.updateSession(
+              cwd,
+              sessionId,
+              buildPromptSessionMetadata(message, options?.sessionTitle),
+              { touch: false },
+            );
           }
-
+        } catch {
+          // Non-critical
+        }
+      }
+      const sdkMessage: SDKUserMessage = {
+        type: 'user',
+        message: { role: 'user', content: message },
+        parent_tool_use_id: null,
+        uuid: randomUUID(),
+        session_id: sessionId,
+      };
+      enqueueMessage(sdkMessage);
+      activeTurn = true;
+      try {
+        while (true) {
+          const next = await q.next();
+          if (next.done) {
+            return;
+          }
+          const msg = next.value;
+          persistTurnMessage(msg);
           yield msg;
-          // Stop iterating this turn once we get the result.
           if (msg.type === 'result') {
-            if (sessionMgr) {
-              try {
-                sessionMgr.appendToTranscript(cwd, sessionId, msg);
-                sessionMgr.touchSession(cwd, sessionId);
-              } catch { /* non-critical */ }
-            }
             break;
           }
         }
       } finally {
-        q.close();
+        activeTurn = false;
       }
     },
 
+    interrupt: (...args) => q.interrupt(...args),
+    setPermissionMode: (...args) => q.setPermissionMode(...args),
+    setModel: (...args) => q.setModel(...args),
+    setMaxThinkingTokens: (...args) => q.setMaxThinkingTokens(...args),
+    supportedCommands: (...args) => q.supportedCommands(...args),
+    supportedModels: (...args) => q.supportedModels(...args),
+    supportedAgents: (...args) => q.supportedAgents(...args),
+    supportedSkills: (...args) => q.supportedSkills(...args),
+    readRuntimeControlPlane: (...args) => q.readRuntimeControlPlane(...args),
+    listRuntimeDiagnostics: (...args) => q.listRuntimeDiagnostics(...args),
+    readOrchestrationControlPlane: (...args) => q.readOrchestrationControlPlane(...args),
+    mcpServerStatus: (...args) => q.mcpServerStatus(...args),
+    accountInfo: (...args) => q.accountInfo(...args),
+    initializationResult: (...args) => q.initializationResult(...args),
+    sessionInfo: (...args) => q.sessionInfo(...args),
+    listTeams: (...args) => q.listTeams(...args),
+    getTeam: (...args) => q.getTeam(...args),
+    createTeam: (...args) => q.createTeam(...args),
+    deleteTeam: (...args) => q.deleteTeam(...args),
+    getActiveTeam: (...args) => q.getActiveTeam(...args),
+    setActiveTeam: (...args) => q.setActiveTeam(...args),
+    sendTeamMessage: (...args) => q.sendTeamMessage(...args),
+    readTeamInbox: (...args) => q.readTeamInbox(...args),
+    acknowledgeTeamInbox: (...args) => q.acknowledgeTeamInbox(...args),
+    listPendingTeamApprovals: (...args) => q.listPendingTeamApprovals(...args),
+    respondToTeamApproval: (...args) => q.respondToTeamApproval(...args),
+    getTeamInboxCount: (...args) => q.getTeamInboxCount(...args),
+    readTimelineInbox: (...args) => q.readTimelineInbox(...args),
+    subscribeOrchestrationEvents: (...args) => q.subscribeOrchestrationEvents(...args),
+    subscribeTimeline: (...args) => q.subscribeTimeline(...args),
+    executeFollowUp: (...args) => q.executeFollowUp(...args),
+    listWorkers: (...args) => q.listWorkers(...args),
+    getWorker: (...args) => q.getWorker(...args),
+    getWorkerFollowUps: (...args) => q.getWorkerFollowUps(...args),
+    launchWorker: (...args) => q.launchWorker(...args),
+    launchVerifier: (...args) => q.launchVerifier(...args),
+    resumeWorker: (...args) => q.resumeWorker(...args),
+    stopWorker: (...args) => q.stopWorker(...args),
+    listTasks: (...args) => q.listTasks(...args),
+    getTask: (...args) => q.getTask(...args),
+    createTask: (...args) => q.createTask(...args),
+    updateTask: (...args) => q.updateTask(...args),
+    claimNextTask: (...args) => q.claimNextTask(...args),
+    heartbeatTask: (...args) => q.heartbeatTask(...args),
+    releaseTask: (...args) => q.releaseTask(...args),
+    dispatchNextTask: (...args) => q.dispatchNextTask(...args),
+    startTaskDispatcher: (...args) => q.startTaskDispatcher(...args),
+    resumeTaskDispatcher: (...args) => q.resumeTaskDispatcher(...args),
+    getTaskDispatcher: (...args) => q.getTaskDispatcher(...args),
+    listTaskDispatchers: (...args) => q.listTaskDispatchers(...args),
+    inspectTaskDispatcherHealth: (...args) => q.inspectTaskDispatcherHealth(...args),
+    getTaskDispatcherDiagnosis: (...args) => q.getTaskDispatcherDiagnosis(...args),
+    listTaskDispatcherDiagnoses: (...args) => q.listTaskDispatcherDiagnoses(...args),
+    requeueTaskDispatcherAssignment: (...args) => q.requeueTaskDispatcherAssignment(...args),
+    stopTaskDispatcher: (...args) => q.stopTaskDispatcher(...args),
+    listBackgroundTasks: (...args) => q.listBackgroundTasks(...args),
+    getBackgroundTask: (...args) => q.getBackgroundTask(...args),
+    stopTask: (...args) => q.stopTask(...args),
+    streamInput: (...args) => q.streamInput(...args),
+    reconnectMcpServer: (...args) => q.reconnectMcpServer(...args),
+    toggleMcpServer: (...args) => q.toggleMcpServer(...args),
+    setMcpServers: (...args) => q.setMcpServers(...args),
+    rewindFiles: (...args) => q.rewindFiles(...args),
+
     close(): void {
+      if (closed) return;
       closed = true;
+      if (rejectNext) {
+        const reject = rejectNext;
+        resolveNext = null;
+        rejectNext = null;
+        reject(new Error('Session closed'));
+      }
       if (!abortController.signal.aborted) {
         abortController.abort();
       }
+      q.close();
     },
 
     async [Symbol.asyncDispose](): Promise<void> {
       this.close();
     },
+  };
+}
+
+function normalizeOptionalString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function truncateText(text: string, maxLength: number): string {
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function buildPromptSessionMetadata(
+  prompt: string,
+  explicitTitle?: string,
+): { title?: string; summary?: string; createdFromPrompt?: string } {
+  const normalized = normalizeOptionalString(prompt);
+  const normalizedTitle = normalizeOptionalString(explicitTitle);
+  if (!normalized && !normalizedTitle) return {};
+
+  return {
+    ...(normalizedTitle
+      ? { title: normalizedTitle }
+      : normalized
+        ? { title: truncateText(normalized.split('\n')[0].replace(/\s+/g, ' '), 80) }
+        : {}),
+    ...(normalized
+      ? {
+          summary: truncateText(normalized.replace(/\s+/g, ' '), 200),
+          createdFromPrompt: truncateText(normalized, 4000),
+        }
+      : normalizedTitle
+        ? { summary: normalizedTitle }
+        : {}),
   };
 }
 
@@ -409,6 +655,70 @@ export function unstable_v2_createSession(
     async *stream(): AsyncGenerator<SDKMessage, void> {
       yield* q;
     },
+
+    interrupt: (...args) => q.interrupt(...args),
+    setPermissionMode: (...args) => q.setPermissionMode(...args),
+    setModel: (...args) => q.setModel(...args),
+    setMaxThinkingTokens: (...args) => q.setMaxThinkingTokens(...args),
+    supportedCommands: (...args) => q.supportedCommands(...args),
+    supportedModels: (...args) => q.supportedModels(...args),
+    supportedAgents: (...args) => q.supportedAgents(...args),
+    supportedSkills: (...args) => q.supportedSkills(...args),
+    readRuntimeControlPlane: (...args) => q.readRuntimeControlPlane(...args),
+    listRuntimeDiagnostics: (...args) => q.listRuntimeDiagnostics(...args),
+    readOrchestrationControlPlane: (...args) => q.readOrchestrationControlPlane(...args),
+    mcpServerStatus: (...args) => q.mcpServerStatus(...args),
+    accountInfo: (...args) => q.accountInfo(...args),
+    initializationResult: (...args) => q.initializationResult(...args),
+    sessionInfo: (...args) => q.sessionInfo(...args),
+    listTeams: (...args) => q.listTeams(...args),
+    getTeam: (...args) => q.getTeam(...args),
+    createTeam: (...args) => q.createTeam(...args),
+    deleteTeam: (...args) => q.deleteTeam(...args),
+    getActiveTeam: (...args) => q.getActiveTeam(...args),
+    setActiveTeam: (...args) => q.setActiveTeam(...args),
+    sendTeamMessage: (...args) => q.sendTeamMessage(...args),
+    readTeamInbox: (...args) => q.readTeamInbox(...args),
+    acknowledgeTeamInbox: (...args) => q.acknowledgeTeamInbox(...args),
+    listPendingTeamApprovals: (...args) => q.listPendingTeamApprovals(...args),
+    respondToTeamApproval: (...args) => q.respondToTeamApproval(...args),
+    getTeamInboxCount: (...args) => q.getTeamInboxCount(...args),
+    readTimelineInbox: (...args) => q.readTimelineInbox(...args),
+    subscribeOrchestrationEvents: (...args) => q.subscribeOrchestrationEvents(...args),
+    subscribeTimeline: (...args) => q.subscribeTimeline(...args),
+    executeFollowUp: (...args) => q.executeFollowUp(...args),
+    listWorkers: (...args) => q.listWorkers(...args),
+    getWorker: (...args) => q.getWorker(...args),
+    getWorkerFollowUps: (...args) => q.getWorkerFollowUps(...args),
+    launchWorker: (...args) => q.launchWorker(...args),
+    launchVerifier: (...args) => q.launchVerifier(...args),
+    resumeWorker: (...args) => q.resumeWorker(...args),
+    stopWorker: (...args) => q.stopWorker(...args),
+    listTasks: (...args) => q.listTasks(...args),
+    getTask: (...args) => q.getTask(...args),
+    createTask: (...args) => q.createTask(...args),
+    updateTask: (...args) => q.updateTask(...args),
+    claimNextTask: (...args) => q.claimNextTask(...args),
+    heartbeatTask: (...args) => q.heartbeatTask(...args),
+    releaseTask: (...args) => q.releaseTask(...args),
+    dispatchNextTask: (...args) => q.dispatchNextTask(...args),
+    startTaskDispatcher: (...args) => q.startTaskDispatcher(...args),
+    resumeTaskDispatcher: (...args) => q.resumeTaskDispatcher(...args),
+    getTaskDispatcher: (...args) => q.getTaskDispatcher(...args),
+    listTaskDispatchers: (...args) => q.listTaskDispatchers(...args),
+    inspectTaskDispatcherHealth: (...args) => q.inspectTaskDispatcherHealth(...args),
+    getTaskDispatcherDiagnosis: (...args) => q.getTaskDispatcherDiagnosis(...args),
+    listTaskDispatcherDiagnoses: (...args) => q.listTaskDispatcherDiagnoses(...args),
+    requeueTaskDispatcherAssignment: (...args) => q.requeueTaskDispatcherAssignment(...args),
+    stopTaskDispatcher: (...args) => q.stopTaskDispatcher(...args),
+    listBackgroundTasks: (...args) => q.listBackgroundTasks(...args),
+    getBackgroundTask: (...args) => q.getBackgroundTask(...args),
+    stopTask: (...args) => q.stopTask(...args),
+    streamInput: (...args) => q.streamInput(...args),
+    reconnectMcpServer: (...args) => q.reconnectMcpServer(...args),
+    toggleMcpServer: (...args) => q.toggleMcpServer(...args),
+    setMcpServers: (...args) => q.setMcpServers(...args),
+    rewindFiles: (...args) => q.rewindFiles(...args),
 
     close(): void {
       if (closed) return;

@@ -2,10 +2,11 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync
 import { join } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
-import type { TeamConfig, TeamMember, TeamMessage } from './types';
+import type { TeamConfig, TeamInboxEntry, TeamMember, TeamMessage } from './types';
 
 export class TeamManager {
   private baseDir: string;
+  private messageSequence = 0;
 
   constructor() {
     this.baseDir = join(homedir(), '.open-agent', 'teams');
@@ -20,6 +21,7 @@ export class TeamManager {
     const teamDir = join(this.baseDir, name);
     mkdirSync(teamDir, { recursive: true });
     mkdirSync(join(teamDir, 'inboxes'), { recursive: true });
+    mkdirSync(this.getScratchpadDir(name), { recursive: true });
 
     // Preserve existing config if the team already exists.
     const existing = this.getTeam(name);
@@ -28,6 +30,7 @@ export class TeamManager {
         existing.description = description;
         this.saveTeam(existing);
       }
+      mkdirSync(this.getScratchpadDir(name), { recursive: true });
       return existing;
     }
 
@@ -86,6 +89,14 @@ export class TeamManager {
     );
   }
 
+  getTeamDir(name: string): string {
+    return join(this.baseDir, name);
+  }
+
+  getScratchpadDir(name: string): string {
+    return join(this.getTeamDir(name), 'scratchpad');
+  }
+
   // ---------------------------------------------------------------------------
   // Member management
   // ---------------------------------------------------------------------------
@@ -142,6 +153,36 @@ export class TeamManager {
     return dir;
   }
 
+  private getInboxStatePath(teamName: string, memberName: string): string {
+    return join(this.ensureInboxDir(teamName, memberName), '.read-state.json');
+  }
+
+  private loadInboxState(teamName: string, memberName: string): Record<string, string> {
+    const statePath = this.getInboxStatePath(teamName, memberName);
+    if (!existsSync(statePath)) return {};
+    try {
+      const parsed = JSON.parse(readFileSync(statePath, 'utf-8')) as { acknowledged?: Record<string, string> };
+      return parsed.acknowledged && typeof parsed.acknowledged === 'object'
+        ? parsed.acknowledged
+        : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private saveInboxState(teamName: string, memberName: string, acknowledged: Record<string, string>): void {
+    const statePath = this.getInboxStatePath(teamName, memberName);
+    writeFileSync(statePath, JSON.stringify({ acknowledged }, null, 2));
+  }
+
+  private listInboxFiles(teamName: string, memberName: string): string[] {
+    const inboxDir = join(this.baseDir, teamName, 'inboxes', memberName);
+    if (!existsSync(inboxDir)) return [];
+    return readdirSync(inboxDir)
+      .filter((file) => file.endsWith('.json') && !file.startsWith('.'))
+      .sort();
+  }
+
   /**
    * Write a message to one or more inboxes.
    *
@@ -155,7 +196,8 @@ export class TeamManager {
   sendMessage(teamName: string, message: TeamMessage): void {
     mkdirSync(join(this.baseDir, teamName, 'inboxes'), { recursive: true });
 
-    const filename = `${Date.now()}-${randomUUID().slice(0, 8)}.json`;
+    const sequence = String(this.messageSequence++).padStart(6, '0');
+    const filename = `${Date.now()}-${sequence}-${randomUUID().slice(0, 8)}.json`;
 
     // Ensure requestId is set for request/response types.
     if (!message.requestId && (message.type === 'shutdown_request' || message.type === 'plan_approval_request')) {
@@ -198,25 +240,7 @@ export class TeamManager {
    * Messages are returned in chronological order (oldest first).
    */
   readInbox(teamName: string, memberName: string): TeamMessage[] {
-    const inboxDir = join(this.baseDir, teamName, 'inboxes', memberName);
-    if (!existsSync(inboxDir)) return [];
-
-    const files = readdirSync(inboxDir).filter(f => f.endsWith('.json')).sort();
-    const messages: TeamMessage[] = [];
-
-    for (const file of files) {
-      const filePath = join(inboxDir, file);
-      try {
-        const msg = JSON.parse(readFileSync(filePath, 'utf-8')) as TeamMessage;
-        messages.push(msg);
-        unlinkSync(filePath); // Consume the message.
-      } catch {
-        // Skip malformed message files — but still try to delete them.
-        try { unlinkSync(filePath); } catch { /* ignore */ }
-      }
-    }
-
-    return messages;
+    return this.readInboxEntries(teamName, memberName, { consume: true }).map((entry) => entry.message);
   }
 
   /**
@@ -224,22 +248,89 @@ export class TeamManager {
    * Sorted chronologically (oldest first).
    */
   readMessages(teamName: string, memberName: string): TeamMessage[] {
+    return this.readInboxEntries(teamName, memberName).map((entry) => entry.message);
+  }
+
+  readInboxEntries(
+    teamName: string,
+    memberName: string,
+    options: {
+      after?: string;
+      acknowledge?: boolean;
+      consume?: boolean;
+      limit?: number;
+      unreadOnly?: boolean;
+    } = {},
+  ): TeamInboxEntry[] {
     const inboxDir = join(this.baseDir, teamName, 'inboxes', memberName);
     if (!existsSync(inboxDir)) return [];
 
-    const files = readdirSync(inboxDir).filter(f => f.endsWith('.json')).sort();
-    const messages: TeamMessage[] = [];
+    const acknowledged = this.loadInboxState(teamName, memberName);
+    const files = this.listInboxFiles(teamName, memberName);
+    const afterIndex = options.after ? files.indexOf(options.after) : -1;
+    const selectedFiles = files
+      .filter((_, index) => afterIndex < 0 || index > afterIndex)
+      .filter((file) => !options.unreadOnly || !acknowledged[file])
+      .slice(0, options.limit ?? Number.POSITIVE_INFINITY);
+    const entries: TeamInboxEntry[] = [];
+    let stateChanged = false;
 
-    for (const file of files) {
+    for (const file of selectedFiles) {
+      const filePath = join(inboxDir, file);
       try {
-        const msg = JSON.parse(readFileSync(join(inboxDir, file), 'utf-8')) as TeamMessage;
-        messages.push(msg);
+        const message = JSON.parse(readFileSync(filePath, 'utf-8')) as TeamMessage;
+        const readAt = acknowledged[file];
+        entries.push({
+          id: file,
+          message,
+          ...(readAt ? { readAt } : {}),
+        });
+        if (options.consume) {
+          try {
+            unlinkSync(filePath);
+          } catch {
+            // Ignore per-file deletion errors.
+          }
+          if (acknowledged[file]) {
+            delete acknowledged[file];
+            stateChanged = true;
+          }
+          continue;
+        }
+        if (options.acknowledge && !acknowledged[file]) {
+          acknowledged[file] = new Date().toISOString();
+          stateChanged = true;
+        }
       } catch {
-        // Skip malformed message files.
+        if (options.consume) {
+          try { unlinkSync(filePath); } catch { /* ignore */ }
+        }
       }
     }
 
-    return messages;
+    if (stateChanged) {
+      this.saveInboxState(teamName, memberName, acknowledged);
+    }
+
+    return entries;
+  }
+
+  acknowledgeInboxMessages(teamName: string, memberName: string, ids: string[]): number {
+    if (ids.length === 0) return 0;
+    const inboxDir = join(this.baseDir, teamName, 'inboxes', memberName);
+    if (!existsSync(inboxDir)) return 0;
+    const acknowledged = this.loadInboxState(teamName, memberName);
+    let updated = 0;
+    for (const id of ids) {
+      const filePath = join(inboxDir, id);
+      if (!existsSync(filePath) || acknowledged[id]) continue;
+      acknowledged[id] = new Date().toISOString();
+      updated += 1;
+    }
+    if (updated > 0) {
+      this.saveInboxState(teamName, memberName, acknowledged);
+    }
+    return updated;
   }
 
   /** Return the number of unread messages in a member's inbox. */
@@ -247,7 +338,10 @@ export class TeamManager {
     const inboxDir = join(this.baseDir, teamName, 'inboxes', memberName);
     if (!existsSync(inboxDir)) return 0;
     try {
-      return readdirSync(inboxDir).filter(f => f.endsWith('.json')).length;
+      const acknowledged = this.loadInboxState(teamName, memberName);
+      return this.listInboxFiles(teamName, memberName)
+        .filter((file) => !acknowledged[file])
+        .length;
     } catch {
       return 0;
     }

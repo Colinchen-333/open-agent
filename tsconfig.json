@@ -5,6 +5,7 @@
     "moduleResolution": "bundler",
     "strict": true,
     "esModuleInterop": true,
+    "jsx": "react-jsx",
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
@@ -16,6 +17,6 @@
       "@open-agent/*": ["./packages/*/src"]
     }
   },
-  "include": ["packages/*/src/**/*.ts", "apps/*/src/**/*.ts"],
+  "include": ["packages/*/src/**/*.ts", "packages/*/src/**/*.tsx", "apps/*/src/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

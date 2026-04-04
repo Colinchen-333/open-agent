@@ -61,3 +61,4 @@ export type {
 
 // Provider Message type for low-level usage
 export type { Message } from '@open-agent/providers';
+export type { SkillCatalogEntry } from '@open-agent/skills';

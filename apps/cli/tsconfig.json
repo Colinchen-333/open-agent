@@ -3,7 +3,8 @@
   "compilerOptions": {
     "outDir": "./dist",
     "rootDir": "../../",
-    "composite": true
+    "composite": true,
+    "jsx": "react-jsx"
   },
   "include": [
     "src",
@@ -14,6 +15,9 @@
     "../../packages/agents/src",
     "../../packages/mcp/src",
     "../../packages/permissions/src",
-    "../../packages/hooks/src"
+    "../../packages/hooks/src",
+    "../../packages/ink/src",
+    "../../packages/state/src",
+    "../../packages/runtime/src"
   ]
 }

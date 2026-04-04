@@ -1,10 +1,121 @@
 import { describe, it, expect } from 'bun:test';
+import { randomUUID } from 'crypto';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { SessionManager } from '@open-agent/core';
-import { __internal_extractUserMessagePrompt, __internal_isToolAllowedByPolicies, query } from '../query.js';
+import {
+  __internal_buildPromptSuggestions,
+  __internal_collectPendingTaskNotifications,
+  __internal_collectTrailingTaskNotifications,
+  __internal_extractUserMessagePrompt,
+  __internal_isToolAllowedByPolicies,
+  query,
+} from '../query.js';
 import type { QueryOptions, PermissionUpdate } from '../types.js';
+
+function createPluginFixture() {
+  const pluginDir = mkdtempSync(join(tmpdir(), 'open-agent-plugin-fixture-'));
+  mkdirSync(join(pluginDir, 'skills'), { recursive: true });
+  mkdirSync(join(pluginDir, 'commands'), { recursive: true });
+  mkdirSync(join(pluginDir, 'agents'), { recursive: true });
+  mkdirSync(join(pluginDir, 'hooks'), { recursive: true });
+
+  writeFileSync(join(pluginDir, 'plugin.json'), JSON.stringify({
+    name: 'review-kit',
+    version: '1.0.0',
+    description: 'Plugin test fixture',
+    hooks: {
+      PreToolUse: [
+        { command: 'echo pre-tool', timeout: 5 },
+      ],
+    },
+  }, null, 2));
+  writeFileSync(join(pluginDir, 'skills', 'review.md'), `---
+name: review-plugin
+description: Review via plugin
+---
+Use this plugin skill when reviewing changes.`);
+  writeFileSync(join(pluginDir, 'commands', 'review.md'), `---
+name: review-plugin
+description: Review command from plugin
+argument-hint: [target]
+---
+Review plugin command body.`);
+  writeFileSync(join(pluginDir, 'agents', 'reviewer.md'), `---
+description: Reviewer from plugin
+model: sonnet
+tools: Read,Write
+---
+You are the plugin reviewer agent.`);
+
+  return pluginDir;
+}
+
+function createInvalidPluginFixture() {
+  const pluginDir = mkdtempSync(join(tmpdir(), 'open-agent-plugin-invalid-fixture-'));
+  mkdirSync(join(pluginDir, 'skills'), { recursive: true });
+  mkdirSync(join(pluginDir, 'commands'), { recursive: true });
+  mkdirSync(join(pluginDir, 'agents'), { recursive: true });
+
+  writeFileSync(join(pluginDir, 'plugin.json'), JSON.stringify({
+    name: 'broken-kit',
+    version: '1.0.0',
+    description: 'Broken plugin test fixture',
+    hooks: {
+      UnknownEvent: [{ command: 'echo nope' }],
+      PreToolUse: [{ timeout: 5 }, { command: 'echo valid-hook', timeout: 5 }],
+    },
+  }, null, 2));
+  writeFileSync(join(pluginDir, 'skills', 'invalid.md'), `---
+description: Missing prompt
+---
+`);
+  writeFileSync(join(pluginDir, 'skills', 'valid.md'), `---
+name: valid-plugin-skill
+description: Valid plugin skill
+---
+Use this valid plugin skill.`);
+  writeFileSync(join(pluginDir, 'commands', 'invalid.md'), `---
+name: invalid-plugin-command
+description: Missing prompt
+---
+`);
+  writeFileSync(join(pluginDir, 'commands', 'valid.md'), `---
+name: valid-plugin-command
+description: Valid command
+---
+Run the valid plugin command.`);
+  writeFileSync(join(pluginDir, 'agents', 'broken-agent.md'), `---
+description: Broken agent
+tools: Read,Write
+---
+`);
+  writeFileSync(join(pluginDir, 'agents', 'valid-agent.md'), `---
+description: Valid plugin agent
+model: sonnet
+tools: Read
+---
+You are the valid plugin agent.`);
+
+  return pluginDir;
+}
+
+function createInvalidLocalAgentFixture(cwd: string) {
+  const agentDir = join(cwd, '.open-agent', 'agents');
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(join(agentDir, 'broken-local.md'), `---
+description: Broken local agent
+tools: Read,Write
+---
+`);
+  writeFileSync(join(agentDir, 'Explore.md'), `---
+description: Project Explore override
+tools: [Read]
+---
+You are the project Explore override.
+`);
+}
 
 // ---------------------------------------------------------------------------
 // Tests for new QueryOptions fields:
@@ -390,6 +501,28 @@ describe('QueryOptions.settingSources', () => {
 });
 
 // ============================================================================
+// promptSuggestions
+// ============================================================================
+
+describe('QueryOptions.promptSuggestions', () => {
+  it('option is accepted without error', () => {
+    const opts: QueryOptions = {
+      promptSuggestions: true,
+    };
+    expect(opts.promptSuggestions).toBe(true);
+  });
+
+  it('is accepted by query() without throwing', () => {
+    const q = query('test', {
+      model: 'claude-sonnet-4-6',
+      promptSuggestions: true,
+    });
+    expect(q).toBeDefined();
+    q.close();
+  });
+});
+
+// ============================================================================
 // sandbox
 // ============================================================================
 
@@ -586,11 +719,12 @@ describe('QueryOptions continue/resume semantics', () => {
   });
 
   it('throws when explicit resume session does not exist', () => {
+    const missingSessionId = randomUUID();
     expect(() =>
       query('test', {
         model: 'claude-sonnet-4-6',
         cwd: mkdtempSync(join(tmpdir(), 'open-agent-missing-resume-')),
-        resume: '33333333-3333-4333-8333-333333333333',
+        resume: missingSessionId,
       }),
     ).toThrow(/session not found for resume/i);
   });
@@ -695,9 +829,7 @@ describe('QueryOptions unsupported official placeholders', () => {
   it('throws for each unsupported placeholder option with key-specific message', () => {
     const unsupported: Array<{ key: string; option: Partial<QueryOptions> }> = [
       { key: 'betas', option: { betas: ['x-test-beta'] } },
-      { key: 'promptSuggestions', option: { promptSuggestions: true } },
       { key: 'onElicitation', option: { onElicitation: {} } },
-      { key: 'plugins', option: { plugins: [] } },
       { key: 'debugFile', option: { debugFile: '/tmp/debug.log' } },
       { key: 'spawnClaudeCodeProcess', option: { spawnClaudeCodeProcess: {} } },
     ];
@@ -710,6 +842,383 @@ describe('QueryOptions unsupported official placeholders', () => {
         }),
       ).toThrow(new RegExp(`Option \"${key}\".*not supported yet`, 'i'));
     }
+  });
+
+  it('accepts plugins and wires plugin agents, skills, commands, and session metadata', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-plugin-query-'));
+    const pluginDir = createPluginFixture();
+    const q = query('test plugin runtime wiring', {
+      cwd,
+      model: 'claude-sonnet-4-6',
+      plugins: [{ type: 'local', path: pluginDir }],
+    });
+
+    const [agents, skills, commands, info] = await Promise.all([
+      q.supportedAgents(),
+      q.supportedSkills(),
+      q.supportedCommands(),
+      q.sessionInfo(),
+    ]);
+
+    expect(agents.some((agent) => agent.name === 'reviewer')).toBe(true);
+    expect(skills.some((skill) => skill.name === 'review-plugin')).toBe(true);
+    expect(commands.some((command) => command.name === '/review-plugin')).toBe(true);
+    expect(info?.plugins).toEqual([{
+      name: 'review-kit',
+      path: pluginDir,
+    }]);
+    expect(info?.runtimeDiagnostics).toBeUndefined();
+    q.close();
+  });
+
+  it('surfaces plugin schema diagnostics and filters invalid plugin assets from runtime wiring', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-plugin-invalid-query-'));
+    const pluginDir = createInvalidPluginFixture();
+    const q = query('test invalid plugin runtime wiring', {
+      cwd,
+      model: 'claude-sonnet-4-6',
+      plugins: [{ type: 'local', path: pluginDir }],
+    });
+
+    const [agents, skills, commands, info] = await Promise.all([
+      q.supportedAgents(),
+      q.supportedSkills(),
+      q.supportedCommands(),
+      q.sessionInfo(),
+    ]);
+
+    expect(agents.some((agent) => agent.name === 'valid-agent')).toBe(true);
+    expect(agents.some((agent) => agent.name === 'broken-agent')).toBe(false);
+    expect(skills.some((skill) => skill.name === 'valid-plugin-skill')).toBe(true);
+    expect(skills.some((skill) => skill.name === 'invalid')).toBe(false);
+    expect(commands.some((command) => command.name === '/valid-plugin-command')).toBe(true);
+    expect(commands.some((command) => command.name === '/invalid-plugin-command')).toBe(false);
+    expect(info?.runtimeDiagnostics?.map((entry) => entry.code)).toEqual(expect.arrayContaining([
+      'plugin_invalid_hook_event',
+      'plugin_invalid_hook_definition',
+      'plugin_invalid_skill_definition',
+      'plugin_invalid_command_definition',
+      'plugin_invalid_agent_definition',
+    ]));
+    await expect(q.listRuntimeDiagnostics({ source: 'hook' })).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'plugin_invalid_hook_event' }),
+      expect.objectContaining({ code: 'plugin_invalid_hook_definition' }),
+    ]));
+    await expect(q.readRuntimeControlPlane()).resolves.toMatchObject({
+      runtime: {
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ code: 'plugin_invalid_agent_definition' }),
+        ]),
+      },
+    });
+    q.close();
+  });
+
+  it('surfaces local agent loader diagnostics and filters invalid local agents from supportedAgents', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-local-agent-query-'));
+    createInvalidLocalAgentFixture(cwd);
+    const q = query('test local agent diagnostics', {
+      cwd,
+      model: 'claude-sonnet-4-6',
+    });
+
+    const [agents, info] = await Promise.all([
+      q.supportedAgents(),
+      q.sessionInfo(),
+    ]);
+
+    expect(agents.some((agent) => agent.name === 'broken-local')).toBe(false);
+    expect(agents.find((agent) => agent.name === 'Explore')?.description).toBe('Project Explore override');
+    expect(info?.runtimeDiagnostics?.map((entry) => entry.code)).toEqual(expect.arrayContaining([
+      'agent_invalid_definition',
+      'agent_override',
+    ]));
+    await expect(q.listRuntimeDiagnostics({ source: 'agent' })).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'agent_invalid_definition' }),
+      expect.objectContaining({ code: 'agent_override' }),
+    ]));
+    await expect(q.readRuntimeControlPlane()).resolves.toMatchObject({
+      activeTeamName: null,
+      runtime: {
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ code: 'agent_invalid_definition' }),
+          expect.objectContaining({ code: 'agent_override' }),
+        ]),
+      },
+    });
+    q.close();
+  });
+});
+
+describe('__internal_buildPromptSuggestions()', () => {
+  const createObservation = (overrides: Record<string, unknown> = {}) => ({
+    toolNames: new Set<string>(),
+    sawTask: false,
+    sawSubagent: false,
+    sawTaskCompletion: false,
+    sawTaskFailure: false,
+    sawTaskStopped: false,
+    sawEdit: false,
+    sawWrite: false,
+    sawBash: false,
+    sawGit: false,
+    sawTesting: false,
+    sawResearch: false,
+    sawFailure: false,
+    sawResultError: false,
+    lastTaskId: undefined,
+    lastTaskStatus: undefined,
+    lastTaskTeamName: undefined,
+    lastTaskDescription: undefined,
+    lastTaskTemplates: undefined,
+    ...overrides,
+  });
+
+  it('returns coding follow-ups after a successful edit-heavy turn', () => {
+    const suggestions = __internal_buildPromptSuggestions({
+      result: {
+        type: 'result',
+        subtype: 'success',
+        duration_ms: 1,
+        duration_api_ms: 1,
+        is_error: false,
+        num_turns: 1,
+        result: 'Updated the runtime and tests.',
+        stop_reason: 'end_turn',
+        total_cost_usd: 0,
+        usage: {},
+        modelUsage: {},
+        permission_denials: [],
+        uuid: 'r1',
+        session_id: 's1',
+      },
+      observation: createObservation({
+        toolNames: new Set(['Edit', 'Bash']),
+        sawEdit: true,
+        sawBash: true,
+      }),
+      language: 'Chinese',
+    });
+
+    expect(suggestions.length).toBeGreaterThan(0);
+    expect(suggestions.some((item) => item.suggestion.includes('测试'))).toBe(true);
+  });
+
+  it('returns failure-oriented follow-ups after an error result', () => {
+    const suggestions = __internal_buildPromptSuggestions({
+      result: {
+        type: 'result',
+        subtype: 'error_during_execution',
+        duration_ms: 1,
+        duration_api_ms: 1,
+        is_error: true,
+        num_turns: 1,
+        stop_reason: 'error',
+        total_cost_usd: 0,
+        usage: {},
+        modelUsage: {},
+        permission_denials: [],
+        errors: ['boom'],
+        uuid: 'r2',
+        session_id: 's2',
+      },
+      observation: createObservation({
+        toolNames: new Set(['Bash']),
+        sawBash: true,
+        sawFailure: true,
+        sawResultError: true,
+      }),
+      language: 'Chinese',
+    });
+
+    expect(suggestions).toHaveLength(3);
+    expect(suggestions[0].suggestion).toContain('失败');
+  });
+
+  it('returns same-worker and verifier follow-ups after a completed worker notification', () => {
+    const suggestions = __internal_buildPromptSuggestions({
+      result: {
+        type: 'result',
+        subtype: 'success',
+        duration_ms: 1,
+        duration_api_ms: 1,
+        is_error: false,
+        num_turns: 1,
+        result: 'Integrated worker output.',
+        stop_reason: 'end_turn',
+        total_cost_usd: 0,
+        usage: {},
+        modelUsage: {},
+        permission_denials: [],
+        uuid: 'r3',
+        session_id: 's3',
+      },
+      observation: createObservation({
+        sawTask: true,
+        sawSubagent: true,
+        sawTaskCompletion: true,
+        lastTaskId: 'worker-42',
+        lastTaskStatus: 'completed',
+        lastTaskTemplates: {
+          resume_prompt_template: 'Continue from your existing context for task worker-42.',
+          verification_prompt_template: 'Independently verify the completed result from task worker-42. Claims to verify: ...',
+        },
+      }),
+      language: 'Chinese',
+    });
+
+    expect(suggestions).toHaveLength(3);
+    expect(suggestions[0].suggestion).toContain('worker `worker-42`');
+    expect(suggestions[0].scaffold?.resume_task_id).toBe('worker-42');
+    expect(suggestions[0].scaffold?.action).toEqual({
+      tool: 'Task',
+      arguments: {
+        description: '继续原 worker',
+        prompt: 'Continue from your existing context for task worker-42.',
+        subagent_type: 'worker',
+        resume: 'worker-42',
+      },
+    });
+    expect(suggestions.some((item) => item.suggestion.includes('`verifier`'))).toBe(true);
+    expect(suggestions.some((item) => item.scaffold?.agent_type === 'verifier')).toBe(true);
+    expect(suggestions.some((item) => item.scaffold?.action?.arguments?.['subagent_type'] === 'verifier')).toBe(true);
+    expect(suggestions.some((item) => item.suggestion.includes('风险清单'))).toBe(true);
+  });
+
+  it('returns SendMessage scaffold for completed teammate notifications', () => {
+    const suggestions = __internal_buildPromptSuggestions({
+      result: {
+        type: 'result',
+        subtype: 'success',
+        duration_ms: 1,
+        duration_api_ms: 1,
+        is_error: false,
+        num_turns: 1,
+        result: 'Integrated teammate output.',
+        stop_reason: 'end_turn',
+        total_cost_usd: 0,
+        usage: {},
+        modelUsage: {},
+        permission_denials: [],
+        uuid: 'r3-team',
+        session_id: 's3-team',
+      },
+      observation: createObservation({
+        sawTask: true,
+        sawSubagent: true,
+        sawTaskCompletion: true,
+        lastTaskId: 'worker-43',
+        lastTaskStatus: 'completed',
+        lastTaskTeamName: 'alpha-team',
+        lastTaskDescription: 'alice',
+        lastTaskTemplates: {
+          resume_prompt_template: 'Continue from your existing context for task worker-43.',
+          verification_prompt_template: 'Independently verify the completed result from task worker-43. Claims to verify: ...',
+        },
+      }),
+      language: 'Chinese',
+    });
+
+    expect(suggestions[0].scaffold?.action).toEqual({
+      tool: 'SendMessage',
+      arguments: {
+        type: 'message',
+        recipient: 'alice',
+        summary: '继续 alice',
+        content: 'Continue from your existing context for task worker-43.',
+      },
+    });
+  });
+
+  it('returns same-worker retry follow-ups after a failed worker notification', () => {
+    const suggestions = __internal_buildPromptSuggestions({
+      result: {
+        type: 'result',
+        subtype: 'success',
+        duration_ms: 1,
+        duration_api_ms: 1,
+        is_error: false,
+        num_turns: 1,
+        result: 'Summarized the failure.',
+        stop_reason: 'end_turn',
+        total_cost_usd: 0,
+        usage: {},
+        modelUsage: {},
+        permission_denials: [],
+        uuid: 'r4',
+        session_id: 's4',
+      },
+      observation: createObservation({
+        sawTask: true,
+        sawSubagent: true,
+        sawTaskFailure: true,
+        lastTaskId: 'worker-99',
+        lastTaskStatus: 'failed',
+        lastTaskTemplates: {
+          retry_prompt_template: 'Continue from your existing context for task worker-99. Failure context: ...',
+        },
+      }),
+      language: 'Chinese',
+    });
+
+    expect(suggestions).toHaveLength(3);
+    expect(suggestions[0].suggestion).toContain('worker `worker-99`');
+    expect(suggestions[0].scaffold?.kind).toBe('retry_worker');
+    expect(suggestions[0].scaffold?.action).toEqual({
+      tool: 'Task',
+      arguments: {
+        description: '沿原上下文重试',
+        prompt: 'Continue from your existing context for task worker-99. Failure context: ...',
+        subagent_type: 'worker',
+        resume: 'worker-99',
+      },
+    });
+    expect(suggestions.some((item) => item.suggestion.includes('重试'))).toBe(true);
+    expect(suggestions.some((item) => item.suggestion.includes('阻塞'))).toBe(true);
+  });
+
+  it('returns SendMessage scaffold for failed teammate notifications', () => {
+    const suggestions = __internal_buildPromptSuggestions({
+      result: {
+        type: 'result',
+        subtype: 'success',
+        duration_ms: 1,
+        duration_api_ms: 1,
+        is_error: false,
+        num_turns: 1,
+        result: 'Summarized teammate failure.',
+        stop_reason: 'end_turn',
+        total_cost_usd: 0,
+        usage: {},
+        modelUsage: {},
+        permission_denials: [],
+        uuid: 'r4-team',
+        session_id: 's4-team',
+      },
+      observation: createObservation({
+        sawTask: true,
+        sawSubagent: true,
+        sawTaskFailure: true,
+        lastTaskId: 'worker-100',
+        lastTaskStatus: 'failed',
+        lastTaskTeamName: 'alpha-team',
+        lastTaskDescription: 'alice',
+        lastTaskTemplates: {
+          retry_prompt_template: 'Continue from your existing context for task worker-100. Failure context: ...',
+        },
+      }),
+      language: 'Chinese',
+    });
+
+    expect(suggestions[0].scaffold?.action).toEqual({
+      tool: 'SendMessage',
+      arguments: {
+        type: 'message',
+        recipient: 'alice',
+        summary: '重试 alice',
+        content: 'Continue from your existing context for task worker-100. Failure context: ...',
+      },
+    });
   });
 });
 
@@ -795,5 +1304,143 @@ describe('__internal_extractUserMessagePrompt()', () => {
       uuid: 'u3',
     } as any);
     expect(prompt).toBeUndefined();
+  });
+});
+
+describe('__internal_collectPendingTaskNotifications()', () => {
+  it('collects only unsurfaced finished child workers for the current session', () => {
+    const messages = __internal_collectPendingTaskNotifications({
+      sessionId: 'session-1',
+      transcriptEntries: [
+        {
+          type: 'system',
+          subtype: 'task_notification',
+          task_id: 'agent-seen',
+          status: 'completed',
+          completed_at: '2026-04-01T10:00:00.000Z',
+        },
+      ],
+      childSessions: [
+        {
+          agentId: 'agent-seen',
+          agentType: 'worker',
+          name: 'seen-worker',
+          state: 'completed',
+          parentSessionId: 'session-1',
+          completedAt: '2026-04-01T10:00:00.000Z',
+          result: 'already surfaced',
+          totalTokens: 10,
+          totalToolUseCount: 1,
+          durationMs: 100,
+        },
+        {
+          agentId: 'agent-new',
+          agentType: 'worker',
+          name: 'new-worker',
+          teamName: 'alpha-team',
+          state: 'completed',
+          parentSessionId: 'session-1',
+          completedAt: '2026-04-01T10:05:00.000Z',
+          result: 'fresh result',
+          totalTokens: 20,
+          totalToolUseCount: 2,
+          durationMs: 200,
+        },
+        {
+          agentId: 'agent-failed',
+          agentType: 'worker',
+          name: 'failed-worker',
+          state: 'failed',
+          parentSessionId: 'session-1',
+          completedAt: '2026-04-01T10:06:00.000Z',
+          error: 'boom',
+          totalTokens: 30,
+          totalToolUseCount: 3,
+          durationMs: 300,
+        },
+        {
+          agentId: 'agent-other-session',
+          agentType: 'worker',
+          name: 'other-worker',
+          state: 'completed',
+          parentSessionId: 'session-2',
+          completedAt: '2026-04-01T10:07:00.000Z',
+          result: 'ignore me',
+          totalTokens: 40,
+          totalToolUseCount: 4,
+          durationMs: 400,
+        },
+      ],
+    });
+
+    expect(messages).toHaveLength(2);
+    expect(messages.map((message) => message.task_id)).toEqual(['agent-new', 'agent-failed']);
+    expect(messages[0].team_name).toBe('alpha-team');
+    expect(messages[0].completed_at).toBe('2026-04-01T10:05:00.000Z');
+    expect(messages[0].result).toBe('fresh result');
+    expect(messages[0].orchestration_templates?.verification_prompt_template).toContain('Claims to verify');
+    expect(messages[1].status).toBe('failed');
+    expect(messages[1].result).toBe('boom');
+    expect(messages[1].orchestration_templates?.retry_prompt_template).toContain('Failure context');
+  });
+});
+
+describe('__internal_collectTrailingTaskNotifications()', () => {
+  it('collects only trailing resumed task notifications in order', () => {
+    const notifications = __internal_collectTrailingTaskNotifications([
+      {
+        role: 'user',
+        content: 'plain historical message',
+      },
+      {
+        role: 'assistant',
+        content: 'historical assistant reply',
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: '<task-notification>\n<task-id>worker-1</task-id>\n<status>completed</status>\n<summary>done</summary>\n</task-notification>',
+          },
+        ],
+      },
+      {
+        role: 'user',
+        content: '<task-notification>\n<task-id>worker-2</task-id>\n<team-name>alpha-team</team-name>\n<description>alice</description>\n<status>failed</status>\n<summary>boom</summary>\n<orchestration-templates>\n<retry-prompt-template>Retry worker-2 narrowly.</retry-prompt-template>\n</orchestration-templates>\n</task-notification>',
+      },
+    ] as any);
+
+    expect(notifications).toEqual([
+      { task_id: 'worker-1', status: 'completed' },
+      {
+        task_id: 'worker-2',
+        team_name: 'alpha-team',
+        description: 'alice',
+        status: 'failed',
+        orchestration_templates: {
+          retry_prompt_template: 'Retry worker-2 narrowly.',
+        },
+      },
+    ]);
+  });
+
+  it('ignores older task notifications once trailing context is interrupted', () => {
+    const notifications = __internal_collectTrailingTaskNotifications([
+      {
+        role: 'user',
+        content: '<task-notification>\n<task-id>worker-old</task-id>\n<status>completed</status>\n<summary>done</summary>\n</task-notification>',
+      },
+      {
+        role: 'assistant',
+        content: 'normal later assistant message',
+      },
+      {
+        role: 'user',
+        content: 'normal trailing user message',
+      },
+    ] as any);
+
+    expect(notifications).toEqual([]);
   });
 });

@@ -20,6 +20,9 @@
     "@open-agent/agents": "workspace:*",
     "@open-agent/plugins": "workspace:*",
     "@open-agent/hooks": "workspace:*",
-    "@open-agent/providers": "workspace:*"
+    "@open-agent/providers": "workspace:*",
+    "@open-agent/runtime": "workspace:*",
+    "@open-agent/state": "workspace:*",
+    "@open-agent/ink": "workspace:*"
   }
 }
