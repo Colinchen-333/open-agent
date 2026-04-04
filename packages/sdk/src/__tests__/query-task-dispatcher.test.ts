@@ -481,6 +481,17 @@ describe('query() task dispatcher control plane', () => {
 
       const snapshot = await q.readOrchestrationControlPlane({ teamName });
       expect(snapshot.activeTeamName).toBe(teamName);
+      expect(snapshot.summary).toEqual(expect.objectContaining({
+        taskCount: 1,
+        inProgressTaskCount: 1,
+        leasedTaskCount: 1,
+        workerCount: 1,
+        runningWorkerCount: 1,
+        dispatcherCount: 1,
+        liveDispatcherCount: 1,
+        runningDispatcherCount: 1,
+        activeAssignmentCount: 1,
+      }));
       expect(snapshot.tasks).toEqual(expect.arrayContaining([
         expect.objectContaining({ id: task.id, teamName }),
       ]));
@@ -497,6 +508,11 @@ describe('query() task dispatcher control plane', () => {
       expect(report).not.toBeNull();
 
       const snapshotWithDiagnosis = await q.readOrchestrationControlPlane({ teamName });
+      expect(snapshotWithDiagnosis.summary).toEqual(expect.objectContaining({
+        unhealthyDispatcherCount: 1,
+      }));
+      expect(snapshotWithDiagnosis.summary.dispatcherErrorCount).toBeGreaterThan(0);
+      expect(snapshotWithDiagnosis.summary.dispatcherWarningCount).toBeGreaterThan(0);
       expect(snapshotWithDiagnosis.dispatcherDiagnoses).toEqual(expect.arrayContaining([
         expect.objectContaining({ dispatcherId: dispatcher.dispatcherId }),
       ]));
@@ -568,6 +584,11 @@ describe('query() task dispatcher control plane', () => {
       } as any);
 
       const recovered = await reader.readOrchestrationControlPlane({ teamName });
+      expect(recovered.summary).toEqual(expect.objectContaining({
+        taskCount: 1,
+        workerCount: 1,
+        dispatcherCount: 1,
+      }));
       expect(recovered.tasks).toEqual(expect.arrayContaining([
         expect.objectContaining({ id: task.id, teamName }),
       ]));

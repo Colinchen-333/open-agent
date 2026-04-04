@@ -368,9 +368,34 @@ export interface OrchestrationControlPlaneOptions {
   teamName?: string;
 }
 
+export interface OrchestrationControlPlaneSummary {
+  taskCount: number;
+  pendingTaskCount: number;
+  inProgressTaskCount: number;
+  completedTaskCount: number;
+  deletedTaskCount: number;
+  leasedTaskCount: number;
+  workerCount: number;
+  runningWorkerCount: number;
+  idleWorkerCount: number;
+  terminalWorkerCount: number;
+  dispatcherCount: number;
+  liveDispatcherCount: number;
+  ledgerDispatcherCount: number;
+  transcriptDispatcherCount: number;
+  runningDispatcherCount: number;
+  drainingDispatcherCount: number;
+  stoppedDispatcherCount: number;
+  activeAssignmentCount: number;
+  unhealthyDispatcherCount: number;
+  dispatcherErrorCount: number;
+  dispatcherWarningCount: number;
+}
+
 export interface OrchestrationControlPlaneSnapshot {
   sessionId: string;
   activeTeamName: string | null;
+  summary: OrchestrationControlPlaneSummary;
   tasks: TaskRecord[];
   workers: WorkerRecord[];
   dispatchers: TaskDispatcherRecord[];

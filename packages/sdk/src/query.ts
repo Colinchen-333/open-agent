@@ -1837,25 +1837,53 @@ export function query(
   ): OrchestrationControlPlaneSnapshot => {
     const state = appStore.getState();
     const teamName = normalizeOptionalString(options?.teamName);
+    const tasks = Object.values(state.tasks)
+      .map((entry) => entry.payload as TaskRecord)
+      .filter((entry) => !teamName || entry.teamName === teamName)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    const workers = Object.values(state.workers)
+      .map((entry) => entry.payload as WorkerRecord)
+      .filter((entry) => !teamName || entry.teamName === teamName)
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+    const dispatchers = Object.values(state.dispatchers)
+      .map((entry) => entry.payload as TaskDispatcherRecord)
+      .filter((entry) => !teamName || entry.teamName === teamName)
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+    const dispatcherDiagnoses = Object.values(state.dispatcherDiagnoses)
+      .map((entry) => entry.payload as TaskDispatcherHealthReport)
+      .filter((entry) => !teamName || entry.dispatcher.teamName === teamName)
+      .sort((left, right) => left.observedAt.localeCompare(right.observedAt));
+    const summary = {
+      taskCount: tasks.length,
+      pendingTaskCount: tasks.filter((entry) => entry.status === 'pending').length,
+      inProgressTaskCount: tasks.filter((entry) => entry.status === 'in_progress').length,
+      completedTaskCount: tasks.filter((entry) => entry.status === 'completed').length,
+      deletedTaskCount: tasks.filter((entry) => entry.status === 'deleted').length,
+      leasedTaskCount: tasks.filter((entry) => Boolean(entry.lease)).length,
+      workerCount: workers.length,
+      runningWorkerCount: workers.filter((entry) => entry.status === 'running' || entry.status === 'spawning').length,
+      idleWorkerCount: workers.filter((entry) => entry.status === 'idle').length,
+      terminalWorkerCount: workers.filter((entry) => entry.status === 'completed' || entry.status === 'failed' || entry.status === 'shutdown').length,
+      dispatcherCount: dispatchers.length,
+      liveDispatcherCount: dispatchers.filter((entry) => entry.source === 'live').length,
+      ledgerDispatcherCount: dispatchers.filter((entry) => entry.source === 'ledger').length,
+      transcriptDispatcherCount: dispatchers.filter((entry) => entry.source === 'transcript').length,
+      runningDispatcherCount: dispatchers.filter((entry) => entry.status === 'running').length,
+      drainingDispatcherCount: dispatchers.filter((entry) => entry.status === 'draining').length,
+      stoppedDispatcherCount: dispatchers.filter((entry) => entry.status === 'stopped').length,
+      activeAssignmentCount: dispatchers.reduce((total, entry) => total + entry.activeAssignments.length, 0),
+      unhealthyDispatcherCount: dispatcherDiagnoses.filter((entry) => !entry.healthy).length,
+      dispatcherErrorCount: dispatcherDiagnoses.reduce((total, entry) => total + entry.summary.errorCount, 0),
+      dispatcherWarningCount: dispatcherDiagnoses.reduce((total, entry) => total + entry.summary.warningCount, 0),
+    };
     return {
       sessionId: state.sessionId,
       activeTeamName: state.activeTeamName,
-      tasks: Object.values(state.tasks)
-        .map((entry) => entry.payload as TaskRecord)
-        .filter((entry) => !teamName || entry.teamName === teamName)
-        .sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
-      workers: Object.values(state.workers)
-        .map((entry) => entry.payload as WorkerRecord)
-        .filter((entry) => !teamName || entry.teamName === teamName)
-        .sort((left, right) => left.startedAt.localeCompare(right.startedAt)),
-      dispatchers: Object.values(state.dispatchers)
-        .map((entry) => entry.payload as TaskDispatcherRecord)
-        .filter((entry) => !teamName || entry.teamName === teamName)
-        .sort((left, right) => left.startedAt.localeCompare(right.startedAt)),
-      dispatcherDiagnoses: Object.values(state.dispatcherDiagnoses)
-        .map((entry) => entry.payload as TaskDispatcherHealthReport)
-        .filter((entry) => !teamName || entry.dispatcher.teamName === teamName)
-        .sort((left, right) => left.observedAt.localeCompare(right.observedAt)),
+      summary,
+      tasks,
+      workers,
+      dispatchers,
+      dispatcherDiagnoses,
     };
   };
 
