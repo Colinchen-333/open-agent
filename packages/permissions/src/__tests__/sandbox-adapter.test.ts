@@ -68,6 +68,15 @@ describe('sandbox-adapter', () => {
     expect(policy.denyReadPaths).toEqual([join(tmpDir, 'blocked')]);
     expect(policy.allowWritePaths).toEqual([join(tmpDir, 'allowed')]);
     expect(policy.denyWritePaths).toEqual([join(tmpDir, 'blocked')]);
+    expect(policy.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        stage: 'policy',
+        scope: 'filesystem',
+        code: 'read_paths_policy_only',
+        severity: 'warning',
+        target: join(tmpDir, 'blocked'),
+      }),
+    ]));
   });
 
   it('sets networkDisabled when network.disabled=true', () => {
@@ -102,6 +111,47 @@ describe('sandbox-adapter', () => {
     expect(askPolicy.bypassRequested).toBe(true);
     expect(askPolicy.bypassAllowed).toBe(false);
     expect(allowPolicy.bypassAllowed).toBe(true);
+    expect(askPolicy.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        stage: 'policy',
+        scope: 'sandbox',
+        code: 'sandbox_bypass_blocked',
+        severity: 'error',
+      }),
+    ]));
+    if (process.platform === 'darwin') {
+      expect(allowPolicy.findings ?? []).toEqual([]);
+    } else {
+      expect(allowPolicy.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          stage: 'policy',
+          scope: 'sandbox',
+          code: 'sandbox_execution_engine_unavailable',
+          severity: 'warning',
+        }),
+      ]));
+    }
+  });
+
+  it('surfaces an unavailable-engine warning when the execution boundary cannot be enforced', () => {
+    const policy = buildBashSandboxPolicy({
+      sandbox: { enabled: true },
+      cwd: tmpDir,
+    });
+
+    if (process.platform !== 'darwin') {
+      expect(policy.executionEngine).toBe('none');
+      expect(policy.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          stage: 'policy',
+          scope: 'sandbox',
+          code: 'sandbox_execution_engine_unavailable',
+          severity: 'warning',
+        }),
+      ]));
+    } else {
+      expect(policy.executionEngine).toBe('darwin-sandbox-exec');
+    }
   });
 });
 

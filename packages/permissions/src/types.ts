@@ -75,11 +75,14 @@ export interface BashSandboxExecutionProvenance {
   command: string;
   runInBackground: boolean;
   executionEngine: 'none' | 'darwin-sandbox-exec';
+  boundaryKind: 'none' | 'policy_only' | 'mixed' | 'hard';
   enforcedFeatures: {
     network: boolean;
     writePaths: boolean;
     readPaths: boolean;
   };
+  hardEnforcedFeatures: Array<'network' | 'writePaths' | 'readPaths'>;
+  policyOnlyFeatures: Array<'network' | 'writePaths' | 'readPaths'>;
   bypassRequested: boolean;
   bypassAllowed: boolean;
   wrappedWithSandboxExec: boolean;

@@ -12,6 +12,12 @@ import {
 import { spawnProcess } from '@open-agent/core';
 import { summarizeCommand } from './tool-summary.js';
 import { getBackgroundTaskOutputFile } from './background-task-store.js';
+import type {
+  BashSandboxExecutionFinding,
+  BashSandboxExecutionPolicy,
+  BashSandboxExecutionProvenance,
+  BashSandboxExecutionRecord,
+} from '@open-agent/permissions';
 
 const MAX_OUTPUT_LENGTH = 30000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -25,37 +31,17 @@ const BASH_SANDBOX_POLICY_FIELD = '__openAgentBashSandboxPolicy';
 // to prevent multi-session conflicts.
 const persistentCwdBySession = new Map<string, string>();
 
-interface BashSandboxExecutionPolicy {
-  enforce: boolean;
-  executionEngine: 'none' | 'darwin-sandbox-exec';
-  boundaryKind: 'none' | 'policy_only' | 'mixed' | 'hard';
-  enforcedFeatures: {
-    network: boolean;
-    writePaths: boolean;
-    readPaths: boolean;
-  };
-  hardEnforcedFeatures: Array<'network' | 'writePaths' | 'readPaths'>;
-  policyOnlyFeatures: Array<'network' | 'writePaths' | 'readPaths'>;
-  allowWritePaths: string[];
-  denyReadPaths: string[];
-  denyWritePaths: string[];
-  networkDisabled: boolean;
-  bypassRequested: boolean;
-  bypassAllowed: boolean;
-  reason?: string;
-}
-
-interface BashSandboxViolation {
+interface BashSandboxPreflightFinding extends BashSandboxExecutionFinding {
   phase: 'preflight';
-  code: 'bypass_not_approved' | 'network_disabled' | 'write_denied' | 'write_outside_allowed_paths';
   feature: 'bypass' | 'network' | 'writePaths';
-  message: string;
-  target?: string;
   executionEngine: BashSandboxExecutionPolicy['executionEngine'];
   boundaryKind: BashSandboxExecutionPolicy['boundaryKind'];
 }
 
-type BashSandboxError = Error & { sandboxViolation?: BashSandboxViolation };
+type BashSandboxError = Error & {
+  sandboxViolation?: BashSandboxPreflightFinding;
+  sandboxExecution?: BashSandboxExecutionRecord;
+};
 
 const DARWIN_SANDBOX_EXEC = '/usr/bin/sandbox-exec';
 
@@ -130,8 +116,19 @@ export function createBashTool(): ToolDefinition {
       const sandboxPolicy = readSandboxPolicy(input);
       const preflightViolation = validateBashPreflight(input.command, effectiveCwd, sandboxPolicy);
       if (preflightViolation) {
+        const preflightRecord = buildSandboxExecutionRecord({
+          ctx,
+          command: input.command,
+          cwd: effectiveCwd,
+          runInBackground: input.run_in_background === true,
+          policy: sandboxPolicy,
+          outcome: 'blocked',
+          findings: collectSandboxFindings(sandboxPolicy, preflightViolation),
+        });
+        appendSandboxExecutionDiagnostic(ctx, preflightRecord);
         const error: BashSandboxError = new Error(preflightViolation.message);
         error.sandboxViolation = preflightViolation;
+        error.sandboxExecution = preflightRecord;
         throw error;
       }
       const sandboxEnv = buildSandboxEnv(sandboxPolicy);
@@ -143,6 +140,17 @@ export function createBashTool(): ToolDefinition {
         ['bash', '-lc', wrappedCommand],
         sandboxPolicy,
       );
+      const sandboxExecutionStarted = buildSandboxExecutionRecord({
+        ctx,
+        command: input.command,
+        cwd: effectiveCwd,
+        runInBackground: input.run_in_background === true,
+        policy: sandboxPolicy,
+        outcome: 'started',
+        wrappedWithSandboxExec: sandboxedCommand.command === DARWIN_SANDBOX_EXEC,
+        findings: collectSandboxFindings(sandboxPolicy),
+      });
+      appendSandboxExecutionDiagnostic(ctx, sandboxExecutionStarted);
 
       // Handle background execution
       if (input.run_in_background) {
@@ -183,6 +191,24 @@ export function createBashTool(): ToolDefinition {
           const rawOutput = safeReadBackgroundOutput(outputFile);
           const { cleanOutput, finalCwd } = extractCwd(rawOutput, CWD_SENTINEL);
           if (finalCwd) persistentCwdBySession.set(ctx.sessionId, finalCwd);
+          const backgroundRecord = buildSandboxExecutionRecord({
+            ctx,
+            command: input.command,
+            cwd: effectiveCwd,
+            runInBackground: true,
+            policy: sandboxPolicy,
+            outcome: code === 0 ? 'success' : 'failed',
+            wrappedWithSandboxExec: sandboxedCommand.command === DARWIN_SANDBOX_EXEC,
+            exitCode: code,
+            finalCwd,
+            outputLength: cleanOutput.length,
+            backgroundTaskId: taskId,
+            findings: collectSandboxFindings(
+              sandboxPolicy,
+              code === 0 ? null : detectSandboxRuntimeViolation(rawOutput, sandboxPolicy, code),
+            ),
+          });
+          appendSandboxExecutionDiagnostic(ctx, backgroundRecord);
           updateBackgroundTask(taskId, {
             output: truncate(cleanOutput),
             status: code === 0 ? 'completed' : 'error',
@@ -229,7 +255,24 @@ export function createBashTool(): ToolDefinition {
       const exitCode = await proc.exited;
 
       if (aborted) {
-        throw new DOMException('Bash command aborted', 'AbortError');
+        const abortedRecord = buildSandboxExecutionRecord({
+          ctx,
+          command: input.command,
+          cwd: effectiveCwd,
+          runInBackground: false,
+          policy: sandboxPolicy,
+          outcome: 'aborted',
+          wrappedWithSandboxExec: sandboxedCommand.command === DARWIN_SANDBOX_EXEC,
+          exitCode,
+          findings: collectSandboxFindings(
+            sandboxPolicy,
+            detectSandboxRuntimeViolation(rawStderr, sandboxPolicy, exitCode),
+          ),
+        });
+        appendSandboxExecutionDiagnostic(ctx, abortedRecord);
+        const error = new DOMException('Bash command aborted', 'AbortError') as BashSandboxError;
+        error.sandboxExecution = abortedRecord;
+        throw error;
       }
 
       // Extract final CWD from stdout and update persistent state
@@ -252,6 +295,30 @@ export function createBashTool(): ToolDefinition {
       const exitInfo = (exitCode !== null && exitCode !== 0)
         ? `\n(exit code: ${exitCode})` : '';
       const interruptedNote = killed ? '\n(command timed out and was killed)' : '';
+      const finalOutcome = killed
+        ? 'timed_out'
+        : exitCode === 0
+          ? 'success'
+          : 'failed';
+      const sandboxExecution = buildSandboxExecutionRecord({
+        ctx,
+        command: input.command,
+        cwd: effectiveCwd,
+        runInBackground: false,
+        policy: sandboxPolicy,
+        outcome: finalOutcome,
+        wrappedWithSandboxExec: sandboxedCommand.command === DARWIN_SANDBOX_EXEC,
+        exitCode,
+        finalCwd,
+        outputLength: output.length,
+        findings: collectSandboxFindings(
+          sandboxPolicy,
+          finalOutcome === 'success'
+            ? null
+            : detectSandboxRuntimeViolation(rawStderr, sandboxPolicy, exitCode),
+        ),
+      });
+      appendSandboxExecutionDiagnostic(ctx, sandboxExecution);
       return output + exitInfo + interruptedNote;
     },
   };
@@ -349,15 +416,18 @@ function validateBashPreflight(
   command: string,
   cwd: string,
   policy: BashSandboxExecutionPolicy | undefined,
-) : BashSandboxViolation | null {
+) : BashSandboxPreflightFinding | null {
   if (!policy?.enforce) return null;
 
   if (policy.bypassRequested) {
     if (policy.bypassAllowed) return null;
     return {
       phase: 'preflight',
+      stage: 'preflight',
+      scope: 'sandbox',
       code: 'bypass_not_approved',
       feature: 'bypass',
+      severity: 'error',
       message: policy.reason ?? 'Sandbox bypass requested but not explicitly approved.',
       executionEngine: policy.executionEngine,
       boundaryKind: policy.boundaryKind,
@@ -367,8 +437,11 @@ function validateBashPreflight(
   if (policy.networkDisabled && usesNetwork(command)) {
     return {
       phase: 'preflight',
+      stage: 'preflight',
+      scope: 'network',
       code: 'network_disabled',
       feature: 'network',
+      severity: 'error',
       message: 'Sandbox policy blocked command: network access is disabled.',
       executionEngine: policy.executionEngine,
       boundaryKind: policy.boundaryKind,
@@ -383,8 +456,11 @@ function validateBashPreflight(
     if (policy.denyWritePaths.some((denied) => isPathInside(target, denied))) {
       return {
         phase: 'preflight',
+        stage: 'preflight',
+        scope: 'filesystem',
         code: 'write_denied',
         feature: 'writePaths',
+        severity: 'error',
         message: `Sandbox policy blocked write to denied path: ${target}`,
         target,
         executionEngine: policy.executionEngine,
@@ -397,14 +473,170 @@ function validateBashPreflight(
     ) {
       return {
         phase: 'preflight',
+        stage: 'preflight',
+        scope: 'filesystem',
         code: 'write_outside_allowed_paths',
         feature: 'writePaths',
+        severity: 'error',
         message: `Sandbox policy blocked write outside allowed paths: ${target}`,
         target,
         executionEngine: policy.executionEngine,
         boundaryKind: policy.boundaryKind,
       };
     }
+  }
+
+  return null;
+}
+
+function collectSandboxFindings(
+  policy: BashSandboxExecutionPolicy | undefined,
+  runtimeFinding: BashSandboxExecutionFinding | null = null,
+): BashSandboxExecutionFinding[] {
+  const findings = [...(policy?.findings ?? [])];
+  if (runtimeFinding) findings.push(runtimeFinding);
+  return findings;
+}
+
+function createSandboxExecutionProvenance(
+  ctx: ToolContext,
+  input: {
+    command: string;
+    cwd: string;
+    runInBackground: boolean;
+    policy: BashSandboxExecutionPolicy | undefined;
+    wrappedWithSandboxExec: boolean;
+  },
+): BashSandboxExecutionProvenance {
+  return {
+    sessionId: ctx.sessionId,
+    toolUseId: ctx.toolUseId,
+    cwd: input.cwd,
+    command: input.command,
+    runInBackground: input.runInBackground,
+    executionEngine: input.policy?.executionEngine ?? 'none',
+    boundaryKind: input.policy?.boundaryKind ?? 'none',
+    enforcedFeatures: input.policy?.enforcedFeatures ?? {
+      network: false,
+      writePaths: false,
+      readPaths: false,
+    },
+    hardEnforcedFeatures: input.policy?.hardEnforcedFeatures ?? [],
+    policyOnlyFeatures: input.policy?.policyOnlyFeatures ?? [],
+    bypassRequested: input.policy?.bypassRequested ?? false,
+    bypassAllowed: input.policy?.bypassAllowed ?? false,
+    wrappedWithSandboxExec: input.wrappedWithSandboxExec,
+  };
+}
+
+function buildSandboxExecutionRecord(input: {
+  ctx: ToolContext;
+  command: string;
+  cwd: string;
+  runInBackground: boolean;
+  policy: BashSandboxExecutionPolicy | undefined;
+  outcome: BashSandboxExecutionRecord['outcome'];
+  wrappedWithSandboxExec?: boolean;
+  exitCode?: number | null;
+  finalCwd?: string | null;
+  outputLength?: number;
+  backgroundTaskId?: string;
+  findings: BashSandboxExecutionFinding[];
+}): BashSandboxExecutionRecord {
+  return {
+    timestamp: new Date().toISOString(),
+    outcome: input.outcome,
+    provenance: createSandboxExecutionProvenance(input.ctx, {
+      command: input.command,
+      cwd: input.cwd,
+      runInBackground: input.runInBackground,
+      policy: input.policy,
+      wrappedWithSandboxExec: input.wrappedWithSandboxExec === true,
+    }),
+    findings: input.findings,
+    ...(input.exitCode !== undefined ? { exitCode: input.exitCode } : {}),
+    ...(input.finalCwd !== undefined ? { finalCwd: input.finalCwd } : {}),
+    ...(input.outputLength !== undefined ? { outputLength: input.outputLength } : {}),
+    ...(input.backgroundTaskId !== undefined ? { backgroundTaskId: input.backgroundTaskId } : {}),
+  };
+}
+
+function createSandboxExecutionDiagnostic(record: BashSandboxExecutionRecord): Record<string, unknown> {
+  const finding = [...record.findings].sort((a, b) => severityRank(b.severity) - severityRank(a.severity))[0];
+  return {
+    code: 'bash_sandbox_execution',
+    message: finding
+      ? `${record.outcome}: ${finding.code} - ${finding.message}`
+      : `bash sandbox ${record.outcome}`,
+    severity: finding?.severity ?? (record.outcome === 'success' || record.outcome === 'started' ? 'info' : 'warning'),
+    source: 'runtime',
+    payload: record,
+  };
+}
+
+function appendSandboxExecutionDiagnostic(ctx: ToolContext, record: BashSandboxExecutionRecord): void {
+  if (!ctx.setAppState) return;
+  const diagnostic = createSandboxExecutionDiagnostic(record);
+  ctx.setAppState((prev) => {
+    if (!prev?.runtime) return prev;
+    return {
+      ...prev,
+      runtime: {
+        ...prev.runtime,
+        diagnostics: [...prev.runtime.diagnostics, diagnostic],
+      },
+    };
+  });
+}
+
+function severityRank(severity: BashSandboxExecutionFinding['severity']): number {
+  switch (severity) {
+    case 'error':
+      return 3;
+    case 'warning':
+      return 2;
+    default:
+      return 1;
+  }
+}
+
+function detectSandboxRuntimeViolation(
+  stderr: string,
+  policy: BashSandboxExecutionPolicy | undefined,
+  exitCode?: number | null,
+): BashSandboxExecutionFinding | null {
+  const trimmed = stderr.trim();
+  if (!policy?.enforce || trimmed.length === 0) return null;
+
+  if (policy.networkDisabled && /Operation not permitted|network|connect|socket|Permission denied/i.test(trimmed)) {
+    return {
+      stage: 'runtime',
+      scope: 'network',
+      code: 'network_restricted_runtime',
+      severity: 'error',
+      message: trimmed,
+    };
+  }
+
+  if ((policy.allowWritePaths.length > 0 || policy.denyWritePaths.length > 0) &&
+    /Operation not permitted|Permission denied|read-only file system|sandbox/i.test(trimmed)) {
+    return {
+      stage: 'runtime',
+      scope: 'filesystem',
+      code: 'filesystem_restricted_runtime',
+      severity: 'error',
+      message: trimmed,
+    };
+  }
+
+  if (exitCode !== undefined && exitCode !== null && exitCode !== 0 && /sandbox/i.test(trimmed)) {
+    return {
+      stage: 'runtime',
+      scope: 'execution',
+      code: 'sandbox_runtime_failure',
+      severity: 'warning',
+      message: trimmed,
+    };
   }
 
   return null;
