@@ -28,11 +28,14 @@ const persistentCwdBySession = new Map<string, string>();
 interface BashSandboxExecutionPolicy {
   enforce: boolean;
   executionEngine: 'none' | 'darwin-sandbox-exec';
+  boundaryKind: 'none' | 'policy_only' | 'mixed' | 'hard';
   enforcedFeatures: {
     network: boolean;
     writePaths: boolean;
     readPaths: boolean;
   };
+  hardEnforcedFeatures: Array<'network' | 'writePaths' | 'readPaths'>;
+  policyOnlyFeatures: Array<'network' | 'writePaths' | 'readPaths'>;
   allowWritePaths: string[];
   denyReadPaths: string[];
   denyWritePaths: string[];
@@ -41,6 +44,18 @@ interface BashSandboxExecutionPolicy {
   bypassAllowed: boolean;
   reason?: string;
 }
+
+interface BashSandboxViolation {
+  phase: 'preflight';
+  code: 'bypass_not_approved' | 'network_disabled' | 'write_denied' | 'write_outside_allowed_paths';
+  feature: 'bypass' | 'network' | 'writePaths';
+  message: string;
+  target?: string;
+  executionEngine: BashSandboxExecutionPolicy['executionEngine'];
+  boundaryKind: BashSandboxExecutionPolicy['boundaryKind'];
+}
+
+type BashSandboxError = Error & { sandboxViolation?: BashSandboxViolation };
 
 const DARWIN_SANDBOX_EXEC = '/usr/bin/sandbox-exec';
 
@@ -115,7 +130,9 @@ export function createBashTool(): ToolDefinition {
       const sandboxPolicy = readSandboxPolicy(input);
       const preflightViolation = validateBashPreflight(input.command, effectiveCwd, sandboxPolicy);
       if (preflightViolation) {
-        throw new Error(preflightViolation);
+        const error: BashSandboxError = new Error(preflightViolation.message);
+        error.sandboxViolation = preflightViolation;
+        throw error;
       }
       const sandboxEnv = buildSandboxEnv(sandboxPolicy);
 
@@ -292,11 +309,26 @@ function readSandboxPolicy(
   return {
     enforce: policy.enforce,
     executionEngine: policy.executionEngine === 'darwin-sandbox-exec' ? 'darwin-sandbox-exec' : 'none',
+    boundaryKind: policy.boundaryKind === 'policy_only'
+      ? 'policy_only'
+      : policy.boundaryKind === 'mixed'
+        ? 'mixed'
+        : policy.boundaryKind === 'hard'
+          ? 'hard'
+          : 'none',
     enforcedFeatures: {
       network: policy.enforcedFeatures?.network === true,
       writePaths: policy.enforcedFeatures?.writePaths === true,
       readPaths: policy.enforcedFeatures?.readPaths === true,
     },
+    hardEnforcedFeatures: Array.isArray(policy.hardEnforcedFeatures)
+      ? policy.hardEnforcedFeatures.filter((feature): feature is 'network' | 'writePaths' | 'readPaths' =>
+        feature === 'network' || feature === 'writePaths' || feature === 'readPaths')
+      : [],
+    policyOnlyFeatures: Array.isArray(policy.policyOnlyFeatures)
+      ? policy.policyOnlyFeatures.filter((feature): feature is 'network' | 'writePaths' | 'readPaths' =>
+        feature === 'network' || feature === 'writePaths' || feature === 'readPaths')
+      : [],
     allowWritePaths: Array.isArray(policy.allowWritePaths)
       ? policy.allowWritePaths.filter((path): path is string => typeof path === 'string')
       : [],
@@ -317,16 +349,30 @@ function validateBashPreflight(
   command: string,
   cwd: string,
   policy: BashSandboxExecutionPolicy | undefined,
-): string | null {
+) : BashSandboxViolation | null {
   if (!policy?.enforce) return null;
 
   if (policy.bypassRequested) {
     if (policy.bypassAllowed) return null;
-    return policy.reason ?? 'Sandbox bypass requested but not explicitly approved.';
+    return {
+      phase: 'preflight',
+      code: 'bypass_not_approved',
+      feature: 'bypass',
+      message: policy.reason ?? 'Sandbox bypass requested but not explicitly approved.',
+      executionEngine: policy.executionEngine,
+      boundaryKind: policy.boundaryKind,
+    };
   }
 
   if (policy.networkDisabled && usesNetwork(command)) {
-    return 'Sandbox policy blocked command: network access is disabled.';
+    return {
+      phase: 'preflight',
+      code: 'network_disabled',
+      feature: 'network',
+      message: 'Sandbox policy blocked command: network access is disabled.',
+      executionEngine: policy.executionEngine,
+      boundaryKind: policy.boundaryKind,
+    };
   }
 
   const hasPathRules = policy.allowWritePaths.length > 0 || policy.denyWritePaths.length > 0;
@@ -335,13 +381,29 @@ function validateBashPreflight(
   const writeTargets = extractWriteTargets(command, cwd);
   for (const target of writeTargets) {
     if (policy.denyWritePaths.some((denied) => isPathInside(target, denied))) {
-      return `Sandbox policy blocked write to denied path: ${target}`;
+      return {
+        phase: 'preflight',
+        code: 'write_denied',
+        feature: 'writePaths',
+        message: `Sandbox policy blocked write to denied path: ${target}`,
+        target,
+        executionEngine: policy.executionEngine,
+        boundaryKind: policy.boundaryKind,
+      };
     }
     if (
       policy.allowWritePaths.length > 0 &&
       !policy.allowWritePaths.some((allowed) => isPathInside(target, allowed))
     ) {
-      return `Sandbox policy blocked write outside allowed paths: ${target}`;
+      return {
+        phase: 'preflight',
+        code: 'write_outside_allowed_paths',
+        feature: 'writePaths',
+        message: `Sandbox policy blocked write outside allowed paths: ${target}`,
+        target,
+        executionEngine: policy.executionEngine,
+        boundaryKind: policy.boundaryKind,
+      };
     }
   }
 
@@ -353,17 +415,21 @@ function buildSandboxEnv(policy: BashSandboxExecutionPolicy | undefined): Record
   return {
     OPEN_AGENT_SANDBOX: policy.enforce ? '1' : '0',
     OPEN_AGENT_SANDBOX_EXECUTION_ENGINE: policy.executionEngine,
+    OPEN_AGENT_SANDBOX_BOUNDARY_KIND: policy.boundaryKind,
     OPEN_AGENT_SANDBOX_ENFORCED_FEATURES: [
       policy.enforcedFeatures.network ? 'network' : '',
       policy.enforcedFeatures.writePaths ? 'write-paths' : '',
       policy.enforcedFeatures.readPaths ? 'read-paths' : '',
     ].filter(Boolean).join(','),
+    OPEN_AGENT_SANDBOX_HARD_ENFORCED_FEATURES: policy.hardEnforcedFeatures.join(','),
+    OPEN_AGENT_SANDBOX_POLICY_ONLY_FEATURES: policy.policyOnlyFeatures.join(','),
     OPEN_AGENT_SANDBOX_NETWORK_DISABLED: policy.networkDisabled ? '1' : '0',
     OPEN_AGENT_SANDBOX_ALLOW_WRITE_PATHS: policy.allowWritePaths.join(':'),
     OPEN_AGENT_SANDBOX_DENY_READ_PATHS: policy.denyReadPaths.join(':'),
     OPEN_AGENT_SANDBOX_DENY_WRITE_PATHS: policy.denyWritePaths.join(':'),
     OPEN_AGENT_SANDBOX_BYPASS_REQUESTED: policy.bypassRequested ? '1' : '0',
     OPEN_AGENT_SANDBOX_BYPASS_ALLOWED: policy.bypassAllowed ? '1' : '0',
+    OPEN_AGENT_SANDBOX_REASON: policy.reason ?? '',
   };
 }
 

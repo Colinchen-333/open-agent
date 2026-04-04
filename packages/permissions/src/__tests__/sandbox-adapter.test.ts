@@ -30,11 +30,14 @@ describe('sandbox-adapter', () => {
     });
     expect(policy.enforce).toBe(false);
     expect(policy.executionEngine).toBe('none');
+    expect(policy.boundaryKind).toBe('none');
     expect(policy.enforcedFeatures).toEqual({
       network: false,
       writePaths: false,
       readPaths: false,
     });
+    expect(policy.hardEnforcedFeatures).toEqual([]);
+    expect(policy.policyOnlyFeatures).toEqual([]);
     expect(policy.bypassRequested).toBe(true);
     expect(policy.bypassAllowed).toBe(true);
   });
@@ -59,6 +62,9 @@ describe('sandbox-adapter', () => {
       writePaths: process.platform === 'darwin',
       readPaths: false,
     });
+    expect(policy.boundaryKind).toBe(process.platform === 'darwin' ? 'mixed' : 'policy_only');
+    expect(policy.hardEnforcedFeatures).toEqual(process.platform === 'darwin' ? ['writePaths'] : []);
+    expect(policy.policyOnlyFeatures).toEqual(process.platform === 'darwin' ? ['readPaths'] : ['writePaths', 'readPaths']);
     expect(policy.denyReadPaths).toEqual([join(tmpDir, 'blocked')]);
     expect(policy.allowWritePaths).toEqual([join(tmpDir, 'allowed')]);
     expect(policy.denyWritePaths).toEqual([join(tmpDir, 'blocked')]);
@@ -76,6 +82,7 @@ describe('sandbox-adapter', () => {
     });
 
     expect(policy.networkDisabled).toBe(true);
+    expect(policy.hardEnforcedFeatures.includes('network')).toBe(process.platform === 'darwin');
   });
 
   it('requires explicit bypass approval when dangerouslyDisableSandbox=true', () => {
@@ -126,11 +133,11 @@ describe('sandbox preflight via Bash tool', () => {
     });
 
     const result = await bash.execute({
-      command: 'echo "$OPEN_AGENT_SANDBOX|$OPEN_AGENT_SANDBOX_NETWORK_DISABLED|$OPEN_AGENT_SANDBOX_EXECUTION_ENGINE|$OPEN_AGENT_SANDBOX_ENFORCED_FEATURES"',
+      command: 'echo "$OPEN_AGENT_SANDBOX|$OPEN_AGENT_SANDBOX_NETWORK_DISABLED|$OPEN_AGENT_SANDBOX_EXECUTION_ENGINE|$OPEN_AGENT_SANDBOX_BOUNDARY_KIND|$OPEN_AGENT_SANDBOX_HARD_ENFORCED_FEATURES|$OPEN_AGENT_SANDBOX_POLICY_ONLY_FEATURES"',
       [BASH_SANDBOX_POLICY_FIELD]: policy,
     }, ctx());
 
-    expect(result).toContain(`1|1|${policy.executionEngine}|network`);
+    expect(result).toContain(`1|1|${policy.executionEngine}|${policy.boundaryKind}|${policy.hardEnforcedFeatures.join(',')}|${policy.policyOnlyFeatures.join(',')}`);
   });
 
   it('blocks network commands when network is disabled', async () => {
@@ -139,12 +146,25 @@ describe('sandbox preflight via Bash tool', () => {
       cwd: tmpDir,
     });
 
-    await expect(
-      bash.execute({
+    let error: unknown;
+    try {
+      await bash.execute({
         command: 'curl https://example.com',
         [BASH_SANDBOX_POLICY_FIELD]: policy,
-      }, ctx()),
-    ).rejects.toThrow('network access is disabled');
+      }, ctx());
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('network access is disabled');
+    expect((error as Error & { sandboxViolation?: unknown }).sandboxViolation).toEqual(expect.objectContaining({
+      phase: 'preflight',
+      code: 'network_disabled',
+      feature: 'network',
+      executionEngine: policy.executionEngine,
+      boundaryKind: policy.boundaryKind,
+    }));
   });
 
   it('blocks writes outside allowWrite paths before execution', async () => {
@@ -158,12 +178,25 @@ describe('sandbox preflight via Bash tool', () => {
       cwd: tmpDir,
     });
 
-    await expect(
-      bash.execute({
+    let error: unknown;
+    try {
+      await bash.execute({
         command: 'echo "blocked" > ./blocked.txt',
         [BASH_SANDBOX_POLICY_FIELD]: policy,
-      }, ctx()),
-    ).rejects.toThrow('outside allowed paths');
+      }, ctx());
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('outside allowed paths');
+    expect((error as Error & { sandboxViolation?: unknown }).sandboxViolation).toEqual(expect.objectContaining({
+      phase: 'preflight',
+      code: 'write_outside_allowed_paths',
+      feature: 'writePaths',
+      executionEngine: policy.executionEngine,
+      boundaryKind: policy.boundaryKind,
+    }));
   });
 
   it('blocks unapproved dangerouslyDisableSandbox bypass', async () => {
@@ -245,5 +278,6 @@ describe('sandbox preflight via Bash tool', () => {
 
     expect(policy.denyReadPaths).toEqual([join(tmpDir, 'blocked')]);
     expect(policy.enforcedFeatures.readPaths).toBe(false);
+    expect(policy.policyOnlyFeatures).toContain('readPaths');
   });
 });

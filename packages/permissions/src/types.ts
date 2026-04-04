@@ -59,14 +59,54 @@ export interface SandboxConfig {
   };
 }
 
-export interface BashSandboxExecutionPolicy {
-  enforce: boolean;
+export interface BashSandboxExecutionFinding {
+  stage: 'policy' | 'preflight' | 'runtime';
+  scope: 'sandbox' | 'filesystem' | 'network' | 'execution';
+  code: string;
+  severity: 'info' | 'warning' | 'error';
+  message: string;
+  target?: string;
+}
+
+export interface BashSandboxExecutionProvenance {
+  sessionId: string;
+  toolUseId?: string;
+  cwd: string;
+  command: string;
+  runInBackground: boolean;
   executionEngine: 'none' | 'darwin-sandbox-exec';
   enforcedFeatures: {
     network: boolean;
     writePaths: boolean;
     readPaths: boolean;
   };
+  bypassRequested: boolean;
+  bypassAllowed: boolean;
+  wrappedWithSandboxExec: boolean;
+}
+
+export interface BashSandboxExecutionRecord {
+  timestamp: string;
+  outcome: 'success' | 'blocked' | 'failed' | 'timed_out' | 'aborted' | 'started';
+  provenance: BashSandboxExecutionProvenance;
+  findings: BashSandboxExecutionFinding[];
+  exitCode?: number | null;
+  finalCwd?: string | null;
+  outputLength?: number;
+  backgroundTaskId?: string;
+}
+
+export interface BashSandboxExecutionPolicy {
+  enforce: boolean;
+  executionEngine: 'none' | 'darwin-sandbox-exec';
+  boundaryKind: 'none' | 'policy_only' | 'mixed' | 'hard';
+  enforcedFeatures: {
+    network: boolean;
+    writePaths: boolean;
+    readPaths: boolean;
+  };
+  hardEnforcedFeatures: Array<'network' | 'writePaths' | 'readPaths'>;
+  policyOnlyFeatures: Array<'network' | 'writePaths' | 'readPaths'>;
   allowWritePaths: string[];
   denyReadPaths: string[];
   denyWritePaths: string[];
@@ -74,4 +114,5 @@ export interface BashSandboxExecutionPolicy {
   bypassRequested: boolean;
   bypassAllowed: boolean;
   reason?: string;
+  findings?: BashSandboxExecutionFinding[];
 }

@@ -1,6 +1,6 @@
 import { existsSync } from 'fs';
 import { isAbsolute, resolve } from 'path';
-import type { BashSandboxExecutionPolicy, SandboxConfig } from './types.js';
+import type { BashSandboxExecutionFinding, BashSandboxExecutionPolicy, SandboxConfig } from './types.js';
 
 export const BASH_SANDBOX_POLICY_FIELD = '__openAgentBashSandboxPolicy';
 export const BASH_SANDBOX_BYPASS_APPROVED_FIELD = '__openAgentSandboxBypassApproved';
@@ -22,11 +22,14 @@ export function buildBashSandboxPolicy(input: BuildBashSandboxPolicyInput): Bash
     return {
       enforce: false,
       executionEngine: 'none',
+      boundaryKind: 'none',
       enforcedFeatures: {
         network: false,
         writePaths: false,
         readPaths: false,
       },
+      hardEnforcedFeatures: [],
+      policyOnlyFeatures: [],
       allowWritePaths: [],
       denyReadPaths: [],
       denyWritePaths: [],
@@ -48,21 +51,81 @@ export function buildBashSandboxPolicy(input: BuildBashSandboxPolicyInput): Bash
     // policy metadata for now instead of pretending they are execution-enforced.
     readPaths: false,
   };
+  const hardEnforcedFeatures = (Object.entries(enforcedFeatures) as Array<[
+    'network' | 'writePaths' | 'readPaths',
+    boolean,
+  ]>)
+    .filter(([, enforced]) => enforced)
+    .map(([feature]) => feature);
+  const policyOnlyFeatures = ([
+    networkDisabled ? 'network' : null,
+    allowWritePaths.length > 0 || denyWritePaths.length > 0 ? 'writePaths' : null,
+    denyReadPaths.length > 0 ? 'readPaths' : null,
+  ] as const)
+    .filter((feature): feature is 'network' | 'writePaths' | 'readPaths' => feature !== null)
+    .filter((feature) => !hardEnforcedFeatures.includes(feature));
+  const boundaryKind = hardEnforcedFeatures.length === 0
+    ? 'policy_only'
+    : policyOnlyFeatures.length === 0
+      ? 'hard'
+      : 'mixed';
 
   const bypassAllowed = bypassRequested && (
     input.bypassApproved === true || input.permissionBehavior === 'allow'
   );
+  const findings: BashSandboxExecutionFinding[] = [];
+  if (executionEngine === 'none') {
+    findings.push({
+      stage: 'policy',
+      scope: 'sandbox',
+      code: 'sandbox_execution_engine_unavailable',
+      severity: 'warning',
+      message: 'native sandbox execution is unavailable; sandbox enforcement is policy-only',
+    });
+  }
+  if (networkDisabled && !enforcedFeatures.network) {
+    findings.push({
+      stage: 'policy',
+      scope: 'network',
+      code: 'network_policy_only',
+      severity: 'warning',
+      message: 'network restrictions are configured but not hard-enforced by the current execution engine',
+    });
+  }
+  if (denyReadPaths.length > 0 && !enforcedFeatures.readPaths) {
+    findings.push({
+      stage: 'policy',
+      scope: 'filesystem',
+      code: 'read_paths_policy_only',
+      severity: 'warning',
+      message: 'denyRead filesystem rules are tracked as policy metadata only',
+      target: denyReadPaths.join(':'),
+    });
+  }
+  if (bypassRequested && !bypassAllowed) {
+    findings.push({
+      stage: 'policy',
+      scope: 'sandbox',
+      code: 'sandbox_bypass_blocked',
+      severity: 'error',
+      message: 'sandbox bypass requested but not approved',
+    });
+  }
 
   return {
     enforce: true,
     executionEngine,
+    boundaryKind,
     enforcedFeatures,
+    hardEnforcedFeatures,
+    policyOnlyFeatures,
     allowWritePaths,
     denyReadPaths,
     denyWritePaths,
     networkDisabled,
     bypassRequested,
     bypassAllowed,
+    ...(findings.length > 0 ? { findings } : {}),
     ...(
       bypassRequested && !bypassAllowed
         ? { reason: 'sandbox bypass requested but not approved' }
@@ -77,16 +140,25 @@ export function isBashSandboxExecutionPolicy(value: unknown): value is BashSandb
   return (
     typeof candidate.enforce === 'boolean' &&
     (candidate.executionEngine === 'none' || candidate.executionEngine === 'darwin-sandbox-exec') &&
+    (
+      candidate.boundaryKind === 'none'
+      || candidate.boundaryKind === 'policy_only'
+      || candidate.boundaryKind === 'mixed'
+      || candidate.boundaryKind === 'hard'
+    ) &&
     !!candidate.enforcedFeatures &&
     typeof candidate.enforcedFeatures.network === 'boolean' &&
     typeof candidate.enforcedFeatures.writePaths === 'boolean' &&
     typeof candidate.enforcedFeatures.readPaths === 'boolean' &&
+    Array.isArray(candidate.hardEnforcedFeatures) &&
+    Array.isArray(candidate.policyOnlyFeatures) &&
     Array.isArray(candidate.allowWritePaths) &&
     Array.isArray(candidate.denyReadPaths) &&
     Array.isArray(candidate.denyWritePaths) &&
     typeof candidate.networkDisabled === 'boolean' &&
     typeof candidate.bypassRequested === 'boolean' &&
-    typeof candidate.bypassAllowed === 'boolean'
+    typeof candidate.bypassAllowed === 'boolean' &&
+    (candidate.findings === undefined || Array.isArray(candidate.findings))
   );
 }
 
