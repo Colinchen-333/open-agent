@@ -627,7 +627,7 @@ describe('createSession()', () => {
 
       await expect(resumed.getTaskDispatcher(dispatcher.dispatcherId)).resolves.toMatchObject({
         dispatcherId: dispatcher.dispatcherId,
-        source: 'live',
+        source: 'ledger',
         status: 'draining',
       });
       const recoveredHealth = await resumed.inspectTaskDispatcherHealth(dispatcher.dispatcherId, {
@@ -636,6 +636,7 @@ describe('createSession()', () => {
         drainingTimeoutMs: 1,
       });
       expect(recoveredHealth?.healthy).toBe(false);
+      expect(recoveredHealth?.source).toBe('ledger');
       expect(recoveredHealth?.summary.totalFindings).toBeGreaterThan(0);
       expect(recoveredHealth?.followUps.some((item) =>
         item.scaffold.action?.tool === 'TaskDispatcher'

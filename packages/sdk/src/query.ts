@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { dirname, join } from 'path';
 import type {
@@ -699,9 +699,18 @@ export function query(
     activeAssignments: Map<string, TaskDispatcherAssignment>;
   }
 
+  interface TaskDispatcherOwnershipRecord {
+    dispatcherId: string;
+    queryInstanceId: string;
+    sessionId: string;
+    claimedAt: string;
+    heartbeatAt: string;
+  }
+
   const cloneTaskDispatcherRecord = (record: TaskDispatcherRecord): TaskDispatcherRecord => (
     JSON.parse(JSON.stringify(record))
   );
+  const queryInstanceId = randomUUID();
   const toWorkerRecord = (session: AgentSession): WorkerRecord => ({
     workerId: session.agentId,
     workerType: session.agentType,
@@ -2658,6 +2667,20 @@ export function query(
     return state;
   };
 
+  const disposeTaskDispatcherState = (state: TaskDispatcherState): void => {
+    state.disposed = true;
+    state.running = false;
+    state.rerunRequested = false;
+    if (state.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    for (const assignment of state.activeAssignments.values()) {
+      taskDispatcherByWorkerId.delete(assignment.workerId);
+    }
+    taskDispatchers.delete(state.record.dispatcherId);
+  };
+
   const ensureTaskDispatcherRecovery = async (): Promise<void> => {
     if (!taskDispatcherRecoveryPromise) {
       taskDispatcherRecoveryPromise = (async () => {
@@ -2665,6 +2688,9 @@ export function query(
           .filter((record) => record.status === 'running' || record.status === 'draining');
         for (const record of persisted) {
           if (taskDispatchers.has(record.dispatcherId)) {
+            continue;
+          }
+          if (!claimTaskDispatcherOwnership(record)) {
             continue;
           }
           const state = hydrateTaskDispatcherState({
@@ -2689,6 +2715,7 @@ export function query(
     state.record.status = 'stopped';
     state.record.stoppedAt = state.record.stoppedAt ?? new Date().toISOString();
     const record = syncTaskDispatcherRecord(state);
+    releaseTaskDispatcherOwnership(state.record.dispatcherId);
     emitTaskDispatcherOrchestrationEvent(state, 'stopped', { timestamp: record.stoppedAt });
     return record;
   };
@@ -2761,6 +2788,10 @@ export function query(
 
   const runTaskDispatcher = async (state: TaskDispatcherState): Promise<void> => {
     if (state.disposed || state.record.status === 'stopped' || state.running) {
+      return;
+    }
+    if (!refreshTaskDispatcherOwnership(state)) {
+      disposeTaskDispatcherState(state);
       return;
     }
 
@@ -4139,6 +4170,9 @@ export function query(
     const pollIntervalMs = Math.max(25, input.pollIntervalMs ?? DEFAULT_TASK_DISPATCHER_POLL_INTERVAL_MS);
     const maxConcurrentWorkers = Math.max(1, Math.trunc(input.maxConcurrentWorkers ?? 1));
     const leaseMs = input.leaseMs ?? DEFAULT_TASK_LEASE_MS;
+    if (!claimTaskDispatcherOwnership({ dispatcherId, leaseMs, pollIntervalMs })) {
+      throw new Error(`Task dispatcher is already owned by another active query: ${dispatcherId}`);
+    }
     const startedAt = new Date().toISOString();
     const state: TaskDispatcherState = {
       record: {
@@ -4205,6 +4239,12 @@ export function query(
     if (!persisted) {
       return null;
     }
+    if (!claimTaskDispatcherOwnership(persisted)) {
+      return cloneTaskDispatcherRecord({
+        ...persisted,
+        source: 'ledger',
+      });
+    }
 
     const state = hydrateTaskDispatcherState({
       ...persisted,
@@ -4221,6 +4261,9 @@ export function query(
   const getTaskDispatcherLedgerPath = () => sessionMgr
     ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.dispatchers.json`)
     : join(cwd, '.open-agent', 'dispatcher-ledgers', `${sessionId}.json`);
+  const getTaskDispatcherOwnershipPath = (dispatcherId: string) => sessionMgr
+    ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.dispatcher-ownership.${dispatcherId}.json`)
+    : join(cwd, '.open-agent', 'dispatcher-ledgers', `${sessionId}.${dispatcherId}.ownership.json`);
   const getTaskDispatcherDiagnosisLedgerPath = () => sessionMgr
     ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.dispatcher-diagnoses.json`)
     : join(cwd, '.open-agent', 'dispatcher-ledgers', `${sessionId}.diagnoses.json`);
@@ -4263,6 +4306,115 @@ export function query(
       };
     } catch {
       return null;
+    }
+  };
+
+  const readTaskDispatcherOwnershipRecord = (dispatcherId: string): TaskDispatcherOwnershipRecord | null => {
+    const ownershipPath = getTaskDispatcherOwnershipPath(dispatcherId);
+    if (!existsSync(ownershipPath)) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(readFileSync(ownershipPath, 'utf-8')) as TaskDispatcherOwnershipRecord;
+      if (
+        !parsed
+        || typeof parsed !== 'object'
+        || parsed.dispatcherId !== dispatcherId
+        || typeof parsed.queryInstanceId !== 'string'
+        || typeof parsed.sessionId !== 'string'
+        || typeof parsed.claimedAt !== 'string'
+        || typeof parsed.heartbeatAt !== 'string'
+      ) {
+        return null;
+      }
+      return parsed;
+    } catch {
+      return null;
+    }
+  };
+
+  const getTaskDispatcherOwnershipTtlMs = (
+    record: Pick<TaskDispatcherRecord, 'leaseMs' | 'pollIntervalMs'>,
+  ): number => Math.max(record.leaseMs, record.pollIntervalMs * 4, 1_000);
+
+  const hasTaskDispatcherOwnershipExpired = (
+    record: Pick<TaskDispatcherRecord, 'leaseMs' | 'pollIntervalMs'>,
+    ownership: TaskDispatcherOwnershipRecord,
+    now = new Date(),
+  ): boolean => {
+    const heartbeatMs = Date.parse(ownership.heartbeatAt);
+    if (!Number.isFinite(heartbeatMs)) {
+      return true;
+    }
+    return now.getTime() - heartbeatMs > getTaskDispatcherOwnershipTtlMs(record);
+  };
+
+  const writeTaskDispatcherOwnershipRecord = (
+    dispatcherId: string,
+    ownership: TaskDispatcherOwnershipRecord,
+    exclusive: boolean,
+  ): boolean => {
+    try {
+      const ownershipPath = getTaskDispatcherOwnershipPath(dispatcherId);
+      mkdirSync(dirname(ownershipPath), { recursive: true });
+      writeFileSync(ownershipPath, JSON.stringify(ownership, null, 2), exclusive ? { flag: 'wx' } : undefined);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const claimTaskDispatcherOwnership = (
+    record: Pick<TaskDispatcherRecord, 'dispatcherId' | 'leaseMs' | 'pollIntervalMs'>,
+    now = new Date(),
+  ): boolean => {
+    const dispatcherId = record.dispatcherId;
+    const existing = readTaskDispatcherOwnershipRecord(dispatcherId);
+    const claimedAt = existing?.queryInstanceId === queryInstanceId ? existing.claimedAt : now.toISOString();
+    const nextOwnership: TaskDispatcherOwnershipRecord = {
+      dispatcherId,
+      queryInstanceId,
+      sessionId,
+      claimedAt,
+      heartbeatAt: now.toISOString(),
+    };
+
+    if (existing?.queryInstanceId === queryInstanceId) {
+      return writeTaskDispatcherOwnershipRecord(dispatcherId, nextOwnership, false);
+    }
+
+    if (!existing) {
+      return writeTaskDispatcherOwnershipRecord(dispatcherId, nextOwnership, true)
+        || readTaskDispatcherOwnershipRecord(dispatcherId)?.queryInstanceId === queryInstanceId;
+    }
+
+    if (!hasTaskDispatcherOwnershipExpired(record, existing, now)) {
+      return false;
+    }
+
+    try {
+      unlinkSync(getTaskDispatcherOwnershipPath(dispatcherId));
+    } catch {
+      // Best-effort: another query may replace the ownership file concurrently.
+    }
+    return writeTaskDispatcherOwnershipRecord(dispatcherId, nextOwnership, true)
+      || readTaskDispatcherOwnershipRecord(dispatcherId)?.queryInstanceId === queryInstanceId;
+  };
+
+  const refreshTaskDispatcherOwnership = (
+    state: TaskDispatcherState,
+    now = new Date(),
+  ): boolean => claimTaskDispatcherOwnership(state.record, now);
+
+  const releaseTaskDispatcherOwnership = (dispatcherId: string): void => {
+    const existing = readTaskDispatcherOwnershipRecord(dispatcherId);
+    if (existing && existing.queryInstanceId !== queryInstanceId) {
+      return;
+    }
+    try {
+      unlinkSync(getTaskDispatcherOwnershipPath(dispatcherId));
+    } catch {
+      // Best-effort: another query may already have cleaned up the ownership file.
     }
   };
 
