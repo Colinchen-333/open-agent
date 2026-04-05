@@ -57,7 +57,13 @@ export {
   type RuntimePromptSnapshotSource,
   type BuildRuntimePromptSnapshotOptions,
 } from './runtime-prompt-snapshot.js';
-export { buildSystemPrompt, isGitRepository, type SystemPromptOptions } from './system-prompt.js';
+export {
+  buildSystemPrompt,
+  buildSystemPromptBlocks,
+  isGitRepository,
+  type SystemPromptOptions,
+  type SystemPromptBlock,
+} from './system-prompt.js';
 export {
   buildTaskOrchestrationTemplates,
   type TaskNotificationStatus,

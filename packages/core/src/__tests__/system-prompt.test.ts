@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { buildSystemPrompt } from '../system-prompt.js';
+import { buildSystemPrompt, buildSystemPromptBlocks } from '../system-prompt.js';
 
 describe('buildSystemPrompt runtime snapshot', () => {
   it('renders runtime prompt fragments for skills, agents, and MCP servers', () => {
@@ -345,5 +345,46 @@ describe('buildSystemPrompt runtime snapshot', () => {
     for (const phrase of REQUIRED_PHRASES) {
       expect(prompt).toContain(phrase);
     }
+  });
+});
+
+describe('buildSystemPromptBlocks', () => {
+  it('returns blocks with all static sections before any dynamic section', () => {
+    const blocks = buildSystemPromptBlocks({
+      cwd: '/tmp',
+      model: 'glm-4.7',
+      permissionMode: 'default',
+      tools: [],
+    });
+
+    const staticBlocks = blocks.filter((b) => b.section === 'static');
+    const dynamicBlocks = blocks.filter((b) => b.section === 'dynamic');
+
+    expect(staticBlocks.length).toBeGreaterThan(0);
+    expect(dynamicBlocks.length).toBeGreaterThan(0);
+
+    // The last static block must appear before the first dynamic block.
+    const lastStaticIdx = blocks.findLastIndex((b) => b.section === 'static');
+    const firstDynamicIdx = blocks.findIndex((b) => b.section === 'dynamic');
+    expect(lastStaticIdx).toBeLessThan(firstDynamicIdx);
+  });
+
+  it('produces a string identical to buildSystemPrompt when blocks are joined', () => {
+    const opts = {
+      cwd: '/tmp/project',
+      model: 'glm-4.7',
+      permissionMode: 'default',
+      tools: ['Read', 'Bash', 'Skill'],
+      memoryDir: '/tmp/project/.memory',
+      memoryContent: 'key fact',
+      gitContext: 'branch: main\n M src/index.ts',
+      agentInstructions: ['Always reply in English'],
+      isGitRepo: true,
+    };
+
+    const fromString = buildSystemPrompt(opts);
+    const fromBlocks = buildSystemPromptBlocks(opts).map((b) => b.text).join('\n\n');
+
+    expect(fromBlocks).toBe(fromString);
   });
 });
