@@ -690,6 +690,7 @@ export function query(
     ? Math.max(1, Math.trunc(options.globalDispatcherWorkerBudget))
     : null;
   let reservedDispatcherWorkerSlots = 0;
+  let dispatcherFairnessCursor: string | null = null;
 
   interface TaskDispatcherAssignment {
     taskId: string;
@@ -761,11 +762,53 @@ export function query(
   const countSchedulableDispatchers = (): number => {
     let total = 0;
     for (const state of taskDispatchers.values()) {
-      if (state.disposed || state.record.status !== 'running') continue;
+      if (!canDispatcherAcceptNewWork(state)) continue;
       total += 1;
     }
     return total;
   };
+  const canDispatcherAcceptNewWork = (state: TaskDispatcherState): boolean => (
+    !state.disposed
+    && state.record.status === 'running'
+    && state.activeAssignments.size < state.record.maxConcurrentWorkers
+  );
+  const listFairDispatchers = (): TaskDispatcherState[] => (
+    [...taskDispatchers.values()]
+      .filter((state) => canDispatcherAcceptNewWork(state))
+      .sort((left, right) =>
+        left.record.startedAt.localeCompare(right.record.startedAt)
+        || left.record.dispatcherId.localeCompare(right.record.dispatcherId))
+  );
+  const pickFairDispatcher = (): TaskDispatcherState | null => {
+    const eligible = listFairDispatchers();
+    if (eligible.length === 0) return null;
+    if (eligible.length === 1) return eligible[0] ?? null;
+    if (!dispatcherFairnessCursor) return eligible[0] ?? null;
+    const cursorIndex = eligible.findIndex((state) => state.record.dispatcherId === dispatcherFairnessCursor);
+    if (cursorIndex < 0) return eligible[0] ?? null;
+    return eligible[(cursorIndex + 1) % eligible.length] ?? eligible[0] ?? null;
+  };
+  const isDispatcherFairnessTurn = (state: TaskDispatcherState): boolean => {
+    if (globalDispatcherWorkerBudget === null) {
+      return true;
+    }
+    const next = pickFairDispatcher();
+    return !next || next.record.dispatcherId === state.record.dispatcherId;
+  };
+  const noteDispatcherFairnessDispatch = (state: TaskDispatcherState): void => {
+    dispatcherFairnessCursor = state.record.dispatcherId;
+  };
+  const wakeFairDispatchers = (): void => {
+    for (const dispatcher of listFairDispatchers()) {
+      scheduleTaskDispatcherRun(dispatcher, 0);
+    }
+  };
+  const clearDispatcherFairnessCursorIfNeeded = (dispatcherId: string): void => {
+    if (dispatcherFairnessCursor === dispatcherId) {
+      dispatcherFairnessCursor = null;
+    }
+  };
+
   const toWorkerRecord = (session: AgentSession): WorkerRecord => ({
     workerId: session.agentId,
     workerType: session.agentType,
@@ -2845,6 +2888,7 @@ export function query(
       taskDispatcherByWorkerId.delete(assignment.workerId);
     }
     taskDispatchers.delete(state.record.dispatcherId);
+    clearDispatcherFairnessCursorIfNeeded(state.record.dispatcherId);
   };
 
   const ensureTaskDispatcherRecovery = async (): Promise<void> => {
@@ -2882,6 +2926,7 @@ export function query(
     state.record.stoppedAt = state.record.stoppedAt ?? new Date().toISOString();
     const record = syncTaskDispatcherRecord(state);
     releaseTaskDispatcherOwnership(state.record.dispatcherId);
+    clearDispatcherFairnessCursorIfNeeded(state.record.dispatcherId);
     emitTaskDispatcherOrchestrationEvent(state, 'stopped', { timestamp: record.stoppedAt });
     return record;
   };
@@ -2948,7 +2993,7 @@ export function query(
       return;
     }
     if (state.record.status === 'running') {
-      scheduleTaskDispatcherRun(state, 0);
+      wakeFairDispatchers();
     }
   };
 
@@ -3007,6 +3052,9 @@ export function query(
         dispatchedCount < dispatchLimit;
         dispatchedCount += 1
       ) {
+        if (!isDispatcherFairnessTurn(state)) {
+          break;
+        }
         if (!tryReserveDispatcherWorkerSlot()) {
           break;
         }
@@ -3052,10 +3100,14 @@ export function query(
           taskStatus: dispatched.task.status,
           timestamp: state.record.lastDispatchAt,
         });
+        noteDispatcherFairnessDispatch(state);
         const remainingDispatcherCapacity = state.record.maxConcurrentWorkers - state.activeAssignments.size;
         const remainingWorkerBudget = getAvailableDispatcherWorkerBudget();
         shouldContinueImmediately = remainingDispatcherCapacity > 0
           && (remainingWorkerBudget === null || remainingWorkerBudget > 0);
+        if (shouldContinueImmediately) {
+          wakeFairDispatchers();
+        }
       }
     } finally {
       state.running = false;
