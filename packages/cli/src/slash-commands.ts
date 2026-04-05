@@ -62,6 +62,14 @@ export interface SlashCommandContext {
   listBackgroundAgents?: () => Array<{ task_id: string; info: BackgroundAgentInfo }>;
   getBackgroundAgent?: (taskId: string) => BackgroundAgentInfo | null;
   stopBackgroundAgent?: (taskId: string) => boolean;
+  /**
+   * Optional callback that persists an output style selection for the current
+   * session.  When provided, `/output-style <name>` stores the choice so that
+   * subsequent system-prompt rebuilds pick it up.  When absent the command
+   * still reports the selected style but the effect lasts only until the next
+   * prompt rebuild.
+   */
+  setOutputStyleName?: (name: string) => void;
 }
 
 export interface SlashCommandResult {
@@ -744,9 +752,17 @@ const SLASH_COMMANDS: Record<
         return { handled: true, output: lines.join('\n') };
       }
       const picked = findOutputStyle(name, all);
+      // Persist the selection when the caller provides a setter callback.
+      if (ctx.setOutputStyleName) {
+        ctx.setOutputStyleName(picked.name);
+        return {
+          handled: true,
+          output: `Output style set to: ${picked.name}\n${picked.description}`,
+        };
+      }
       return {
         handled: true,
-        output: `Output style set to: ${picked.name}\n${picked.description}`,
+        output: `Output style set to: ${picked.name} (effect on next query)\n${picked.description}`,
       };
     },
   },
@@ -767,9 +783,16 @@ const SLASH_COMMANDS: Record<
         return { handled: true, output: lines.join('\n') };
       }
       const picked = findOutputStyle(name, all);
+      if (ctx.setOutputStyleName) {
+        ctx.setOutputStyleName(picked.name);
+        return {
+          handled: true,
+          output: `Output style set to: ${picked.name}\n${picked.description}`,
+        };
+      }
       return {
         handled: true,
-        output: `Output style set to: ${picked.name}\n${picked.description}`,
+        output: `Output style set to: ${picked.name} (effect on next query)\n${picked.description}`,
       };
     },
   },
@@ -789,9 +812,16 @@ const SLASH_COMMANDS: Record<
         return { handled: true, output: lines.join('\n') };
       }
       const picked = findOutputStyle(name, all);
+      if (ctx.setOutputStyleName) {
+        ctx.setOutputStyleName(picked.name);
+        return {
+          handled: true,
+          output: `Output style set to: ${picked.name}\n${picked.description}`,
+        };
+      }
       return {
         handled: true,
-        output: `Output style set to: ${picked.name}\n${picked.description}`,
+        output: `Output style set to: ${picked.name} (effect on next query)\n${picked.description}`,
       };
     },
   },

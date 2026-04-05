@@ -15,7 +15,8 @@ import type {
   SDKTaskNotificationMessage,
   SDKPromptSuggestionMessage,
 } from '@open-agent/core';
-import { ConversationLoop, SessionManager, buildSystemPrompt, FileCheckpoint, isGitRepository, buildTaskOrchestrationTemplates, loadPromptContext, buildSystemPromptRuntimeSnapshot, buildRuntimeHookSurfaceSummary, HOOK_EVENTS } from '@open-agent/core';
+import { ConversationLoop, SessionManager, buildSystemPrompt, FileCheckpoint, isGitRepository, buildTaskOrchestrationTemplates, loadPromptContext, buildSystemPromptRuntimeSnapshot, buildRuntimeHookSurfaceSummary, HOOK_EVENTS, loadOutputStyles, mergeOutputStyles, findOutputStyle, BUILTIN_OUTPUT_STYLES } from '@open-agent/core';
+import type { OutputStyle } from '@open-agent/core';
 import {
   createStore,
   appendTimelineControlPlane,
@@ -250,6 +251,54 @@ export function query(
   const outputStyle = options.outputStyle ?? 'text';
   const responseLanguage = normalizeOptionalString(options.language);
   const isGitRepo = isGitRepository(cwd);
+
+  // Resolve the active content output style from outputStyleName.
+  // This is mutable so that a running session can switch styles (e.g. via a
+  // slash command that calls refreshManagedSystemPrompt after updating this ref).
+  //
+  // Resolution is async (styles may come from ~/.claude/output-styles/*.md), so
+  // we seed from BUILTIN_OUTPUT_STYLES synchronously for the very first system
+  // prompt build.  The pending promise is awaited inside refreshLoopSurfaceBeforeTurn
+  // before the first LLM call so the style is always resolved before it matters.
+  let activeOutputStyle: { name: string; instructions: string; keepCodingInstructions: boolean } | undefined;
+
+  // Synchronous bootstrap: check built-ins so the very first buildManagedSystemPrompt
+  // call (before the generator starts) is already correct for built-in style names.
+  if (options.outputStyleName && options.outputStyleName !== 'default') {
+    const builtinPick = BUILTIN_OUTPUT_STYLES.find((s) => s.name === options.outputStyleName);
+    if (builtinPick && builtinPick.instructions.trim().length > 0) {
+      activeOutputStyle = {
+        name: builtinPick.name,
+        instructions: builtinPick.instructions,
+        keepCodingInstructions: builtinPick.keepCodingInstructions,
+      };
+    }
+  }
+
+  // Async resolution: also loads user/project styles from the filesystem.
+  // This Promise is awaited during refreshLoopSurfaceBeforeTurn so the resolved
+  // value is in place before the first LLM call.
+  const resolveOutputStyleAsync = async (): Promise<void> => {
+    if (!options.outputStyleName || options.outputStyleName === 'default') return;
+    try {
+      const loadedStyles = await loadOutputStyles(cwd);
+      const allStyles = mergeOutputStyles(loadedStyles, BUILTIN_OUTPUT_STYLES);
+      const picked = findOutputStyle(options.outputStyleName, allStyles);
+      if (picked.instructions.trim().length > 0) {
+        activeOutputStyle = {
+          name: picked.name,
+          instructions: picked.instructions,
+          keepCodingInstructions: picked.keepCodingInstructions,
+        };
+      } else {
+        // Style found but no instructions (e.g. 'default') — clear the ref.
+        activeOutputStyle = undefined;
+      }
+    } catch {
+      // Failed to load styles — keep the synchronously-resolved value (or undefined).
+    }
+  };
+  const outputStyleReadyPromise: Promise<void> = resolveOutputStyleAsync();
   const sessionExistedBeforeQuery = (shouldPersist || sharedSessionManager !== null)
     ? resumeManager.getSession(cwd, sessionId) !== null
     : false;
@@ -2107,6 +2156,7 @@ export function query(
         gitContext: hasContextSection('git-context') ? undefined : promptContext.gitContext,
         contextSections: promptContext.sections,
         toolDescriptions: getToolPromptDescriptions(),
+        activeOutputStyle,
         runtimeSnapshot: buildSystemPromptRuntimeSnapshot({
           runtime: runtimeSnapshot,
           tools: availableTools,
@@ -2775,6 +2825,10 @@ export function query(
     if (mcpReadyPromise) {
       await mcpReadyPromise;
     }
+    // Ensure the output style has been fully resolved (including filesystem-
+    // loaded user/project styles) before the first system-prompt build that
+    // actually reaches the LLM.
+    await outputStyleReadyPromise;
     refreshManagedSystemPrompt();
     syncLoopToolsFromRegistry();
   };

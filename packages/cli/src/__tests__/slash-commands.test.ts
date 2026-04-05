@@ -257,6 +257,52 @@ describe('/output-style', () => {
     expect(result?.handled).toBe(true);
     expect(result?.output).toContain('default');
   });
+
+  it('calls setOutputStyleName with the resolved name when the callback is provided', async () => {
+    const recorded: string[] = [];
+    const ctx = {
+      ...baseCtx,
+      setOutputStyleName: (name: string) => { recorded.push(name); },
+    };
+    const result = await handleSlashCommand('/output-style verbose', ctx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('verbose');
+    // Callback must have been called with the canonical style name.
+    expect(recorded).toEqual(['verbose']);
+    // When the setter is present the message must NOT include the deferred note.
+    expect(result?.output).not.toContain('effect on next query');
+  });
+
+  it('emits a deferred note when no setOutputStyleName callback is available', async () => {
+    // baseCtx has no setOutputStyleName, so the handler falls back to the
+    // "effect on next query" variant.
+    const result = await handleSlashCommand('/output-style terse', baseCtx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('terse');
+    expect(result?.output).toContain('effect on next query');
+  });
+
+  it('/outputstyle alias calls setOutputStyleName when provided', async () => {
+    const recorded: string[] = [];
+    const ctx = {
+      ...baseCtx,
+      setOutputStyleName: (name: string) => { recorded.push(name); },
+    };
+    const result = await handleSlashCommand('/outputstyle verbose', ctx);
+    expect(result?.handled).toBe(true);
+    expect(recorded).toEqual(['verbose']);
+  });
+
+  it('/style alias calls setOutputStyleName when provided', async () => {
+    const recorded: string[] = [];
+    const ctx = {
+      ...baseCtx,
+      setOutputStyleName: (name: string) => { recorded.push(name); },
+    };
+    const result = await handleSlashCommand('/style terse', ctx);
+    expect(result?.handled).toBe(true);
+    expect(recorded).toEqual(['terse']);
+  });
 });
 
 describe('/resume', () => {

@@ -155,6 +155,13 @@ export interface QueryOptions {
   language?: string;
   /** Session-scoped output style metadata. */
   outputStyle?: 'text' | 'stream-json';
+  /**
+   * Name of the active content output style (from ~/.claude/output-styles/*.md
+   * or the built-in catalogue).  When set, the matching style's instructions
+   * are injected into the system prompt via `activeOutputStyle`.
+   * Use 'default' or omit to leave the system prompt unchanged.
+   */
+  outputStyleName?: string;
   /** Optional user-facing title stored with session metadata. */
   sessionTitle?: string;
   outputFormat?: { type: 'json_schema'; schema: Record<string, unknown> };
