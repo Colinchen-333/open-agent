@@ -8,3 +8,10 @@ export { McpHttpClient } from './http-transport';
 export { McpSseClient } from './sse-transport';
 export { McpManager } from './manager';
 export { parseMcpToolName, buildMcpToolName, isMcpToolName } from './normalization';
+export {
+  parseMcpResourceRef,
+  buildMcpResourceRef,
+  isMcpResourceRef,
+  resolveMcpResourceRef,
+} from './resource-uri';
+export type { ParsedMcpResourceRef, McpResourceContent } from './resource-uri';

@@ -361,8 +361,13 @@ export class McpManager {
 
   /**
    * Read the content of a specific resource from a named server.
+   *
+   * Returns the MCP `resources/read` response which contains a `contents` array
+   * whose elements follow the MCP ResourceContents shape.
    */
-  async readResource(serverName: string, uri: string): Promise<any> {
+  async readResource(serverName: string, uri: string): Promise<{
+    contents: Array<{ uri: string; mimeType?: string; text?: string; blob?: string }>;
+  }> {
     const client = this.clients.get(serverName);
     if (!client) throw new Error(`MCP server '${serverName}' not connected`);
     return client.readResource(uri);

@@ -1,5 +1,12 @@
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, test } from 'bun:test';
 import { McpManager } from '../manager';
+
+describe('McpManager readResource', () => {
+  test('McpManager exposes readResource method', () => {
+    const manager = new McpManager();
+    expect(typeof manager.readResource).toBe('function');
+  });
+});
 
 describe('McpManager SDK servers', () => {
   it('保留 SDK 工具 annotations 并允许直接调用 handler', async () => {
