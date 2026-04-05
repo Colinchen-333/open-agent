@@ -13,6 +13,11 @@ export interface SkillDefinition {
   allowedTools?: string[];
   disallowedTools?: string[];
   activationKeywords?: string[];
+  /**
+   * When false, the skill is hidden from the user-facing /skills list and
+   * cannot be directly invoked by the user. Defaults to true when absent.
+   */
+  userInvocable?: boolean;
 }
 
 export interface SkillCatalogEntry {
@@ -20,6 +25,11 @@ export interface SkillCatalogEntry {
   description: string;
   source: string;
   path?: string;
+  /**
+   * When false, the skill is hidden from the user-facing /skills list and
+   * cannot be directly invoked by the user. Defaults to true when absent.
+   */
+  userInvocable?: boolean;
 }
 
 export interface ResolvedSkillInvocation {
@@ -79,6 +89,13 @@ function expandSkillPrompt(prompt: string, args?: string): string {
   return expanded;
 }
 
+function parseUserInvocable(value?: string): boolean | undefined {
+  if (value === undefined) return undefined;
+  const lower = value.toLowerCase();
+  if (lower === 'false' || lower === '0' || lower === 'no') return false;
+  return true;
+}
+
 function parseSkillMarkdown(
   content: string,
   filePath: string,
@@ -87,6 +104,9 @@ function parseSkillMarkdown(
 ): SkillDefinition {
   const frontmatter = parseFrontmatter(content);
   const prompt = stripFrontmatter(content);
+  const userInvocable = parseUserInvocable(
+    frontmatter.userInvocable ?? frontmatter['user-invocable'],
+  );
   return {
     name: frontmatter.name || basename(filePath).replace(/\.md$/, ''),
     description: frontmatter.description || '',
@@ -97,6 +117,7 @@ function parseSkillMarkdown(
     allowedTools: normalizeList(frontmatter.allowedTools ?? frontmatter['allowed-tools']),
     disallowedTools: normalizeList(frontmatter.disallowedTools ?? frontmatter['disallowed-tools']),
     activationKeywords: normalizeList(frontmatter.activationKeywords),
+    ...(userInvocable !== undefined ? { userInvocable } : {}),
   };
 }
 
@@ -126,6 +147,7 @@ export class SkillRegistry {
         description: skill.description,
         source: skill.sourceLabel,
         ...(skill.path ? { path: skill.path } : {}),
+        ...(skill.userInvocable === false ? { userInvocable: false } : {}),
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
   }

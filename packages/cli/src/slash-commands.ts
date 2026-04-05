@@ -40,7 +40,7 @@ export interface SlashCommandContext {
   /** Available agent types with descriptions. */
   agentTypes?: { name: string; description: string }[];
   /** Available skills with descriptions and source labels. */
-  skills?: { name: string; description: string; source?: string }[];
+  skills?: { name: string; description: string; source?: string; userInvocable?: boolean }[];
   /** MCP server status. */
   mcpStatus?: { name: string; status: string }[];
   /** Tool capability snapshot, when provided by the caller. */
@@ -442,16 +442,17 @@ const SLASH_COMMANDS: Record<
   '/skills': {
     description: 'List available skills',
     handler: async (_args, ctx) => {
-      const skills = ctx.skills ?? [];
-      if (skills.length === 0) {
+      const allSkills = ctx.skills ?? [];
+      const visibleSkills = allSkills.filter((s) => s.userInvocable !== false);
+      if (visibleSkills.length === 0) {
         return { handled: true, output: 'No skills loaded.' };
       }
-      const lines = skills.map((skill) =>
+      const lines = visibleSkills.map((skill) =>
         `  ${skill.name.padEnd(28)} ${skill.description || '(no description)'}${skill.source ? ` [${skill.source}]` : ''}`
       );
       return {
         handled: true,
-        output: `Available skills (${skills.length}):\n${lines.join('\n')}`,
+        output: `Available skills (${visibleSkills.length}):\n${lines.join('\n')}`,
       };
     },
   },
@@ -789,6 +790,15 @@ export async function handleSlashCommand(
 
   const cmd = SLASH_COMMANDS[cmdName];
   if (!cmd) {
+    // Check if the input matches a known skill name (strip leading slash).
+    const skillName = cmdName.slice(1);
+    const matchedSkill = ctx.skills?.find((s) => s.name === skillName);
+    if (matchedSkill && matchedSkill.userInvocable === false) {
+      return {
+        handled: true,
+        output: `Skill '${skillName}' is not user-invocable.`,
+      };
+    }
     return {
       handled: true,
       output: `Unknown command: ${cmdName}. Type /help for available commands.`,
