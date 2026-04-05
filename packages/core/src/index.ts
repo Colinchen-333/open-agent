@@ -52,6 +52,11 @@ export {
   type RuntimeHookSurfaceSummary,
   type RuntimeHookSurfaceConfig,
 } from './runtime-hook-surface.js';
+export {
+  buildSystemPromptRuntimeSnapshot,
+  type RuntimePromptSnapshotSource,
+  type BuildRuntimePromptSnapshotOptions,
+} from './runtime-prompt-snapshot.js';
 export { buildSystemPrompt, isGitRepository, type SystemPromptOptions } from './system-prompt.js';
 export {
   buildTaskOrchestrationTemplates,

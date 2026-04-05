@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { parseArgs, TerminalRenderer, REPL, emitStreamJson, emitStreamJsonInit, TerminalPermissionPrompter, handleSlashCommand } from '@open-agent/cli';
-import { ConversationLoop, SessionManager, ConfigLoader, buildSystemPrompt, isGitRepository, FileCheckpoint, buildTaskOrchestrationTemplates, loadPromptContext, buildRuntimeHookSurfaceSummary } from '@open-agent/core';
+import { ConversationLoop, SessionManager, ConfigLoader, buildSystemPrompt, isGitRepository, FileCheckpoint, buildTaskOrchestrationTemplates, loadPromptContext, buildRuntimeHookSurfaceSummary, buildSystemPromptRuntimeSnapshot } from '@open-agent/core';
 import { createStore, createDefaultAppState } from '@open-agent/state';
 import type { AppState } from '@open-agent/state';
 import { renderApp } from '@open-agent/ink';
@@ -728,7 +728,6 @@ async function main(): Promise<void> {
     const currentToolNames = currentTools.map((tool) => tool.name);
     const runtimeSnapshot = runtime.buildSnapshot();
     const promptCapabilitySnapshot = filterCapabilitySnapshot(runtimeSnapshot.capabilitySnapshot, currentToolNames);
-    const connectedMcpServers = runtimeSnapshot.mcpServers.filter((server) => server.status === 'connected');
     const configuredActiveTeam = activeTeamName ?? (settings.activeTeam as string | undefined) ?? defaultTeamName;
     const coordinatorScratchpadDir = teamManager.getTeam(configuredActiveTeam)
       ? teamManager.getScratchpadDir(configuredActiveTeam)
@@ -749,23 +748,14 @@ async function main(): Promise<void> {
       gitContext: promptContext.gitContext,
       contextSections: promptContext.sections,
       toolDescriptions: getToolPromptDescriptions(),
-      runtimeSnapshot: {
-        agents: runtimeSnapshot.agents,
-        skills: runtimeSnapshot.skills,
-        mcpServers: runtimeSnapshot.mcpServers,
-        plugins: runtimeSnapshot.plugins,
-        hooks: buildCliPromptHookSurface(),
-        diagnostics: runtimeSnapshot.diagnostics,
-        diagnosticSummary: runtimeSnapshot.diagnosticSummary,
+      runtimeSnapshot: buildSystemPromptRuntimeSnapshot({
+        runtime: runtimeSnapshot,
+        tools: currentToolNames,
+        activeTeam: teamManager.getTeam(configuredActiveTeam) ? configuredActiveTeam : undefined,
+        scratchpadDir: coordinatorScratchpadDir,
+        hookSurface: buildCliPromptHookSurface(),
         capabilitySnapshot: promptCapabilitySnapshot,
-        coordinator: {
-          workerTools: currentToolNames.filter((name) => name !== 'Task').sort(),
-          activeTeam: teamManager.getTeam(configuredActiveTeam) ? configuredActiveTeam : undefined,
-          scratchpadDir: coordinatorScratchpadDir,
-          canUseSkills: currentToolNames.includes('Skill') && runtimeSnapshot.skills.length > 0,
-          canUseMcpTools: connectedMcpServers.length > 0,
-        },
-      },
+      }),
       outputStyle: cliOutputStyle,
       knowledgeCutoff: 'August 2025',
     });

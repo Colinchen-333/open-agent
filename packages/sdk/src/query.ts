@@ -13,7 +13,7 @@ import type {
   SDKTaskNotificationMessage,
   SDKPromptSuggestionMessage,
 } from '@open-agent/core';
-import { ConversationLoop, SessionManager, buildSystemPrompt, FileCheckpoint, isGitRepository, buildTaskOrchestrationTemplates, loadPromptContext, buildCoordinatorContext, buildRuntimeHookSurfaceSummary, HOOK_EVENTS } from '@open-agent/core';
+import { ConversationLoop, SessionManager, buildSystemPrompt, FileCheckpoint, isGitRepository, buildTaskOrchestrationTemplates, loadPromptContext, buildSystemPromptRuntimeSnapshot, buildRuntimeHookSurfaceSummary, HOOK_EVENTS } from '@open-agent/core';
 import {
   createStore,
   appendTimelineControlPlane,
@@ -2052,20 +2052,11 @@ export function query(
       nextPrompt = options.systemPrompt;
     } else {
       const runtimeSnapshot = runtime.buildSnapshot();
-      const connectedMcpServers = runtimeSnapshot.mcpServers.filter((server) => server.status === 'connected');
       const availableTools = toolRegistry.list().map((tool) => tool.name);
       const configuredActiveTeam = activeTeamName ?? defaultTeamName;
       const coordinatorScratchpadDir = sdkTeamManager.getTeam(configuredActiveTeam)
         ? sdkTeamManager.getScratchpadDir(configuredActiveTeam)
         : join(cwd, '.open-agent', 'scratchpad');
-      const coordinatorContext = buildCoordinatorContext({
-        workerTools: availableTools.filter((name) => name !== 'Task'),
-        activeTeam: sdkTeamManager.getTeam(configuredActiveTeam) ? configuredActiveTeam : undefined,
-        scratchpadDir: coordinatorScratchpadDir,
-        canUseSkills: Boolean(toolRegistry.get('Skill')) && runtimeSnapshot.skills.length > 0,
-        canUseMcpTools: connectedMcpServers.length > 0,
-        taskNotifications: coordinatorTaskNotificationsForPrompt,
-      });
       nextPrompt = buildSystemPrompt({
         model: activeModel,
         cwd,
@@ -2081,17 +2072,14 @@ export function query(
         gitContext: hasContextSection('git-context') ? undefined : promptContext.gitContext,
         contextSections: promptContext.sections,
         toolDescriptions: getToolPromptDescriptions(),
-        runtimeSnapshot: {
-          agents: runtimeSnapshot.agents,
-          skills: runtimeSnapshot.skills,
-          mcpServers: runtimeSnapshot.mcpServers,
-          plugins: runtimeSnapshot.plugins,
-          hooks: buildPromptHookSurface(),
-          diagnostics: runtimeSnapshot.diagnostics,
-          diagnosticSummary: runtimeSnapshot.diagnosticSummary,
-          capabilitySnapshot: runtimeSnapshot.capabilitySnapshot,
-          coordinator: coordinatorContext,
-        },
+        runtimeSnapshot: buildSystemPromptRuntimeSnapshot({
+          runtime: runtimeSnapshot,
+          tools: availableTools,
+          activeTeam: sdkTeamManager.getTeam(configuredActiveTeam) ? configuredActiveTeam : undefined,
+          scratchpadDir: coordinatorScratchpadDir,
+          taskNotifications: coordinatorTaskNotificationsForPrompt,
+          hookSurface: buildPromptHookSurface(),
+        }),
       });
     }
 
