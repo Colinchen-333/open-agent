@@ -1,4 +1,5 @@
 import type { MessageSummarizer, SummarizerOptions } from './summarizer.js';
+import { estimateMessageTokens } from './token-estimate.js';
 
 export interface LlmAutocompactOptions {
   /** Messages in the "protected tail" (most recent N turns) that must not be summarized. */
@@ -73,15 +74,86 @@ export async function llmAutocompact(
   };
 }
 
-/** Decide whether to fire proactive autocompact based on message count + token estimate. */
+export interface ProactiveAutocompactTriggerOptions {
+  /** Legacy: absolute message count threshold. */
+  messageCountThreshold?: number;
+  /** Explicit token threshold. If omitted, derived from model context window. */
+  tokenThreshold?: number;
+  /** Model name for context window lookup. */
+  model?: string;
+  /** Model context window (tokens). If omitted, resolved via getContextWindowForModel(model). */
+  contextWindow?: number;
+  /** Pre-computed estimated token count. If omitted, computed via estimateMessageTokens(messages). */
+  estimatedTokens?: number;
+  /** Circuit breaker: if the last compact produced less than this reduction ratio, don't retry. */
+  minReductionRatio?: number;
+  /** Circuit breaker: last observed ratio (from a prior compact). */
+  lastReductionRatio?: number;
+}
+
+/**
+ * Context window bands:
+ *   safe:    <60%
+ *   warning: 60-85%
+ *   error:   >85%
+ *
+ * Proactive compact fires in warning or error band.
+ */
 export function shouldTriggerProactiveAutocompact(
   messages: ReadonlyArray<unknown>,
-  options: { messageCountThreshold?: number; tokenThreshold?: number; estimatedTokens?: number } = {},
+  options: ProactiveAutocompactTriggerOptions = {},
 ): boolean {
+  // Circuit breaker: skip if previous compact was ineffective
+  if (
+    typeof options.lastReductionRatio === 'number' &&
+    typeof options.minReductionRatio === 'number' &&
+    options.lastReductionRatio < options.minReductionRatio
+  ) {
+    return false;
+  }
+
+  // Legacy path: fixed message count threshold
   const countThreshold = options.messageCountThreshold ?? 80;
   if (messages.length >= countThreshold) return true;
-  if (options.estimatedTokens !== undefined && options.tokenThreshold !== undefined) {
-    if (options.estimatedTokens >= options.tokenThreshold) return true;
+
+  // Token-aware path: compute tokens and compare against model context window band
+  let tokens = options.estimatedTokens;
+  if (tokens === undefined) {
+    tokens = estimateMessageTokens(messages);
   }
+
+  // Resolve threshold: explicit > derived from context window
+  let threshold = options.tokenThreshold;
+  if (threshold === undefined && options.contextWindow !== undefined) {
+    // Warning band: 60% of window
+    threshold = Math.floor(options.contextWindow * 0.6);
+  }
+  if (threshold === undefined && options.model) {
+    // Use require to avoid a static circular import (core should not statically depend on providers)
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { getContextWindowForModel } = require('@open-agent/providers');
+      const window = getContextWindowForModel(options.model);
+      threshold = Math.floor(window * 0.6);
+    } catch {
+      /* fall through */
+    }
+  }
+
+  if (threshold !== undefined && tokens >= threshold) return true;
+
   return false;
+}
+
+/**
+ * Compute the context-window band for observability / UI display.
+ */
+export function getContextWindowBand(
+  tokens: number,
+  contextWindow: number,
+): 'safe' | 'warning' | 'error' {
+  const ratio = tokens / contextWindow;
+  if (ratio >= 0.85) return 'error';
+  if (ratio >= 0.6) return 'warning';
+  return 'safe';
 }

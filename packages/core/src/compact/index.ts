@@ -10,6 +10,7 @@ export type AutoCompactPolicy = 'proactive' | 'reactive-only' | 'disabled';
 
 export * from './summarizer.js';
 export * from './llm-autocompact.js';
+export * from './token-estimate.js';
 
 export interface CompactPipelineOptions {
   /** Number of recent assistant turns whose tool_results to preserve unchanged. */

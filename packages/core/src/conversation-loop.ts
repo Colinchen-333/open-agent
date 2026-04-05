@@ -8,7 +8,7 @@ import { randomUUID } from 'crypto';
 import { basename } from 'path';
 import { SessionManager } from './session-manager.js';
 import { StreamingToolExecutor } from './tool-executor.js';
-import { runCompactPipeline, NOOP_SUMMARIZER, llmAutocompact, shouldTriggerProactiveAutocompact } from './compact/index.js';
+import { runCompactPipeline, NOOP_SUMMARIZER, llmAutocompact, shouldTriggerProactiveAutocompact, estimateMessageTokens } from './compact/index.js';
 import type { MessageSummarizer, AutoCompactPolicy } from './compact/index.js';
 import { fileHistory } from './file-history.js';
 import { feature } from './feature-flags.js';
@@ -310,6 +310,7 @@ export class ConversationLoop {
   // behaviour is unchanged until the caller explicitly opts in.
   private messageSummarizer: MessageSummarizer = NOOP_SUMMARIZER;
   private autoCompactPolicy: AutoCompactPolicy = 'reactive-only';
+  private lastCompactReductionRatio: number | undefined;
 
   constructor(options: ConversationLoopOptions) {
     this.options = options;
@@ -346,15 +347,33 @@ export class ConversationLoop {
 
   /**
    * Run proactive LLM autocompact when the policy is 'proactive' and the
-   * message count threshold is reached.  Errors are silently swallowed so a
-   * summarizer failure cannot crash the conversation loop.
+   * message count or token threshold is reached.  Errors are silently swallowed
+   * so a summarizer failure cannot crash the conversation loop.
+   *
+   * The circuit breaker (lastCompactReductionRatio) prevents tight-loop retries
+   * when a previous compact did not meaningfully reduce message size.
    */
   private async maybeProactiveAutocompact(): Promise<void> {
     if (this.autoCompactPolicy !== 'proactive') return;
-    if (!shouldTriggerProactiveAutocompact(this.messages)) return;
+
+    // Estimate tokens once so we can reuse for trigger + logging
+    const estimatedTokens = estimateMessageTokens(this.messages);
+
+    const shouldCompact = shouldTriggerProactiveAutocompact(this.messages, {
+      model: this.options.model,
+      estimatedTokens,
+      minReductionRatio: 0.2,  // require 20% reduction to avoid tight-loop
+      lastReductionRatio: this.lastCompactReductionRatio,
+    });
+
+    if (!shouldCompact) return;
+
     try {
+      const beforeTokens = estimatedTokens;
       const result = await llmAutocompact(this.messages, this.messageSummarizer);
       if (result.didCompact) {
+        const afterTokens = estimateMessageTokens(result.messages);
+        this.lastCompactReductionRatio = beforeTokens > 0 ? 1 - afterTokens / beforeTokens : 0;
         this.messages = result.messages as typeof this.messages;
       }
     } catch {

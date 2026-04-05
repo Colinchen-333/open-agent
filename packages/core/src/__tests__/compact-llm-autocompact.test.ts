@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { llmAutocompact, shouldTriggerProactiveAutocompact } from '../compact/llm-autocompact';
+import { llmAutocompact, shouldTriggerProactiveAutocompact, getContextWindowBand } from '../compact/llm-autocompact';
 import { NOOP_SUMMARIZER } from '../compact/summarizer';
 import type { MessageSummarizer } from '../compact/summarizer';
 
@@ -226,5 +226,59 @@ describe('shouldTriggerProactiveAutocompact', () => {
         tokenThreshold: 100000,
       }),
     ).toBe(true);
+  });
+
+  test('fires on token threshold when estimatedTokens not pre-supplied', () => {
+    const msgs = Array.from({ length: 10 }, (_, i) => ({
+      role: 'user',
+      content: 'x'.repeat(2000), // ~500 tokens each → ~5000 total + overhead
+    }));
+    // Total ~5000+ tokens
+    expect(shouldTriggerProactiveAutocompact(msgs, { tokenThreshold: 3000 })).toBe(true);
+    expect(shouldTriggerProactiveAutocompact(msgs, { tokenThreshold: 10000 })).toBe(false);
+  });
+
+  test('derives threshold from contextWindow at 60%', () => {
+    const msgs = Array.from({ length: 10 }, () => ({ role: 'user', content: 'x'.repeat(2000) }));
+    // contextWindow 10000 → threshold 6000 → ~5000 tokens is BELOW
+    expect(shouldTriggerProactiveAutocompact(msgs, { contextWindow: 10000 })).toBe(false);
+    // contextWindow 8000 → threshold 4800 → ~5000 tokens is ABOVE
+    expect(shouldTriggerProactiveAutocompact(msgs, { contextWindow: 8000 })).toBe(true);
+  });
+
+  test('circuit breaker skips when last reduction is below minReductionRatio', () => {
+    const msgs = Array.from({ length: 200 }, () => ({ role: 'user', content: 'x' })); // well over count threshold
+    // Without breaker: fires
+    expect(shouldTriggerProactiveAutocompact(msgs)).toBe(true);
+    // With breaker: last reduction 0.1, require 0.2 → SKIP
+    expect(shouldTriggerProactiveAutocompact(msgs, { lastReductionRatio: 0.1, minReductionRatio: 0.2 })).toBe(false);
+    // With breaker: last reduction 0.3, require 0.2 → FIRE
+    expect(shouldTriggerProactiveAutocompact(msgs, { lastReductionRatio: 0.3, minReductionRatio: 0.2 })).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getContextWindowBand
+// ---------------------------------------------------------------------------
+
+describe('getContextWindowBand', () => {
+  test('classifies safe band (< 60%)', () => {
+    expect(getContextWindowBand(500, 10000)).toBe('safe');   // 5%
+  });
+
+  test('classifies warning band (60-85%)', () => {
+    expect(getContextWindowBand(7000, 10000)).toBe('warning'); // 70%
+  });
+
+  test('classifies error band (>= 85%)', () => {
+    expect(getContextWindowBand(9500, 10000)).toBe('error');   // 95%
+  });
+
+  test('boundary: exactly 60% is warning', () => {
+    expect(getContextWindowBand(6000, 10000)).toBe('warning'); // exactly 60%
+  });
+
+  test('boundary: exactly 85% is error', () => {
+    expect(getContextWindowBand(8500, 10000)).toBe('error');   // exactly 85%
   });
 });
