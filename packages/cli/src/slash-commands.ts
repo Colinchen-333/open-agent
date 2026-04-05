@@ -172,6 +172,7 @@ const SLASH_COMMANDS: Record<
         '  Session',
         '    /status          Show session status',
         '    /sessions        List recent sessions',
+        '    /resume [query]  Search and resume a session, with cross-project hints',
         '    /cost            Show session cost',
         '    /compact         Compact conversation history',
         '    /rewind [n]      Rewind file changes',
@@ -890,6 +891,48 @@ const SLASH_COMMANDS: Record<
         `  Model:     ${ctx.model}`,
         `  Provider:  ${(ctx as unknown as Record<string, unknown>).provider as string ?? 'unknown'}`,
       ];
+      return { handled: true, output: lines.join('\n') };
+    },
+  },
+  '/resume': {
+    description: 'Search sessions and resume one, with cross-project hints',
+    handler: async (args, ctx) => {
+      const query = args?.trim() ?? '';
+      const smgr = ctx.sessionMgr;
+      if (!smgr) {
+        return { handled: true, output: 'No session manager available.' };
+      }
+
+      // listSessions accepts a cwd; call with current cwd to get accessible sessions.
+      // Each SessionInfo carries its own .cwd so cross-project detection still works.
+      const sessions = smgr.listSessions(ctx.cwd);
+      if (sessions.length === 0) {
+        return { handled: true, output: 'No sessions found.' };
+      }
+
+      const { searchSessions, buildCrossProjectResumeHint } = await import('@open-agent/core');
+      const results = searchSessions(sessions, { text: query || undefined, limit: 10 }, ctx.cwd);
+
+      if (results.length === 0) {
+        return {
+          handled: true,
+          output: query ? `No sessions matching "${query}".` : 'No matching sessions.',
+        };
+      }
+
+      const lines: string[] = [
+        `Found ${results.length} session(s)${query ? ` matching "${query}"` : ''}:`,
+      ];
+      for (const r of results) {
+        const marker = r.crossProject ? '\u21b1' : ' ';
+        const title = r.title ?? '(untitled)';
+        const score = query ? ` [${r.score.toFixed(2)}]` : '';
+        lines.push(`${marker} ${r.sessionId.slice(0, 8)} ${title}${score}`);
+        if (r.crossProject) {
+          const hint = buildCrossProjectResumeHint(r, ctx.cwd);
+          if (hint) lines.push(`    ${hint}`);
+        }
+      }
       return { handled: true, output: lines.join('\n') };
     },
   },

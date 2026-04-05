@@ -259,6 +259,107 @@ describe('/output-style', () => {
   });
 });
 
+describe('/resume', () => {
+  it('returns no sessions message when session manager is empty', async () => {
+    const ctx = {
+      ...baseCtx,
+      sessionMgr: { listSessions: () => [] },
+    } as any;
+    const result = await handleSlashCommand('/resume', ctx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('No sessions');
+  });
+
+  it('lists all sessions when called with no query', async () => {
+    const ctx = {
+      ...baseCtx,
+      cwd: '/proj/a',
+      sessionMgr: {
+        listSessions: () => [
+          { id: 'aaaaaaaa-0000-0000-0000-000000000000', title: 'Fix auth bug', cwd: '/proj/a', model: 'gpt-4', createdAt: new Date().toISOString(), lastActiveAt: new Date().toISOString() },
+          { id: 'bbbbbbbb-0000-0000-0000-000000000000', title: 'Refactor payments', cwd: '/proj/a', model: 'gpt-4', createdAt: new Date().toISOString(), lastActiveAt: new Date().toISOString() },
+        ],
+      },
+    } as any;
+    const result = await handleSlashCommand('/resume', ctx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('Found 2 session(s)');
+    expect(result?.output).toContain('aaaaaaaa');
+    expect(result?.output).toContain('Fix auth bug');
+    expect(result?.output).toContain('bbbbbbbb');
+    expect(result?.output).toContain('Refactor payments');
+  });
+
+  it('lists matching sessions when a keyword query is provided', async () => {
+    // Use an old lastActiveAt for the non-matching session so its recency bonus
+    // is zero, ensuring the text-score=0 session is filtered out by searchSessions.
+    const oldDate = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    const ctx = {
+      ...baseCtx,
+      cwd: '/proj/a',
+      sessionMgr: {
+        listSessions: () => [
+          { id: 'aaaaaaaa-0000-0000-0000-000000000000', title: 'Fix auth bug', cwd: '/proj/a', model: 'gpt-4', createdAt: oldDate, lastActiveAt: new Date().toISOString() },
+          { id: 'bbbbbbbb-0000-0000-0000-000000000000', title: 'Refactor payments', cwd: '/proj/a', model: 'gpt-4', createdAt: oldDate, lastActiveAt: oldDate },
+        ],
+      },
+    } as any;
+    const result = await handleSlashCommand('/resume auth', ctx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('aaaaaaaa');
+    expect(result?.output).toContain('Fix auth bug');
+    // payments session has no text match and no recency bonus — filtered out
+    expect(result?.output).not.toContain('Refactor payments');
+  });
+
+  it('marks cross-project sessions with marker and hint', async () => {
+    const ctx = {
+      ...baseCtx,
+      cwd: '/proj/a',
+      sessionMgr: {
+        listSessions: () => [
+          { id: 'cccccccc-0000-0000-0000-000000000000', title: 'Other project work', cwd: '/proj/b', model: 'gpt-4', createdAt: new Date().toISOString(), lastActiveAt: new Date().toISOString() },
+        ],
+      },
+    } as any;
+    const result = await handleSlashCommand('/resume', ctx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('cccccccc');
+    expect(result?.output).toContain('different project');
+  });
+
+  it('returns no-session-manager message when sessionMgr is absent', async () => {
+    const result = await handleSlashCommand('/resume', baseCtx as any);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('No session manager available');
+  });
+
+  it('returns no-match message when query finds nothing', async () => {
+    // Use an old lastActiveAt so the recency bonus is zero; an unmatched session
+    // with score=0 (no recency, no text match) is filtered by searchSessions.
+    const oldDate = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    const ctx = {
+      ...baseCtx,
+      cwd: '/proj/a',
+      sessionMgr: {
+        listSessions: () => [
+          { id: 'dddddddd-0000-0000-0000-000000000000', title: 'Fix payments', cwd: '/proj/a', model: 'gpt-4', createdAt: oldDate, lastActiveAt: oldDate },
+        ],
+      },
+    } as any;
+    const result = await handleSlashCommand('/resume zzzunknownzzz', ctx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('No sessions matching');
+    expect(result?.output).toContain('zzzunknownzzz');
+  });
+
+  it('includes /resume in getSlashCommands registry', () => {
+    const commands = getSlashCommands();
+    const names = commands.map((c) => c.name);
+    expect(names).toContain('/resume');
+  });
+});
+
 describe('loadUserSlashCommands', () => {
   function makeTempDir() {
     return mkdtempSync(join(tmpdir(), 'open-agent-cmds-'));
