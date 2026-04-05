@@ -9,6 +9,7 @@ import type {
   StreamEvent,
   ToolSpec,
 } from './types.js';
+import { buildAnthropicThinkingParam } from './thinking.js';
 
 /**
  * Convert a list of SystemPromptBlocks into the Anthropic messages API
@@ -263,29 +264,12 @@ export class AnthropicProvider implements LLMProvider {
           ? [...regularTools, ...serverTools]
           : undefined;
 
-      // Determine thinking configuration
-      const thinking = options.thinking;
-      const useThinking =
-        thinking && thinking.type !== 'disabled';
-
-      let thinkingParam: Anthropic.Messages.ThinkingConfigParam | undefined;
-      let budgetTokens = 0;
-      if (useThinking) {
-        if (thinking?.type === 'enabled') {
-          // Explicitly enabled: respect the caller-supplied budget or use the
-          // effort-based default (full budget scale).
-          budgetTokens = thinking.budgetTokens ?? effortToBudget(options.effort);
-        } else {
-          // 'adaptive' mode: use a smaller, conservative budget so the model
-          // only thinks deeply when it genuinely needs to.
-          budgetTokens = 4000;
-        }
-
-        thinkingParam = {
-          type: 'enabled',
-          budget_tokens: budgetTokens,
-        };
-      }
+      // Determine thinking configuration.
+      // buildAnthropicThinkingParam gates on both the caller's ThinkingConfig
+      // and supportsThinking(model) so we never send thinking to a model that
+      // doesn't support it.
+      const thinkingParam = buildAnthropicThinkingParam(options);
+      const budgetTokens = thinkingParam?.budget_tokens ?? 0;
 
       // When thinking is active max_tokens must exceed budget_tokens or the API
       // will reject the request / truncate output.  Guarantee at least
@@ -345,9 +329,15 @@ export class AnthropicProvider implements LLMProvider {
         messages: anthropicMessages,
         ...(systemParam ? { system: systemParam } : {}),
         ...(cachedTools ? { tools: cachedTools as unknown as Anthropic.Messages.ToolUnion[] } : {}),
-        ...(options.temperature !== undefined && !thinkingParam
-          ? { temperature: options.temperature }
-          : {}),
+        // When thinking is active the Anthropic API requires temperature = 1.0
+        // (any other value is rejected). Inject it explicitly so the model
+        // behaves correctly regardless of the caller-supplied temperature.
+        // When thinking is inactive, forward the caller's value if present.
+        ...(thinkingParam
+          ? { temperature: 1.0 }
+          : options.temperature !== undefined
+            ? { temperature: options.temperature }
+            : {}),
         ...(options.topP !== undefined && !thinkingParam
           ? { top_p: options.topP }
           : {}),
