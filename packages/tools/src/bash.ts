@@ -388,6 +388,10 @@ function readSandboxPolicy(
       writePaths: policy.enforcedFeatures?.writePaths === true,
       readPaths: policy.enforcedFeatures?.readPaths === true,
     },
+    preflightEnforcedFeatures: Array.isArray(policy.preflightEnforcedFeatures)
+      ? policy.preflightEnforcedFeatures.filter((feature): feature is 'network' | 'writePaths' | 'readPaths' =>
+        feature === 'network' || feature === 'writePaths' || feature === 'readPaths')
+      : [],
     hardEnforcedFeatures: Array.isArray(policy.hardEnforcedFeatures)
       ? policy.hardEnforcedFeatures.filter((feature): feature is 'network' | 'writePaths' | 'readPaths' =>
         feature === 'network' || feature === 'writePaths' || feature === 'readPaths')
@@ -448,41 +452,61 @@ function validateBashPreflight(
     };
   }
 
-  const hasPathRules = policy.allowWritePaths.length > 0 || policy.denyWritePaths.length > 0;
-  if (!hasPathRules) return null;
-
-  const writeTargets = extractWriteTargets(command, cwd);
-  for (const target of writeTargets) {
-    if (policy.denyWritePaths.some((denied) => isPathInside(target, denied))) {
-      return {
-        phase: 'preflight',
-        stage: 'preflight',
-        scope: 'filesystem',
-        code: 'write_denied',
-        feature: 'writePaths',
-        severity: 'error',
-        message: `Sandbox policy blocked write to denied path: ${target}`,
-        target,
-        executionEngine: policy.executionEngine,
-        boundaryKind: policy.boundaryKind,
-      };
+  const hasWritePathRules = policy.allowWritePaths.length > 0 || policy.denyWritePaths.length > 0;
+  if (hasWritePathRules) {
+    const writeTargets = extractWriteTargets(command, cwd);
+    for (const target of writeTargets) {
+      if (policy.denyWritePaths.some((denied) => isPathInside(target, denied))) {
+        return {
+          phase: 'preflight',
+          stage: 'preflight',
+          scope: 'filesystem',
+          code: 'write_denied',
+          feature: 'writePaths',
+          severity: 'error',
+          message: `Sandbox policy blocked write to denied path: ${target}`,
+          target,
+          executionEngine: policy.executionEngine,
+          boundaryKind: policy.boundaryKind,
+        };
+      }
+      if (
+        policy.allowWritePaths.length > 0 &&
+        !policy.allowWritePaths.some((allowed) => isPathInside(target, allowed))
+      ) {
+        return {
+          phase: 'preflight',
+          stage: 'preflight',
+          scope: 'filesystem',
+          code: 'write_outside_allowed_paths',
+          feature: 'writePaths',
+          severity: 'error',
+          message: `Sandbox policy blocked write outside allowed paths: ${target}`,
+          target,
+          executionEngine: policy.executionEngine,
+          boundaryKind: policy.boundaryKind,
+        };
+      }
     }
-    if (
-      policy.allowWritePaths.length > 0 &&
-      !policy.allowWritePaths.some((allowed) => isPathInside(target, allowed))
-    ) {
-      return {
-        phase: 'preflight',
-        stage: 'preflight',
-        scope: 'filesystem',
-        code: 'write_outside_allowed_paths',
-        feature: 'writePaths',
-        severity: 'error',
-        message: `Sandbox policy blocked write outside allowed paths: ${target}`,
-        target,
-        executionEngine: policy.executionEngine,
-        boundaryKind: policy.boundaryKind,
-      };
+  }
+
+  if (policy.denyReadPaths.length > 0) {
+    const readTargets = extractReadTargets(command, cwd);
+    for (const target of readTargets) {
+      if (policy.denyReadPaths.some((denied) => isPathInside(target, denied))) {
+        return {
+          phase: 'preflight',
+          stage: 'preflight',
+          scope: 'filesystem',
+          code: 'read_denied',
+          feature: 'readPaths',
+          severity: 'error',
+          message: `Sandbox policy blocked read from denied path: ${target}`,
+          target,
+          executionEngine: policy.executionEngine,
+          boundaryKind: policy.boundaryKind,
+        };
+      }
     }
   }
 
@@ -521,6 +545,7 @@ function createSandboxExecutionProvenance(
       writePaths: false,
       readPaths: false,
     },
+    preflightEnforcedFeatures: input.policy?.preflightEnforcedFeatures ?? [],
     hardEnforcedFeatures: input.policy?.hardEnforcedFeatures ?? [],
     policyOnlyFeatures: input.policy?.policyOnlyFeatures ?? [],
     bypassRequested: input.policy?.bypassRequested ?? false,
@@ -653,6 +678,7 @@ function buildSandboxEnv(policy: BashSandboxExecutionPolicy | undefined): Record
       policy.enforcedFeatures.writePaths ? 'write-paths' : '',
       policy.enforcedFeatures.readPaths ? 'read-paths' : '',
     ].filter(Boolean).join(','),
+    OPEN_AGENT_SANDBOX_PREFLIGHT_ENFORCED_FEATURES: policy.preflightEnforcedFeatures.join(','),
     OPEN_AGENT_SANDBOX_HARD_ENFORCED_FEATURES: policy.hardEnforcedFeatures.join(','),
     OPEN_AGENT_SANDBOX_POLICY_ONLY_FEATURES: policy.policyOnlyFeatures.join(','),
     OPEN_AGENT_SANDBOX_NETWORK_DISABLED: policy.networkDisabled ? '1' : '0',
@@ -788,12 +814,78 @@ function extractWriteTargets(command: string, cwd: string): string[] {
   return [...candidates];
 }
 
+function extractReadTargets(command: string, cwd: string): string[] {
+  const candidates = new Set<string>();
+  const segments = command.split(/(?:&&|\|\||;|\n)/).map((segment) => segment.trim()).filter(Boolean);
+
+  for (const segment of segments) {
+    const tokens = tokenizeShell(segment);
+    if (tokens.length === 0) continue;
+
+    for (let i = 0; i < tokens.length; i++) {
+      if (!isInputRedirectionToken(tokens[i])) continue;
+      const next = tokens[i + 1];
+      if (next) addReadTarget(candidates, next, cwd);
+    }
+
+    const commandName = stripWrappingQuotes(tokens[0]);
+    const args = tokens.slice(1);
+    switch (commandName) {
+      case 'cat':
+      case 'head':
+      case 'tail':
+      case 'less':
+      case 'more':
+      case 'bat':
+      case 'sed':
+      case 'awk':
+      case 'cut':
+      case 'sort':
+      case 'uniq':
+      case 'wc':
+      case 'file':
+      case 'strings':
+      case 'nl':
+      case 'rg':
+      case 'grep':
+      case 'egrep':
+      case 'fgrep':
+        for (const arg of args) {
+          if (isOptionToken(arg)) continue;
+          addReadTarget(candidates, arg, cwd);
+        }
+        break;
+      case 'cp':
+      case 'mv':
+      case 'install': {
+        const positional = args.filter((arg) => !isOptionToken(arg));
+        for (const arg of positional.slice(0, -1)) {
+          addReadTarget(candidates, arg, cwd);
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  return [...candidates];
+}
+
 function tokenizeShell(segment: string): string[] {
   const matches = segment.match(/"[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*'|[^\s]+/g);
   return matches ?? [];
 }
 
 function addWriteTarget(targets: Set<string>, raw: string, cwd: string): void {
+  addShellTarget(targets, raw, cwd);
+}
+
+function addReadTarget(targets: Set<string>, raw: string, cwd: string): void {
+  addShellTarget(targets, raw, cwd);
+}
+
+function addShellTarget(targets: Set<string>, raw: string, cwd: string): void {
   const cleaned = stripWrappingQuotes(raw.trim());
   if (!cleaned || cleaned === '-') return;
   if (
@@ -822,6 +914,10 @@ function stripWrappingQuotes(token: string): string {
 
 function isRedirectionToken(token: string): boolean {
   return /^(?:\d?>>?|&>|2>|1>)$/.test(token);
+}
+
+function isInputRedirectionToken(token: string): boolean {
+  return /^(?:\d?<)$/.test(token);
 }
 
 function extractInlineRedirectTarget(token: string): string | null {

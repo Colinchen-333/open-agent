@@ -28,6 +28,7 @@ export function buildBashSandboxPolicy(input: BuildBashSandboxPolicyInput): Bash
         writePaths: false,
         readPaths: false,
       },
+      preflightEnforcedFeatures: [],
       hardEnforcedFeatures: [],
       policyOnlyFeatures: [],
       allowWritePaths: [],
@@ -57,6 +58,12 @@ export function buildBashSandboxPolicy(input: BuildBashSandboxPolicyInput): Bash
   ]>)
     .filter(([, enforced]) => enforced)
     .map(([feature]) => feature);
+  const preflightEnforcedFeatures = ([
+    networkDisabled ? 'network' : null,
+    allowWritePaths.length > 0 || denyWritePaths.length > 0 ? 'writePaths' : null,
+    denyReadPaths.length > 0 ? 'readPaths' : null,
+  ] as const)
+    .filter((feature): feature is 'network' | 'writePaths' | 'readPaths' => feature !== null);
   const policyOnlyFeatures = ([
     networkDisabled ? 'network' : null,
     allowWritePaths.length > 0 || denyWritePaths.length > 0 ? 'writePaths' : null,
@@ -117,6 +124,7 @@ export function buildBashSandboxPolicy(input: BuildBashSandboxPolicyInput): Bash
     executionEngine,
     boundaryKind,
     enforcedFeatures,
+    preflightEnforcedFeatures,
     hardEnforcedFeatures,
     policyOnlyFeatures,
     allowWritePaths,
@@ -151,6 +159,7 @@ export function isBashSandboxExecutionPolicy(value: unknown): value is BashSandb
     typeof candidate.enforcedFeatures.writePaths === 'boolean' &&
     typeof candidate.enforcedFeatures.readPaths === 'boolean' &&
     Array.isArray(candidate.hardEnforcedFeatures) &&
+    Array.isArray(candidate.preflightEnforcedFeatures) &&
     Array.isArray(candidate.policyOnlyFeatures) &&
     Array.isArray(candidate.allowWritePaths) &&
     Array.isArray(candidate.denyReadPaths) &&

@@ -36,6 +36,7 @@ describe('sandbox-adapter', () => {
       writePaths: false,
       readPaths: false,
     });
+    expect(policy.preflightEnforcedFeatures).toEqual([]);
     expect(policy.hardEnforcedFeatures).toEqual([]);
     expect(policy.policyOnlyFeatures).toEqual([]);
     expect(policy.bypassRequested).toBe(true);
@@ -62,6 +63,7 @@ describe('sandbox-adapter', () => {
       writePaths: process.platform === 'darwin',
       readPaths: false,
     });
+    expect(policy.preflightEnforcedFeatures).toEqual(expect.arrayContaining(['writePaths', 'readPaths']));
     expect(policy.boundaryKind).toBe(process.platform === 'darwin' ? 'mixed' : 'policy_only');
     expect(policy.hardEnforcedFeatures).toEqual(process.platform === 'darwin' ? ['writePaths'] : []);
     expect(policy.policyOnlyFeatures).toEqual(process.platform === 'darwin' ? ['readPaths'] : ['writePaths', 'readPaths']);
@@ -183,11 +185,11 @@ describe('sandbox preflight via Bash tool', () => {
     });
 
     const result = await bash.execute({
-      command: 'echo "$OPEN_AGENT_SANDBOX|$OPEN_AGENT_SANDBOX_NETWORK_DISABLED|$OPEN_AGENT_SANDBOX_EXECUTION_ENGINE|$OPEN_AGENT_SANDBOX_BOUNDARY_KIND|$OPEN_AGENT_SANDBOX_HARD_ENFORCED_FEATURES|$OPEN_AGENT_SANDBOX_POLICY_ONLY_FEATURES"',
+      command: 'echo "$OPEN_AGENT_SANDBOX|$OPEN_AGENT_SANDBOX_NETWORK_DISABLED|$OPEN_AGENT_SANDBOX_EXECUTION_ENGINE|$OPEN_AGENT_SANDBOX_BOUNDARY_KIND|$OPEN_AGENT_SANDBOX_PREFLIGHT_ENFORCED_FEATURES|$OPEN_AGENT_SANDBOX_HARD_ENFORCED_FEATURES|$OPEN_AGENT_SANDBOX_POLICY_ONLY_FEATURES"',
       [BASH_SANDBOX_POLICY_FIELD]: policy,
     }, ctx());
 
-    expect(result).toContain(`1|1|${policy.executionEngine}|${policy.boundaryKind}|${policy.hardEnforcedFeatures.join(',')}|${policy.policyOnlyFeatures.join(',')}`);
+    expect(result).toContain(`1|1|${policy.executionEngine}|${policy.boundaryKind}|${policy.preflightEnforcedFeatures.join(',')}|${policy.hardEnforcedFeatures.join(',')}|${policy.policyOnlyFeatures.join(',')}`);
   });
 
   it('blocks network commands when network is disabled', async () => {
@@ -311,7 +313,7 @@ describe('sandbox preflight via Bash tool', () => {
     expect(() => readFileSync(blockedPath, 'utf-8')).toThrow();
   });
 
-  it('surfaces denyRead as policy metadata without claiming execution enforcement', async () => {
+  it('surfaces denyRead as preflight-enforced policy metadata without claiming native execution enforcement', async () => {
     const blockedPath = join(tmpDir, 'blocked', 'secret.txt');
     mkdirSync(join(tmpDir, 'blocked'), { recursive: true });
     writeFileSync(blockedPath, 'top-secret', 'utf-8');
@@ -328,6 +330,41 @@ describe('sandbox preflight via Bash tool', () => {
 
     expect(policy.denyReadPaths).toEqual([join(tmpDir, 'blocked')]);
     expect(policy.enforcedFeatures.readPaths).toBe(false);
+    expect(policy.preflightEnforcedFeatures).toContain('readPaths');
     expect(policy.policyOnlyFeatures).toContain('readPaths');
+  });
+
+  it('blocks direct reads from denyRead paths before execution', async () => {
+    const blockedPath = join(tmpDir, 'blocked', 'secret.txt');
+    mkdirSync(join(tmpDir, 'blocked'), { recursive: true });
+    writeFileSync(blockedPath, 'top-secret', 'utf-8');
+
+    const policy = buildBashSandboxPolicy({
+      sandbox: {
+        enabled: true,
+        filesystem: {
+          denyRead: [join(tmpDir, 'blocked')],
+        },
+      },
+      cwd: tmpDir,
+    });
+
+    let error: unknown;
+    try {
+      await bash.execute({
+        command: `cat "${blockedPath}"`,
+        [BASH_SANDBOX_POLICY_FIELD]: policy,
+      }, ctx());
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error & { sandboxViolation?: unknown }).sandboxViolation).toEqual(expect.objectContaining({
+      phase: 'preflight',
+      code: 'read_denied',
+      feature: 'readPaths',
+      target: blockedPath,
+    }));
   });
 });

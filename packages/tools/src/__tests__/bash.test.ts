@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { createBashTool } from '../bash.js';
@@ -262,6 +262,54 @@ describe('Bash tool', () => {
       command: 'echo "blocked" > ./blocked.txt',
       runInBackground: false,
       boundaryKind: expect.any(String),
+    }));
+    expect(ctx.diagnostics[0]).toEqual(expect.objectContaining({
+      code: 'bash_sandbox_execution',
+      severity: 'error',
+      payload: expect.objectContaining({
+        outcome: 'blocked',
+      }),
+    }));
+  });
+
+  it('blocks denyRead targets at preflight and records read-path provenance', async () => {
+    const ctx = makeStatefulCtx();
+    const blockedDir = join(tmpDir, 'blocked-read');
+    const blockedFile = join(blockedDir, 'secret.txt');
+    rmSync(blockedDir, { recursive: true, force: true });
+    mkdirSync(blockedDir, { recursive: true });
+    writeFileSync(blockedFile, 'top-secret', 'utf-8');
+
+    const policy = buildBashSandboxPolicy({
+      sandbox: {
+        enabled: true,
+        filesystem: {
+          denyRead: [blockedDir],
+        },
+      },
+      cwd: tmpDir,
+    });
+
+    let error: any;
+    try {
+      await tool.execute({
+        command: `cat "${blockedFile}"`,
+        [BASH_SANDBOX_POLICY_FIELD]: policy,
+      }, ctx as any);
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error.sandboxViolation).toEqual(expect.objectContaining({
+      phase: 'preflight',
+      code: 'read_denied',
+      feature: 'readPaths',
+      target: blockedFile,
+    }));
+    expect(error.sandboxExecution?.provenance).toEqual(expect.objectContaining({
+      preflightEnforcedFeatures: expect.arrayContaining(['readPaths']),
+      enforcedFeatures: expect.objectContaining({ readPaths: false }),
     }));
     expect(ctx.diagnostics[0]).toEqual(expect.objectContaining({
       code: 'bash_sandbox_execution',

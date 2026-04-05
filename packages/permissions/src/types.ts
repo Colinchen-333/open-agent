@@ -81,6 +81,7 @@ export interface BashSandboxExecutionProvenance {
     writePaths: boolean;
     readPaths: boolean;
   };
+  preflightEnforcedFeatures: Array<'network' | 'writePaths' | 'readPaths'>;
   hardEnforcedFeatures: Array<'network' | 'writePaths' | 'readPaths'>;
   policyOnlyFeatures: Array<'network' | 'writePaths' | 'readPaths'>;
   bypassRequested: boolean;
@@ -108,6 +109,7 @@ export interface BashSandboxExecutionPolicy {
     writePaths: boolean;
     readPaths: boolean;
   };
+  preflightEnforcedFeatures: Array<'network' | 'writePaths' | 'readPaths'>;
   hardEnforcedFeatures: Array<'network' | 'writePaths' | 'readPaths'>;
   policyOnlyFeatures: Array<'network' | 'writePaths' | 'readPaths'>;
   allowWritePaths: string[];
