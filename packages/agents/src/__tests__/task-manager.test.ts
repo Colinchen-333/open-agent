@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { TaskManager } from '../task-manager';
@@ -151,5 +151,36 @@ describe('TaskManager scheduling', () => {
 
     manager.releaseLease(blocker.id, 'worker-a', 'completed');
     expect(manager.listAvailable(new Date('2026-04-01T10:00:02.000Z')).map((entry) => entry.id)).toEqual([blocked.id]);
+  });
+
+  it('claimNext 会跳过被其他 dispatcher 锁住的任务', () => {
+    const high = manager.create('high', 'high priority', undefined, undefined, 10);
+    const low = manager.create('low', 'low priority', undefined, undefined, 1);
+
+    const lockPath = join(rootDir, 'demo', `.${high.id}.lock`);
+    writeFileSync(lockPath, JSON.stringify({ pid: 99999, acquiredAt: new Date().toISOString() }));
+
+    const claimed = manager.claimNext('worker-a', {
+      now: new Date('2026-04-01T10:00:00.000Z'),
+      leaseMs: 60_000,
+    });
+
+    expect(claimed?.id).toBe(low.id);
+    expect(manager.get(high.id)?.status).toBe('pending');
+  });
+
+  it('claimNext 会回收陈旧任务锁并继续领取', () => {
+    const task = manager.create('stale-lock', 'recover stale lock', undefined, undefined, 5);
+    const lockPath = join(rootDir, 'demo', `.${task.id}.lock`);
+    writeFileSync(lockPath, JSON.stringify({ pid: 99999, acquiredAt: '2026-04-01T09:00:00.000Z' }));
+    utimesSync(lockPath, new Date('2026-04-01T09:00:00.000Z'), new Date('2026-04-01T09:00:00.000Z'));
+
+    const claimed = manager.claimNext('worker-a', {
+      now: new Date('2026-04-01T10:00:00.000Z'),
+      leaseMs: 60_000,
+    });
+
+    expect(claimed?.id).toBe(task.id);
+    expect(claimed?.owner).toBe('worker-a');
   });
 });
