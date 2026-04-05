@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { llmAutocompact, shouldTriggerProactiveAutocompact, getContextWindowBand } from '../compact/llm-autocompact';
+import { llmAutocompact, shouldTriggerProactiveAutocompact, getContextWindowBand, computeEffectiveContextWindow } from '../compact/llm-autocompact';
 import { NOOP_SUMMARIZER } from '../compact/summarizer';
 import type { MessageSummarizer } from '../compact/summarizer';
+import type { ContextWindowConfig } from '../compact/llm-autocompact';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -280,5 +281,119 @@ describe('getContextWindowBand', () => {
 
   test('boundary: exactly 85% is error', () => {
     expect(getContextWindowBand(8500, 10000)).toBe('error');   // exactly 85%
+  });
+
+  test('accepts ContextWindowConfig and uses effective window', () => {
+    // Effective: 200_000 - 16_000 - 20_000 = 164_000
+    // Warning at 60% of effective = 98_400; error at 85% of effective = 139_400
+    const config: ContextWindowConfig = { contextWindow: 200_000, reservedOutputTokens: 16_000, safetyBufferRatio: 0.1 };
+    expect(getContextWindowBand(50_000, config)).toBe('safe');
+    expect(getContextWindowBand(100_000, config)).toBe('warning');
+    expect(getContextWindowBand(150_000, config)).toBe('error');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// computeEffectiveContextWindow
+// ---------------------------------------------------------------------------
+
+describe('computeEffectiveContextWindow', () => {
+  test('subtracts reserved output and safety buffer', () => {
+    expect(computeEffectiveContextWindow({
+      contextWindow: 200_000,
+      reservedOutputTokens: 16_000,
+      safetyBufferRatio: 0.1,
+    })).toBe(200_000 - 16_000 - 20_000); // = 164_000
+  });
+
+  test('uses default reservedOutputTokens=16_000 and safetyBufferRatio=0.1', () => {
+    expect(computeEffectiveContextWindow({ contextWindow: 100_000 }))
+      .toBe(100_000 - 16_000 - 10_000); // = 74_000
+  });
+
+  test('clamps to 0 when reserved + buffer exceed contextWindow', () => {
+    expect(computeEffectiveContextWindow({
+      contextWindow: 10_000,
+      reservedOutputTokens: 9_000,
+      safetyBufferRatio: 0.5,
+    })).toBe(0); // 10_000 - 9_000 - 5_000 = -4_000 → clamped to 0
+  });
+
+  test('safetyBuffer uses floor division', () => {
+    // 3 * 0.1 = 0.3 → floor to 0
+    expect(computeEffectiveContextWindow({
+      contextWindow: 3,
+      reservedOutputTokens: 0,
+      safetyBufferRatio: 0.1,
+    })).toBe(3); // 3 - 0 - 0 = 3
+  });
+});
+
+// ---------------------------------------------------------------------------
+// shouldTriggerProactiveAutocompact — effective window + consecutive breaker
+// ---------------------------------------------------------------------------
+
+describe('shouldTriggerProactiveAutocompact (effective window)', () => {
+  test('uses effective window when windowConfig is provided', () => {
+    // 10 messages × ~5_000 tokens each (20_000 chars / 4) ≈ 50_000 tokens
+    // Effective window for 100_000: 100_000 - 16_000 - 10_000 = 74_000
+    // Warning at 60% of effective = 44_400 → 50_000 > 44_400 → trigger
+    const msgs = Array.from({ length: 10 }, () => ({ role: 'user', content: 'x'.repeat(20_000) }));
+    expect(shouldTriggerProactiveAutocompact(msgs, {
+      windowConfig: { contextWindow: 100_000 },
+    })).toBe(true);
+  });
+
+  test('does not trigger when below effective window warning band', () => {
+    // 5 messages × ~125 tokens (500 chars / 4) ≈ 625 tokens
+    // Effective window for 100_000 = 74_000. Warning at 60% = 44_400. 625 << threshold.
+    const msgs = Array.from({ length: 5 }, () => ({ role: 'user', content: 'x'.repeat(500) }));
+    expect(shouldTriggerProactiveAutocompact(msgs, {
+      windowConfig: { contextWindow: 100_000 },
+      messageCountThreshold: 999, // disable count path
+    })).toBe(false);
+  });
+
+  test('consecutive failure circuit breaker trips at maxConsecutiveIneffective', () => {
+    const msgs = Array.from({ length: 200 }, () => ({ role: 'user', content: 'x' }));
+    // 3 consecutive failures = trip
+    expect(shouldTriggerProactiveAutocompact(msgs, {
+      consecutiveIneffectiveCompacts: 3,
+      maxConsecutiveIneffective: 3,
+    })).toBe(false);
+    // 2 failures: still below limit, count threshold still fires
+    expect(shouldTriggerProactiveAutocompact(msgs, {
+      consecutiveIneffectiveCompacts: 2,
+      maxConsecutiveIneffective: 3,
+    })).toBe(true);
+  });
+
+  test('consecutive breaker at 0 does not suppress', () => {
+    const msgs = Array.from({ length: 200 }, () => ({ role: 'user', content: 'x' }));
+    expect(shouldTriggerProactiveAutocompact(msgs, {
+      consecutiveIneffectiveCompacts: 0,
+      maxConsecutiveIneffective: 3,
+    })).toBe(true);
+  });
+
+  test('consecutive breaker defaults maxConsecutiveIneffective=3', () => {
+    const msgs = Array.from({ length: 200 }, () => ({ role: 'user', content: 'x' }));
+    // Default max is 3, so 3 fails should trip
+    expect(shouldTriggerProactiveAutocompact(msgs, {
+      consecutiveIneffectiveCompacts: 3,
+    })).toBe(false);
+    // 4 fails also trips
+    expect(shouldTriggerProactiveAutocompact(msgs, {
+      consecutiveIneffectiveCompacts: 4,
+    })).toBe(false);
+  });
+
+  test('getContextWindowBand uses effective window via ContextWindowConfig', () => {
+    // Effective: 200_000 - 16_000 - 20_000 = 164_000
+    // safe < 60% effective (98_400); warning 60-85% (98_400–139_400); error >= 85% (139_400)
+    const config: ContextWindowConfig = { contextWindow: 200_000, reservedOutputTokens: 16_000 };
+    expect(getContextWindowBand(50_000, config)).toBe('safe');
+    expect(getContextWindowBand(100_000, config)).toBe('warning');
+    expect(getContextWindowBand(150_000, config)).toBe('error');
   });
 });

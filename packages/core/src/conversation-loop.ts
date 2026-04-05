@@ -9,7 +9,7 @@ import { basename } from 'path';
 import { SessionManager } from './session-manager.js';
 import { StreamingToolExecutor } from './tool-executor.js';
 import { runCompactPipeline, NOOP_SUMMARIZER, llmAutocompact, shouldTriggerProactiveAutocompact, estimateMessageTokens } from './compact/index.js';
-import type { MessageSummarizer, AutoCompactPolicy } from './compact/index.js';
+import type { MessageSummarizer, AutoCompactPolicy, ContextWindowConfig } from './compact/index.js';
 import { fileHistory } from './file-history.js';
 import { feature } from './feature-flags.js';
 
@@ -75,6 +75,8 @@ export interface ConversationLoopOptions {
   systemPrompt?: string;
   maxTurns?: number;
   maxTokens?: number;
+  /** Raw model context window size in tokens. Used to compute the effective window for proactive compaction. */
+  contextWindow?: number;
   thinking?: ThinkingConfig;
   effort?: 'low' | 'medium' | 'high' | 'max';
   cwd: string;
@@ -311,6 +313,8 @@ export class ConversationLoop {
   private messageSummarizer: MessageSummarizer = NOOP_SUMMARIZER;
   private autoCompactPolicy: AutoCompactPolicy = 'reactive-only';
   private lastCompactReductionRatio: number | undefined;
+  /** Counts consecutive compacts that reduced size by < 15%. Resets to 0 on an effective compact. */
+  private consecutiveIneffectiveCompacts = 0;
 
   constructor(options: ConversationLoopOptions) {
     this.options = options;
@@ -350,20 +354,35 @@ export class ConversationLoop {
    * message count or token threshold is reached.  Errors are silently swallowed
    * so a summarizer failure cannot crash the conversation loop.
    *
-   * The circuit breaker (lastCompactReductionRatio) prevents tight-loop retries
-   * when a previous compact did not meaningfully reduce message size.
+   * Uses a two-tier circuit breaker:
+   *  - Legacy single-ratio breaker (minReductionRatio / lastReductionRatio)
+   *  - Consecutive-failure counter that backs off after N ineffective compacts
+   *
+   * The effective context window (contextWindow - reservedOutput - safetyBuffer)
+   * is used as the denominator for band thresholds when contextWindow is known,
+   * preventing the compact from racing the model's absolute token limit.
    */
   private async maybeProactiveAutocompact(): Promise<void> {
     if (this.autoCompactPolicy !== 'proactive') return;
 
-    // Estimate tokens once so we can reuse for trigger + logging
+    // Estimate tokens once so we can reuse for trigger + ratio accounting
     const estimatedTokens = estimateMessageTokens(this.messages);
+
+    // Build effective window config when the raw context window is available
+    const rawContextWindow = this.options.contextWindow;
+    const maxOutput = this.options.maxTokens ?? 16_000;
+    const windowConfig: ContextWindowConfig | undefined = rawContextWindow !== undefined
+      ? { contextWindow: rawContextWindow, reservedOutputTokens: maxOutput, safetyBufferRatio: 0.1 }
+      : undefined;
 
     const shouldCompact = shouldTriggerProactiveAutocompact(this.messages, {
       model: this.options.model,
       estimatedTokens,
-      minReductionRatio: 0.2,  // require 20% reduction to avoid tight-loop
+      windowConfig,
+      minReductionRatio: 0.2,  // legacy ratio breaker — require 20% reduction
       lastReductionRatio: this.lastCompactReductionRatio,
+      consecutiveIneffectiveCompacts: this.consecutiveIneffectiveCompacts,
+      maxConsecutiveIneffective: 3,
     });
 
     if (!shouldCompact) return;
@@ -373,11 +392,21 @@ export class ConversationLoop {
       const result = await llmAutocompact(this.messages, this.messageSummarizer);
       if (result.didCompact) {
         const afterTokens = estimateMessageTokens(result.messages);
-        this.lastCompactReductionRatio = beforeTokens > 0 ? 1 - afterTokens / beforeTokens : 0;
+        const ratio = beforeTokens > 0 ? 1 - afterTokens / beforeTokens : 0;
+
+        // Update consecutive-failure counter: < 15% reduction is "ineffective"
+        if (ratio < 0.15) {
+          this.consecutiveIneffectiveCompacts++;
+        } else {
+          this.consecutiveIneffectiveCompacts = 0; // reset on meaningful compact
+        }
+
+        this.lastCompactReductionRatio = ratio;
         this.messages = result.messages as typeof this.messages;
       }
     } catch {
-      /* autocompact failures should not crash the loop */
+      // Summarizer errors count as an ineffective compact to avoid tight-loop retries
+      this.consecutiveIneffectiveCompacts++;
     }
   }
 
