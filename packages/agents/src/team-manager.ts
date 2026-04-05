@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, unlinkSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, unlinkSync, renameSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
@@ -277,8 +277,21 @@ export class TeamManager {
 
     for (const file of selectedFiles) {
       const filePath = join(inboxDir, file);
+      let claimedPath = filePath;
       try {
-        const message = JSON.parse(readFileSync(filePath, 'utf-8')) as TeamMessage;
+        if (options.consume) {
+          claimedPath = join(
+            inboxDir,
+            `.claim-${process.pid}-${randomUUID().slice(0, 8)}-${file}`,
+          );
+          try {
+            renameSync(filePath, claimedPath);
+          } catch {
+            // Another reader claimed or removed the file first.
+            continue;
+          }
+        }
+        const message = JSON.parse(readFileSync(claimedPath, 'utf-8')) as TeamMessage;
         const readAt = acknowledged[file];
         entries.push({
           id: file,
@@ -287,7 +300,7 @@ export class TeamManager {
         });
         if (options.consume) {
           try {
-            unlinkSync(filePath);
+            unlinkSync(claimedPath);
           } catch {
             // Ignore per-file deletion errors.
           }
@@ -303,7 +316,7 @@ export class TeamManager {
         }
       } catch {
         if (options.consume) {
-          try { unlinkSync(filePath); } catch { /* ignore */ }
+          try { unlinkSync(claimedPath); } catch { /* ignore */ }
         }
       }
     }
