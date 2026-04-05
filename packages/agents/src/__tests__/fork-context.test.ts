@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { createForkContext, DEFAULT_CHILD_DIRECTIVE, type ForkableContext } from '../fork-context';
+import {
+  createForkContext,
+  DEFAULT_CHILD_DIRECTIVE,
+  findOrphanedToolUseIds,
+  type ForkableContext,
+} from '../fork-context';
 
 describe('createForkContext', () => {
   test('clones parent permission/tool context snapshot', () => {
@@ -14,7 +19,7 @@ describe('createForkContext', () => {
     parent.messages.push({ role: 'assistant', content: 'late' });
     // Fork must NOT reflect post-fork mutations
     expect(fork.allowedTools.has('Bash')).toBe(false);
-    // fork.messages = [directive, original parent user msg]
+    // fork.messages = [original parent user msg, directive user msg]
     expect(fork.messages).toHaveLength(2);
     expect(fork.permissionMode).toBe('default');
   });
@@ -52,20 +57,26 @@ describe('createForkContext', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Cache-safe fork behaviors (R5.4)
+  // Cache-stable fork behaviors (R6.3)
+  // The directive is now the LAST message (role: 'user'), not a leading system msg.
   // ---------------------------------------------------------------------------
 
-  test('prepends the default child directive as a system message', () => {
+  test('appends the default child directive as the last user message text block', () => {
     const parent: ForkableContext = {
       permissionMode: 'default',
       allowedTools: new Set(['Read']),
       messages: [{ role: 'user', content: 'hello' }],
     };
     const fork = createForkContext(parent);
-    const first = fork.messages[0] as any;
-    expect(first.role).toBe('system');
-    expect(first.content).toBe(DEFAULT_CHILD_DIRECTIVE);
-    expect(first.content).toContain('forked subagent');
+    // The directive is the LAST message, not the first
+    const last = fork.messages[fork.messages.length - 1] as any;
+    expect(last.role).toBe('user');
+    expect(Array.isArray(last.content)).toBe(true);
+    // The text block is the final block in the content array
+    const textBlock = last.content[last.content.length - 1];
+    expect(textBlock.type).toBe('text');
+    expect(textBlock.text).toBe(DEFAULT_CHILD_DIRECTIVE);
+    expect(textBlock.text).toContain('forked subagent');
   });
 
   test('accepts a custom childDirective', () => {
@@ -75,10 +86,14 @@ describe('createForkContext', () => {
       messages: [],
     };
     const fork = createForkContext(parent, { childDirective: 'custom directive' });
-    expect((fork.messages[0] as any).content).toBe('custom directive');
+    const last = fork.messages[fork.messages.length - 1] as any;
+    expect(last.role).toBe('user');
+    const textBlock = last.content[last.content.length - 1];
+    expect(textBlock.type).toBe('text');
+    expect(textBlock.text).toBe('custom directive');
   });
 
-  test('includes a worktree notice when cwd differs from parentCwd', () => {
+  test('includes a worktree notice in the directive text block when cwd differs from parentCwd', () => {
     const parent: ForkableContext = {
       permissionMode: 'default',
       allowedTools: new Set(),
@@ -87,12 +102,15 @@ describe('createForkContext', () => {
       parentCwd: '/work/main',
     };
     const fork = createForkContext(parent);
-    // First msg = directive, second = worktree notice
-    const notice = fork.messages[1] as any;
-    expect(notice.role).toBe('system');
-    expect(notice.content).toContain('worktree notice');
-    expect(notice.content).toContain('/work/branch-a');
-    expect(notice.content).toContain('/work/main');
+    // Only ONE extra message is appended (the directive user message)
+    expect(fork.messages).toHaveLength(1);
+    const last = fork.messages[fork.messages.length - 1] as any;
+    expect(last.role).toBe('user');
+    const textBlock = last.content[last.content.length - 1];
+    expect(textBlock.type).toBe('text');
+    expect(textBlock.text).toContain('worktree notice');
+    expect(textBlock.text).toContain('/work/branch-a');
+    expect(textBlock.text).toContain('/work/main');
   });
 
   test('omits worktree notice when cwd === parentCwd', () => {
@@ -104,8 +122,11 @@ describe('createForkContext', () => {
       parentCwd: '/same',
     };
     const fork = createForkContext(parent);
-    // Only directive, no worktree notice
+    // Only the directive user message appended; no extra system messages
     expect(fork.messages).toHaveLength(1);
+    const last = fork.messages[0] as any;
+    const textBlock = last.content[last.content.length - 1];
+    expect(textBlock.text).not.toContain('worktree notice');
   });
 
   test('omits worktree notice when includeWorktreeNotice is false', () => {
@@ -117,10 +138,14 @@ describe('createForkContext', () => {
       parentCwd: '/work/main',
     };
     const fork = createForkContext(parent, { includeWorktreeNotice: false });
+    // Only the directive user message, no worktree text
     expect(fork.messages).toHaveLength(1);
+    const last = fork.messages[0] as any;
+    const textBlock = last.content[last.content.length - 1];
+    expect(textBlock.text).not.toContain('worktree notice');
   });
 
-  test('synthesizes placeholder tool_result for orphaned tool_use', () => {
+  test('synthesizes placeholder tool_result for orphaned tool_use in the directive message', () => {
     const parent: ForkableContext = {
       permissionMode: 'default',
       allowedTools: new Set(['Bash']),
@@ -134,15 +159,17 @@ describe('createForkContext', () => {
       ],
     };
     const fork = createForkContext(parent);
-    // fork.messages = [directive, parent-assistant-with-tool-use, synthetic-tool-result]
-    expect(fork.messages).toHaveLength(3);
-    const last = fork.messages[2] as any;
+    // fork.messages = [parent-assistant-with-tool-use, directive-user-msg]
+    expect(fork.messages).toHaveLength(2);
+    const last = fork.messages[1] as any;
     expect(last.role).toBe('user');
     expect(Array.isArray(last.content)).toBe(true);
+    // First block is the tool_result placeholder; last block is the text directive
     expect(last.content[0].type).toBe('tool_result');
     expect(last.content[0].tool_use_id).toBe('orphan-1');
     expect(last.content[0].content).toContain('forked');
     expect(last.content[0].is_error).toBe(false);
+    expect(last.content[last.content.length - 1].type).toBe('text');
   });
 
   test('does NOT synthesize placeholder when tool_result is already present', () => {
@@ -161,14 +188,16 @@ describe('createForkContext', () => {
       ],
     };
     const fork = createForkContext(parent);
-    // [directive, parent msgs...] — no synthetic placeholder
+    // [parent-assistant, parent-user(tool_result), directive-user-msg]
     expect(fork.messages).toHaveLength(3);
-    // Last message is the existing tool_result, not a synthesized one
+    // The directive user message has only the text block (no placeholder tool_results)
     const last = fork.messages[2] as any;
-    expect(last.content[0].content).toBe('file contents');
+    expect(last.role).toBe('user');
+    expect(last.content).toHaveLength(1);
+    expect(last.content[0].type).toBe('text');
   });
 
-  test('synthesizes placeholders for multiple orphaned tool_use blocks', () => {
+  test('synthesizes placeholders for multiple orphaned tool_use blocks in the directive message', () => {
     const parent: ForkableContext = {
       permissionMode: 'default',
       allowedTools: new Set(['Bash', 'Read']),
@@ -183,12 +212,17 @@ describe('createForkContext', () => {
       ],
     };
     const fork = createForkContext(parent);
-    // fork.messages = [directive, parent-msg, synthetic-placeholder]
-    expect(fork.messages).toHaveLength(3);
-    const placeholder = fork.messages[2] as any;
-    expect(placeholder.content).toHaveLength(2);
-    const ids = placeholder.content.map((b: any) => b.tool_use_id).sort();
-    expect(ids).toEqual(['a', 'b']);
+    // [parent-assistant-msg, directive-user-msg]
+    expect(fork.messages).toHaveLength(2);
+    const last = fork.messages[1] as any;
+    // 2 tool_result placeholders + 1 text directive block
+    expect(last.content).toHaveLength(3);
+    const placeholderIds = last.content
+      .filter((b: any) => b.type === 'tool_result')
+      .map((b: any) => b.tool_use_id)
+      .sort();
+    expect(placeholderIds).toEqual(['a', 'b']);
+    expect(last.content[last.content.length - 1].type).toBe('text');
   });
 
   test('synthesizes only for unmatched tool_use when some are resolved', () => {
@@ -210,10 +244,85 @@ describe('createForkContext', () => {
       ],
     };
     const fork = createForkContext(parent);
-    // fork.messages = [directive, assistant, user(resolved), synthetic(orphan)]
-    expect(fork.messages).toHaveLength(4);
-    const synthetic = fork.messages[3] as any;
-    expect(synthetic.content).toHaveLength(1);
-    expect(synthetic.content[0].tool_use_id).toBe('orphan');
+    // [parent-assistant, parent-user(resolved), directive-user-msg]
+    expect(fork.messages).toHaveLength(3);
+    const last = fork.messages[2] as any;
+    // 1 placeholder for 'orphan' + 1 text block
+    expect(last.content).toHaveLength(2);
+    expect(last.content[0].type).toBe('tool_result');
+    expect(last.content[0].tool_use_id).toBe('orphan');
+    expect(last.content[1].type).toBe('text');
+  });
+
+  test('no system messages are inserted into the message array', () => {
+    const parent: ForkableContext = {
+      permissionMode: 'default',
+      allowedTools: new Set(),
+      messages: [{ role: 'user', content: 'start' }, { role: 'assistant', content: 'ok' }],
+      cwd: '/work/branch',
+      parentCwd: '/work/main',
+    };
+    const fork = createForkContext(parent);
+    for (const msg of fork.messages) {
+      expect((msg as any).role).not.toBe('system');
+    }
+  });
+
+  test('parent messages are left byte-identical (not mutated or reordered)', () => {
+    const parentMsgs = [
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'world' },
+    ];
+    const parent: ForkableContext = {
+      permissionMode: 'default',
+      allowedTools: new Set(),
+      messages: parentMsgs,
+    };
+    const fork = createForkContext(parent);
+    // The first two messages in the fork must be the exact same objects
+    expect(fork.messages[0]).toBe(parentMsgs[0]);
+    expect(fork.messages[1]).toBe(parentMsgs[1]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findOrphanedToolUseIds unit tests
+// ---------------------------------------------------------------------------
+
+describe('findOrphanedToolUseIds', () => {
+  test('returns empty array when no tool_use blocks exist', () => {
+    const msgs = [{ role: 'user', content: 'hi' }];
+    expect(findOrphanedToolUseIds(msgs)).toEqual([]);
+  });
+
+  test('returns empty array when all tool_use blocks are resolved', () => {
+    const msgs = [
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'x', name: 'T', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'x', content: 'done' }] },
+    ];
+    expect(findOrphanedToolUseIds(msgs)).toEqual([]);
+  });
+
+  test('returns orphan ids', () => {
+    const msgs = [
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'orphan', name: 'T', input: {} }] },
+    ];
+    expect(findOrphanedToolUseIds(msgs)).toContain('orphan');
+  });
+
+  test('handles mixed resolved and orphan blocks', () => {
+    const msgs = [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 'r', name: 'T', input: {} },
+          { type: 'tool_use', id: 'o', name: 'T', input: {} },
+        ],
+      },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'r', content: 'ok' }] },
+    ];
+    const orphans = findOrphanedToolUseIds(msgs);
+    expect(orphans).toContain('o');
+    expect(orphans).not.toContain('r');
   });
 });
