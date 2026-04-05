@@ -29,6 +29,13 @@ export {
 } from './context-providers.js';
 export { FileCheckpoint } from './checkpoint.js';
 export { buildGitContextSnapshot } from './git-context.js';
+export {
+  buildCoordinatorContext,
+  type CoordinatorContext,
+  type CoordinatorRecoveryHint,
+  type CoordinatorTaskNotificationLike,
+  type BuildCoordinatorContextOptions,
+} from './coordinator-context.js';
 export { buildSystemPrompt, isGitRepository, type SystemPromptOptions } from './system-prompt.js';
 export {
   buildTaskOrchestrationTemplates,
