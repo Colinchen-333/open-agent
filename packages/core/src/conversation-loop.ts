@@ -502,6 +502,7 @@ export class ConversationLoop {
 
     // Append the user message to local history and emit it as an SDKUserMessage.
     this.messages.push({ role: 'user', content: userMessage });
+    this.updateClassifierTranscript();
     yield {
       type: 'user',
       message: { role: 'user', content: userMessage },
@@ -1623,6 +1624,47 @@ export class ConversationLoop {
    */
   setPermissionMode(mode: string): void {
     (this.options.permissionEngine as any)?.setMode?.(mode);
+  }
+
+  /**
+   * Feed all user-role message texts accumulated so far into the permission
+   * engine's transcript classifier.  This enables the classifier's
+   * "recent user approval phrase" rule to fire correctly on subsequent
+   * permission requests.
+   *
+   * Duck-typed: no-ops gracefully when the engine doesn't expose
+   * setRecentUserMessages (e.g. in minimal test fixtures).
+   */
+  private updateClassifierTranscript(): void {
+    if (
+      !this.options.permissionEngine ||
+      typeof (this.options.permissionEngine as any).setRecentUserMessages !== 'function'
+    ) {
+      return;
+    }
+    const recentUserTexts: string[] = [];
+    for (const msg of this.messages) {
+      if (msg.role === 'user') {
+        const content = (msg as any).content;
+        if (typeof content === 'string') {
+          recentUserTexts.push(content);
+        } else if (Array.isArray(content)) {
+          // Content blocks: extract text blocks only (skip tool_result blocks).
+          for (const block of content) {
+            if (
+              block &&
+              typeof block === 'object' &&
+              (block as any).type === 'text' &&
+              typeof (block as any).text === 'string'
+            ) {
+              recentUserTexts.push((block as any).text);
+            }
+          }
+        }
+      }
+    }
+    // setRecentUserMessages caps at last 10 per the classifier implementation.
+    (this.options.permissionEngine as any).setRecentUserMessages(recentUserTexts);
   }
 
   /**

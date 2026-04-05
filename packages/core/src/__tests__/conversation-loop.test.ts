@@ -886,4 +886,49 @@ describe('ConversationLoop', () => {
       expect(loop.getTurnCount()).toBe(2);
     });
   });
+
+  describe('permission classifier transcript wiring', () => {
+    it('feeds recent user messages into the permission engine classifier after each user turn', async () => {
+      const calls: string[][] = [];
+      const mockEngine: PermissionChecker & { setRecentUserMessages(msgs: string[]): void } = {
+        evaluate: async () => ({ behavior: 'allow' as const }),
+        addRule: () => {},
+        setRecentUserMessages(msgs: string[]) {
+          calls.push([...msgs]);
+        },
+      };
+
+      const provider = makeMockProvider([textResponse('ok')]);
+      const loop = new ConversationLoop(
+        baseOptions(provider, new Map(), { permissionEngine: mockEngine as any }),
+      );
+
+      await collectMessages(loop.run('please approve my action'));
+
+      // setRecentUserMessages must have been called at least once.
+      expect(calls.length).toBeGreaterThan(0);
+      // The very first call should contain the user's message text.
+      const firstBatch = calls[0];
+      expect(Array.isArray(firstBatch)).toBe(true);
+      expect(firstBatch.some((s) => s.includes('please approve my action'))).toBe(true);
+    });
+
+    it('does not throw when permissionEngine lacks setRecentUserMessages', async () => {
+      // A minimal engine with no setRecentUserMessages — should be a no-op.
+      const minimalEngine: PermissionChecker = {
+        evaluate: async () => ({ behavior: 'allow' as const }),
+        addRule: () => {},
+      };
+
+      const provider = makeMockProvider([textResponse('fine')]);
+      const loop = new ConversationLoop(
+        baseOptions(provider, new Map(), { permissionEngine: minimalEngine }),
+      );
+
+      // Should complete without error.
+      const messages = await collectMessages(loop.run('hello'));
+      const result = messages.find((m) => m.type === 'result') as any;
+      expect(result.subtype).toBe('success');
+    });
+  });
 });
