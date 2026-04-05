@@ -12,9 +12,10 @@ import type { ToolDefinition, ToolRegistry } from '@open-agent/tools';
 export interface CliRuntimeRefreshContext {
   runtime: Pick<OpenAgentRuntime, 'setMcpServers' | 'waitForMcpReady' | 'buildSnapshot' | 'listMcpServerStatus'>;
   toolRegistry: Pick<ToolRegistry, 'list'>;
-  loop: Pick<ConversationLoop, 'setSystemPrompt'>;
+  loop: Pick<ConversationLoop, 'setSystemPrompt' | 'setSystemPromptBlocks'>;
   appStore: Store<AppState>;
   buildSystemPrompt(): string;
+  buildSystemPromptBlocks?(): import('@open-agent/core').SystemPromptBlock[] | undefined;
   syncLoopTools(tools: ToolDefinition[]): void;
   isPrintMode: boolean;
   applySettingsState?(settings: Settings | Record<string, unknown> | null | undefined): Promise<void> | void;
@@ -55,6 +56,9 @@ export async function refreshCliRuntimeSurface(
     return next;
   });
   context.loop.setSystemPrompt(context.buildSystemPrompt());
+  if (context.buildSystemPromptBlocks) {
+    context.loop.setSystemPromptBlocks(context.buildSystemPromptBlocks());
+  }
 
   return {
     toolNames: availableTools.map((tool) => tool.name),

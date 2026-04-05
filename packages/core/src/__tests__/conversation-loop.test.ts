@@ -931,4 +931,77 @@ describe('ConversationLoop', () => {
       expect(result.subtype).toBe('success');
     });
   });
+
+  describe('systemPromptBlocks wiring', () => {
+    it('passes systemPromptBlocks through to provider chat options', async () => {
+      let capturedOptions: ChatOptions | null = null;
+
+      const mockProvider = makeMockProvider([textResponse('ok')]);
+      // Override chat to also capture options
+      const originalChat = mockProvider.chat.bind(mockProvider);
+      mockProvider.chat = async function* (messages: Message[], options: ChatOptions) {
+        capturedOptions = options;
+        yield* originalChat(messages, options);
+      };
+
+      const blocks: import('@open-agent/core').SystemPromptBlock[] = [
+        { text: 'STATIC', section: 'static' },
+        { text: 'DYNAMIC', section: 'dynamic' },
+      ];
+
+      const loop = new ConversationLoop(
+        baseOptions(mockProvider, new Map(), {
+          systemPrompt: 'STATIC\n\nDYNAMIC',
+          systemPromptBlocks: blocks,
+        }),
+      );
+
+      await collectMessages(loop.run('hello'));
+
+      expect(capturedOptions).not.toBeNull();
+      expect((capturedOptions as any).systemPromptBlocks).toBeDefined();
+      expect((capturedOptions as any).systemPromptBlocks).toHaveLength(2);
+      expect((capturedOptions as any).systemPromptBlocks[0].section).toBe('static');
+      expect((capturedOptions as any).systemPromptBlocks[1].section).toBe('dynamic');
+    });
+
+    it('setSystemPromptBlocks updates blocks for subsequent calls', async () => {
+      const capturedOptionsList: ChatOptions[] = [];
+
+      const mockProvider = makeMockProvider([
+        textResponse('first'),
+        textResponse('second'),
+      ]);
+      // Override chat to also capture options
+      const originalChat = mockProvider.chat.bind(mockProvider);
+      mockProvider.chat = async function* (messages: Message[], options: ChatOptions) {
+        capturedOptionsList.push(options);
+        yield* originalChat(messages, options);
+      };
+
+      const initialBlocks: import('@open-agent/core').SystemPromptBlock[] = [
+        { text: 'INITIAL', section: 'static' },
+      ];
+      const updatedBlocks: import('@open-agent/core').SystemPromptBlock[] = [
+        { text: 'UPDATED', section: 'static' },
+        { text: 'EXTRA', section: 'dynamic' },
+      ];
+
+      const loop = new ConversationLoop(
+        baseOptions(mockProvider, new Map(), {
+          systemPrompt: 'INITIAL',
+          systemPromptBlocks: initialBlocks,
+        }),
+      );
+
+      await collectMessages(loop.run('first'));
+      expect((capturedOptionsList[0] as any).systemPromptBlocks).toHaveLength(1);
+      expect((capturedOptionsList[0] as any).systemPromptBlocks[0].text).toBe('INITIAL');
+
+      loop.setSystemPromptBlocks(updatedBlocks);
+      await collectMessages(loop.run('second'));
+      expect((capturedOptionsList[1] as any).systemPromptBlocks).toHaveLength(2);
+      expect((capturedOptionsList[1] as any).systemPromptBlocks[0].text).toBe('UPDATED');
+    });
+  });
 });

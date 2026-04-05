@@ -90,6 +90,7 @@ describe('applyCliRuntimeSettingsRefresh', () => {
         setSystemPrompt(prompt) {
           lastSystemPrompt = prompt ?? '';
         },
+        setSystemPromptBlocks() {},
       },
       appStore: store,
       buildSystemPrompt() {
@@ -203,6 +204,7 @@ describe('applyCliRuntimeSettingsRefresh', () => {
         setSystemPrompt(prompt) {
           lastSystemPrompt = prompt ?? '';
         },
+        setSystemPromptBlocks() {},
       },
       appStore: store,
       buildSystemPrompt() {
@@ -311,6 +313,7 @@ describe('applyCliRuntimeSettingsRefresh', () => {
           callOrder.push('set-prompt');
           lastSystemPrompt = prompt ?? '';
         },
+        setSystemPromptBlocks() {},
       },
       appStore: store,
       buildSystemPrompt() {

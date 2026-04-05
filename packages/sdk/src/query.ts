@@ -15,7 +15,7 @@ import type {
   SDKTaskNotificationMessage,
   SDKPromptSuggestionMessage,
 } from '@open-agent/core';
-import { ConversationLoop, SessionManager, buildSystemPrompt, FileCheckpoint, isGitRepository, buildTaskOrchestrationTemplates, loadPromptContext, buildSystemPromptRuntimeSnapshot, buildRuntimeHookSurfaceSummary, HOOK_EVENTS, loadOutputStyles, mergeOutputStyles, findOutputStyle, BUILTIN_OUTPUT_STYLES } from '@open-agent/core';
+import { ConversationLoop, SessionManager, buildSystemPrompt, buildSystemPromptBlocks, FileCheckpoint, isGitRepository, buildTaskOrchestrationTemplates, loadPromptContext, buildSystemPromptRuntimeSnapshot, buildRuntimeHookSurfaceSummary, HOOK_EVENTS, loadOutputStyles, mergeOutputStyles, findOutputStyle, BUILTIN_OUTPUT_STYLES } from '@open-agent/core';
 import type { OutputStyle } from '@open-agent/core';
 import {
   createStore,
@@ -2237,6 +2237,61 @@ export function query(
   const presetSystemPrompt = typeof options.systemPrompt === 'object'
     ? options.systemPrompt
     : undefined;
+
+  /** Build the structured blocks for the managed system prompt (undefined when caller supplied a raw string). */
+  const buildManagedSystemPromptBlocks = (): import('@open-agent/core').SystemPromptBlock[] | undefined => {
+    // When the caller supplies a flat string we cannot decompose it into blocks.
+    if (typeof options.systemPrompt === 'string') {
+      return undefined;
+    }
+    const promptContext = loadCurrentPromptContext();
+    const hasContextSection = (key: string): boolean =>
+      promptContext.sections.some((section) => section.key === key);
+    const runtimeSnapshot = runtime.buildSnapshot();
+    const availableTools = toolRegistry.list().map((tool) => tool.name);
+    const configuredActiveTeam = activeTeamName ?? defaultTeamName;
+    const coordinatorScratchpadDir = sdkTeamManager.getTeam(configuredActiveTeam)
+      ? sdkTeamManager.getScratchpadDir(configuredActiveTeam)
+      : join(cwd, '.open-agent', 'scratchpad');
+    const blocks = buildSystemPromptBlocks({
+      model: activeModel,
+      cwd,
+      tools: availableTools,
+      permissionMode: permMode,
+      language: responseLanguage,
+      outputStyle,
+      knowledgeCutoff: 'August 2025',
+      agentInstructions: promptContext.agentInstructions,
+      memoryDir: hasContextSection('memory-context') ? undefined : promptContext.memoryDir,
+      memoryContent: hasContextSection('memory-context') ? undefined : promptContext.memoryContent,
+      isGitRepo,
+      gitContext: hasContextSection('git-context') ? undefined : promptContext.gitContext,
+      contextSections: promptContext.sections,
+      toolDescriptions: getToolPromptDescriptions(),
+      activeOutputStyle,
+      runtimeSnapshot: buildSystemPromptRuntimeSnapshot({
+        runtime: runtimeSnapshot,
+        tools: availableTools,
+        activeTeam: sdkTeamManager.getTeam(configuredActiveTeam) ? configuredActiveTeam : undefined,
+        scratchpadDir: coordinatorScratchpadDir,
+        taskNotifications: coordinatorTaskNotificationsForPrompt,
+        hookSurface: buildPromptHookSurface(),
+      }),
+    });
+    // Append agent-specific additions as dynamic blocks so the cache boundary is preserved.
+    const extra: import('@open-agent/core').SystemPromptBlock[] = [];
+    if (selectedAgent?.prompt) {
+      extra.push({ text: selectedAgent.prompt, section: 'dynamic' });
+    }
+    if (agentMemoryContent) {
+      extra.push({ text: `<agent-memory>\n${agentMemoryContent}\n</agent-memory>`, section: 'dynamic' });
+    }
+    if (presetSystemPrompt?.type === 'preset' && presetSystemPrompt.append) {
+      extra.push({ text: presetSystemPrompt.append, section: 'dynamic' });
+    }
+    return extra.length > 0 ? [...blocks, ...extra] : blocks;
+  };
+
   const buildManagedSystemPrompt = (): string => {
     let nextPrompt: string;
     if (typeof options.systemPrompt === 'string') {
@@ -2329,6 +2384,7 @@ export function query(
     recordTaskNotificationObservation(currentTurnObservation, notification);
   }
   let systemPrompt = buildManagedSystemPrompt();
+  let systemPromptBlocks = buildManagedSystemPromptBlocks();
 
   // ------------------------------------------------------------------
   // Conversation loop
@@ -2894,6 +2950,7 @@ export function query(
     tools: new Map(toolRegistry.list().map((t) => [t.name, t])),
     model: activeModel,
     systemPrompt,
+    systemPromptBlocks,
     maxTurns: options.maxTurns ?? selectedAgent?.maxTurns,
     thinking: options.thinking ?? (options.maxThinkingTokens ? { type: 'enabled', budgetTokens: options.maxThinkingTokens } : { type: 'adaptive' }),
     effort: options.effort,
@@ -2926,7 +2983,9 @@ export function query(
       return;
     }
     systemPrompt = buildManagedSystemPrompt();
+    systemPromptBlocks = buildManagedSystemPromptBlocks();
     loop.setSystemPrompt(systemPrompt);
+    loop.setSystemPromptBlocks(systemPromptBlocks);
     syncAppRuntimeControlPlane();
   };
   if (settingsChangeDetector) {

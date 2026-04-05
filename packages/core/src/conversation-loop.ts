@@ -3,6 +3,7 @@ import type { ToolDefinition, ToolContext } from '@open-agent/tools';
 import type { ThinkingConfig } from './types.js';
 import type { SDKMessage } from './types.js';
 import type { PermissionDenial } from './types.js';
+import type { SystemPromptBlock } from './system-prompt.js';
 import type { AppState } from '@open-agent/state';
 import { randomUUID } from 'crypto';
 import { basename } from 'path';
@@ -73,6 +74,8 @@ export interface ConversationLoopOptions {
   tools: Map<string, ToolDefinition>;
   model: string;
   systemPrompt?: string;
+  /** Structured system prompt blocks for providers that support caching. Falls back to flattened systemPrompt. */
+  systemPromptBlocks?: SystemPromptBlock[];
   maxTurns?: number;
   maxTokens?: number;
   /** Raw model context window size in tokens. Used to compute the effective window for proactive compaction. */
@@ -663,6 +666,7 @@ export class ConversationLoop {
         thinking: this.options.thinking,
         effort: this.options.effort,
         systemPrompt: this.options.systemPrompt,
+        systemPromptBlocks: this.options.systemPromptBlocks,
         signal: this.options.abortSignal,
         responseFormat: this.options.responseFormat,
       };
@@ -1712,6 +1716,11 @@ export class ConversationLoop {
   /** Update the system prompt used for subsequent LLM calls. */
   setSystemPrompt(systemPrompt?: string): void {
     this.options.systemPrompt = systemPrompt;
+  }
+
+  /** Update the structured system prompt blocks used for subsequent LLM calls. */
+  setSystemPromptBlocks(blocks?: SystemPromptBlock[]): void {
+    this.options.systemPromptBlocks = blocks;
   }
 
   /** Update the effort level for subsequent LLM calls. */

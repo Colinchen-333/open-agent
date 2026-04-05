@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { parseArgs, TerminalRenderer, REPL, emitStreamJson, emitStreamJsonInit, TerminalPermissionPrompter, handleSlashCommand } from '@open-agent/cli';
-import { ConversationLoop, SessionManager, ConfigLoader, buildSystemPrompt, isGitRepository, FileCheckpoint, buildTaskOrchestrationTemplates, loadPromptContext, buildSystemPromptRuntimeSnapshot, loadOutputStyles, mergeOutputStyles, findOutputStyle, BUILTIN_OUTPUT_STYLES } from '@open-agent/core';
+import { ConversationLoop, SessionManager, ConfigLoader, buildSystemPrompt, buildSystemPromptBlocks, isGitRepository, FileCheckpoint, buildTaskOrchestrationTemplates, loadPromptContext, buildSystemPromptRuntimeSnapshot, loadOutputStyles, mergeOutputStyles, findOutputStyle, BUILTIN_OUTPUT_STYLES } from '@open-agent/core';
 import type { OutputStyle } from '@open-agent/core';
 import { createStore, createDefaultAppState } from '@open-agent/state';
 import type { AppState } from '@open-agent/state';
@@ -742,6 +742,47 @@ async function main(): Promise<void> {
     });
   };
 
+  /** Return the structured blocks for the CLI system prompt (same options as buildCliSystemPrompt). */
+  const buildCliSystemPromptBlocks = (): import('@open-agent/core').SystemPromptBlock[] => {
+    const promptContext = loadCurrentPromptContext();
+    const currentTools = getAvailableTools();
+    const currentToolNames = currentTools.map((tool) => tool.name);
+    const runtimeSnapshot = runtime.buildSnapshot();
+    const promptCapabilitySnapshot = filterCapabilitySnapshot(runtimeSnapshot.capabilitySnapshot, currentToolNames);
+    const configuredActiveTeam = activeTeamName ?? (settings.activeTeam as string | undefined) ?? defaultTeamName;
+    const coordinatorScratchpadDir = teamManager.getTeam(configuredActiveTeam)
+      ? teamManager.getScratchpadDir(configuredActiveTeam)
+      : join(cwd, '.open-agent', 'scratchpad');
+
+    return buildSystemPromptBlocks({
+      cwd,
+      model,
+      tools: currentToolNames,
+      permissionMode: permissionEngine.getSummary().mode as PermissionMode,
+      agentInstructions: [
+        ...promptContext.agentInstructions,
+        ...customInstructionsList,
+      ],
+      memoryContent: promptContext.memoryContent,
+      memoryDir: promptContext.memoryDir,
+      isGitRepo,
+      gitContext: promptContext.gitContext,
+      contextSections: promptContext.sections,
+      toolDescriptions: getToolPromptDescriptions(),
+      runtimeSnapshot: buildSystemPromptRuntimeSnapshot({
+        runtime: runtimeSnapshot,
+        tools: currentToolNames,
+        activeTeam: teamManager.getTeam(configuredActiveTeam) ? configuredActiveTeam : undefined,
+        scratchpadDir: coordinatorScratchpadDir,
+        hookSurface: buildCliPromptHookSurface(),
+        capabilitySnapshot: promptCapabilitySnapshot,
+      }),
+      outputStyle: cliOutputStyle,
+      activeOutputStyle: activeCliOutputStyle,
+      knowledgeCutoff: 'August 2025',
+    });
+  };
+
   // ------------------------------------------------------------------
   // Conversation loop
   // ------------------------------------------------------------------
@@ -761,6 +802,7 @@ async function main(): Promise<void> {
     tools: new Map(getAvailableTools().map((t) => [t.name, t])),
     model,
     systemPrompt: buildCliSystemPrompt(),
+    systemPromptBlocks: buildCliSystemPromptBlocks(),
     maxTurns: effectiveMaxTurns,
     thinking: effectiveThinking,
     effort: effectiveEffort,
@@ -808,6 +850,7 @@ async function main(): Promise<void> {
       loop,
       appStore,
       buildSystemPrompt: buildCliSystemPrompt,
+      buildSystemPromptBlocks: buildCliSystemPromptBlocks,
       syncLoopTools: syncCliLoopTools,
       isPrintMode,
     });
@@ -833,6 +876,7 @@ async function main(): Promise<void> {
           loop,
           appStore,
           buildSystemPrompt: buildCliSystemPrompt,
+          buildSystemPromptBlocks: buildCliSystemPromptBlocks,
           syncLoopTools: syncCliLoopTools,
           isPrintMode: false,
           applySettingsState: applyCliSettingsState,
