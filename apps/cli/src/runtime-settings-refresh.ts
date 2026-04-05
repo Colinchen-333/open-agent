@@ -24,12 +24,9 @@ export interface CliRuntimeRefreshResult {
   runtimeSnapshot: ReturnType<OpenAgentRuntime['buildSnapshot']>;
 }
 
-export async function applyCliRuntimeSettingsRefresh(
+export async function refreshCliRuntimeSurface(
   context: CliRuntimeRefreshContext,
-  settings: Settings | Record<string, unknown> | null | undefined,
 ): Promise<CliRuntimeRefreshResult> {
-  const mcpServers = ((settings as Settings | undefined)?.mcpServers ?? {}) as Record<string, McpServerConfig>;
-  await context.runtime.setMcpServers(mcpServers);
   const mcpReady = context.runtime.waitForMcpReady();
   if (mcpReady) {
     await mcpReady;
@@ -62,4 +59,13 @@ export async function applyCliRuntimeSettingsRefresh(
     toolNames: availableTools.map((tool) => tool.name),
     runtimeSnapshot,
   };
+}
+
+export async function applyCliRuntimeSettingsRefresh(
+  context: CliRuntimeRefreshContext,
+  settings: Settings | Record<string, unknown> | null | undefined,
+): Promise<CliRuntimeRefreshResult> {
+  const mcpServers = ((settings as Settings | undefined)?.mcpServers ?? {}) as Record<string, McpServerConfig>;
+  await context.runtime.setMcpServers(mcpServers);
+  return refreshCliRuntimeSurface(context);
 }

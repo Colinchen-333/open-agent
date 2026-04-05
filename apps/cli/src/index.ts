@@ -35,7 +35,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
 import { createCliPermissionRuntime, wrapCliPermissionPrompter } from './permission-runtime.js';
-import { applyCliRuntimeSettingsRefresh } from './runtime-settings-refresh.js';
+import { applyCliRuntimeSettingsRefresh, refreshCliRuntimeSurface } from './runtime-settings-refresh.js';
 
 const VERSION = '0.1.0';
 
@@ -801,6 +801,16 @@ async function main(): Promise<void> {
     }
   };
 
+  const refreshCliRuntimeTurnBoundary = () => refreshCliRuntimeSurface({
+      runtime,
+      toolRegistry,
+      loop,
+      appStore,
+      buildSystemPrompt: buildCliSystemPrompt,
+      syncLoopTools: syncCliLoopTools,
+      isPrintMode,
+    });
+
   const settingsWatcher = cliPermissionRuntime.watchSettings(['user', 'project', 'local'], {
     onRefresh(nextSettings, source) {
       void (async () => {
@@ -887,13 +897,14 @@ async function main(): Promise<void> {
   if (args.print && args.prompt) {
     // Print mode: one-shot with full tools, streams only text to stdout.
     // Matches Claude Code's `-p` behavior — runs agent loop then exits.
+    const refreshed = await refreshCliRuntimeTurnBoundary();
     if (isStreamJson) {
       emitStreamJsonInit({
-        tools: toolNames,
-        capabilitySnapshot: runtime.buildSnapshot().capabilitySnapshot,
+        tools: refreshed.toolNames,
+        capabilitySnapshot: refreshed.runtimeSnapshot.capabilitySnapshot,
         model,
         cwd,
-        permissionMode: effectivePermissionMode,
+        permissionMode: permissionEngine.getSummary().mode as PermissionMode,
         sessionId,
       });
     }
@@ -920,13 +931,14 @@ async function main(): Promise<void> {
   // Single-prompt mode  (open-agent -p "…" or open-agent "…")
   // ------------------------------------------------------------------
   if (args.prompt) {
+    const refreshed = await refreshCliRuntimeTurnBoundary();
     if (isStreamJson) {
       emitStreamJsonInit({
-        tools: toolNames,
-        capabilitySnapshot: runtime.buildSnapshot().capabilitySnapshot,
+        tools: refreshed.toolNames,
+        capabilitySnapshot: refreshed.runtimeSnapshot.capabilitySnapshot,
         model,
         cwd,
-        permissionMode: effectivePermissionMode,
+        permissionMode: permissionEngine.getSummary().mode as PermissionMode,
         sessionId,
       });
     }
@@ -980,6 +992,8 @@ async function main(): Promise<void> {
     }
 
     if (input === '') continue;
+
+    await refreshCliRuntimeTurnBoundary();
 
     if (input.startsWith('/')) {
       const result = await handleSlashCommand(input, {
