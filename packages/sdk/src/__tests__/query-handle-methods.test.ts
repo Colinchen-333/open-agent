@@ -943,7 +943,7 @@ describe('query() MCP status shape', () => {
     expect(status[0]).toHaveProperty('config');
     expect((status[0] as any).config?.type).toBe('sdk');
     expect(Array.isArray(status[0].tools)).toBe(true);
-    expect(status[0].tools?.[0]?.name).toBe('echo_status');
+    expect(status[0].tools?.[0]?.name).toBe('mcp__sdk_test__echo_status');
 
     await q.toggleMcpServer('sdk_test', false);
     const disabled = await q.mcpServerStatus();
@@ -998,7 +998,7 @@ describe('query() MCP status shape', () => {
     }
     const second = await q.mcpServerStatus();
     expect((second[0] as any).config?.name).toBe('copy-test');
-    expect(second[0].tools?.[0]?.name).toBe('echo_copy');
+    expect(second[0].tools?.[0]?.name).toBe('mcp__copy_test__echo_copy');
     q.close();
   });
 
@@ -1036,8 +1036,8 @@ describe('query() MCP status shape', () => {
 
     await q.initializationResult();
     const before = await q.mcpServerStatus();
-    expect(before[0].tools?.map(t => t.name)).toContain('echo_v1');
-    expect(before[0].tools?.map(t => t.name)).not.toContain('echo_v2');
+    expect(before[0].tools?.map(t => t.name)).toContain('mcp__sdk_test__echo_v1');
+    expect(before[0].tools?.map(t => t.name)).not.toContain('mcp__sdk_test__echo_v2');
 
     const updateResult = await q.setMcpServers({
       sdk_test: serverV2 as any,
@@ -1046,8 +1046,8 @@ describe('query() MCP status shape', () => {
     expect(updateResult.added).toContain('sdk_test');
 
     const after = await q.mcpServerStatus();
-    expect(after[0].tools?.map(t => t.name)).toContain('echo_v2');
-    expect(after[0].tools?.map(t => t.name)).not.toContain('echo_v1');
+    expect(after[0].tools?.map(t => t.name)).toContain('mcp__sdk_test__echo_v2');
+    expect(after[0].tools?.map(t => t.name)).not.toContain('mcp__sdk_test__echo_v1');
     q.close();
   });
 

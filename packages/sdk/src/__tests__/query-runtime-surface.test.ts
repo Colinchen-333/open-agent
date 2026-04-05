@@ -774,7 +774,7 @@ describe('SDK runtime control surface', () => {
         expect(secondTurnMessages.some((message) => message.type === 'result' && message.is_error === true)).toBe(false);
 
         const after = await session.mcpServerStatus();
-        expect(after[0]?.tools?.map((entry) => entry.name)).toContain('echo_live');
+        expect(after[0]?.tools?.map((entry) => entry.name)).toContain('mcp__turn_boundary__echo_live');
       } finally {
         session.close();
       }

@@ -329,8 +329,11 @@ describe('sandbox preflight via Bash tool', () => {
       [BASH_SANDBOX_POLICY_FIELD]: policy,
     }, ctx());
 
+    // The sandbox should block the write.  Accept either an "exit code N" message
+    // (non-zero exit) or a Python PermissionError trace — both prove the write was
+    // denied by the execution engine.
     expect(result).not.toContain('write-allowed');
-    expect(result).toContain('exit code');
+    expect(result.includes('exit code') || result.includes('PermissionError') || result.includes('Operation not permitted')).toBe(true);
     expect(() => readFileSync(blockedPath, 'utf-8')).toThrow();
   });
 
