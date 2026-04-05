@@ -1069,6 +1069,16 @@ async function main(): Promise<void> {
       if (result) {
         if (result.shouldExit) break;
         if (result.shouldClear) { console.clear(); continue; }
+        if (result.shouldResume && Array.isArray(result.resumeTranscript)) {
+          // Hydrate the live ConversationLoop with the restored transcript so
+          // the user genuinely resumes where the session left off.  The Message
+          // cast is safe: resumeTranscript is produced by SessionManager which
+          // returns the same shape that ConversationLoop originally persisted.
+          loop.setMessages(result.resumeTranscript as import('@open-agent/providers').Message[]);
+          sessionId = result.shouldResume;
+          console.log(`\nSession ${result.shouldResume.slice(0, 8)} loaded with ${result.resumeTranscript.length} messages. Continue typing to resume.\n`);
+          continue;
+        }
         if (!result.handled && result.output) {
           // Command wants to delegate to the agent loop (e.g. /commit, /review).
           // Use the output as the prompt instead of the raw slash command.

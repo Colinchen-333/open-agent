@@ -1674,6 +1674,16 @@ export class ConversationLoop {
     return this.messages.filter(m => !(m as any)._transient);
   }
 
+  /**
+   * Replace the in-memory message history with a restored transcript.
+   * Called by the REPL when the user runs `/resume` and the slash-command
+   * handler returns `shouldResume` + `resumeTranscript`.  Transient messages
+   * are stripped from the incoming array for safety.
+   */
+  setMessages(messages: Message[]): void {
+    this.messages = messages.filter(m => !(m as any)._transient);
+  }
+
   /** Return the number of LLM turns executed so far. */
   getTurnCount(): number {
     return this.turnCount;
