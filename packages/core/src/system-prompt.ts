@@ -81,11 +81,14 @@ export interface SystemPromptOptions {
     key: string;
     title: string;
     content: string;
+    slot?: 'before_tools' | 'after_tools' | 'after_environment' | 'after_runtime' | 'after_guidance' | 'after_memory' | 'final';
+    priority?: number;
   }[];
 }
 
 export function buildSystemPrompt(options: SystemPromptOptions): string {
   const parts: string[] = [];
+  const contextSections = groupPromptContextSections(options);
 
   // ── Core identity ────────────────────────────────────────────────────
   parts.push(`You are an autonomous AI software engineer powered by ${options.model}.
@@ -186,6 +189,8 @@ For actions that are hard to reverse or that affect systems shared with others, 
 
 Do not use destructive commands as shortcuts to work around problems. If tests are failing, fix the root cause — don't delete the tests. If a build is broken, investigate why — don't bypass safety checks. If you encounter an unexpected or confusing state, investigate it rather than clobbering it. Measure twice, cut once.`);
 
+  parts.push(...contextSections.before_tools);
+
   // ── Using tools ──────────────────────────────────────────────────────
   const toolsSection = buildToolsSection(options);
   parts.push(toolsSection);
@@ -197,6 +202,8 @@ Do not use destructive commands as shortcuts to work around problems. If tests a
       parts.push(descSection);
     }
   }
+
+  parts.push(...contextSections.after_tools);
 
   // ── Git commit protocol (only when inside a git repo) ──────────────
   if (options.isGitRepo) {
@@ -315,6 +322,8 @@ When the user asks you to create a pull request:
 
   parts.push(`# Environment\n${envLines.join('\n')}`);
 
+  parts.push(...contextSections.after_environment);
+
   if (options.gitContext) {
     parts.push(`# Git Context\n${options.gitContext}`);
   }
@@ -324,16 +333,14 @@ When the user asks you to create a pull request:
     parts.push(runtimeContext);
   }
 
+  parts.push(...contextSections.after_runtime);
+
   const sessionSpecificGuidance = buildSessionSpecificGuidanceSection(options);
   if (sessionSpecificGuidance) {
     parts.push(sessionSpecificGuidance);
   }
 
-  if (options.contextSections && options.contextSections.length > 0) {
-    for (const section of options.contextSections) {
-      parts.push(`# ${section.title}\n${section.content}`);
-    }
-  }
+  parts.push(...contextSections.after_guidance);
 
   // ── Auto memory ──────────────────────────────────────────────────────
   if (options.memoryContent || options.memoryDir) {
@@ -380,6 +387,8 @@ ${options.memoryContent}`);
     }
   }
 
+  parts.push(...contextSections.after_memory);
+
   // ── User instructions (AGENT.md / custom instructions) ───────────────
   if (options.agentInstructions && options.agentInstructions.length > 0) {
     parts.push(`# User Instructions
@@ -389,7 +398,50 @@ IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow 
 ${options.agentInstructions.join('\n\n---\n\n')}`);
   }
 
+  parts.push(...contextSections.final);
+
   return parts.join('\n\n');
+}
+
+type PromptContextSlot = 'before_tools' | 'after_tools' | 'after_environment' | 'after_runtime' | 'after_guidance' | 'after_memory' | 'final';
+
+function groupPromptContextSections(options: SystemPromptOptions): Record<PromptContextSlot, string[]> {
+  const slots: Record<PromptContextSlot, string[]> = {
+    before_tools: [],
+    after_tools: [],
+    after_environment: [],
+    after_runtime: [],
+    after_guidance: [],
+    after_memory: [],
+    final: [],
+  };
+
+  const sections = (options.contextSections ?? [])
+    .filter((section) => {
+      if (section.key === 'git-context' && options.gitContext) {
+        return false;
+      }
+      if (section.key === 'memory-context' && (options.memoryContent || options.memoryDir)) {
+        return false;
+      }
+      return true;
+    })
+    .slice()
+    .sort((left, right) => {
+      const leftPriority = left.priority ?? 0;
+      const rightPriority = right.priority ?? 0;
+      if (leftPriority !== rightPriority) {
+        return leftPriority - rightPriority;
+      }
+      return left.key.localeCompare(right.key);
+    });
+
+  for (const section of sections) {
+    const slot = section.slot ?? 'after_guidance';
+    slots[slot].push(`# ${section.title}\n${section.content}`);
+  }
+
+  return slots;
 }
 
 /**

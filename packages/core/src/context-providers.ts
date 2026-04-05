@@ -9,6 +9,8 @@ export interface PromptContextSection {
   key: string;
   title: string;
   content: string;
+  slot?: 'before_tools' | 'after_tools' | 'after_environment' | 'after_runtime' | 'after_guidance' | 'after_memory' | 'final';
+  priority?: number;
 }
 
 export interface PromptContextOptions {
@@ -97,6 +99,7 @@ export function createGitContextProvider(): PromptContextProvider {
             key: 'git-context',
             title: 'Git Context',
             content: gitContext,
+            slot: 'after_environment',
           },
         ],
       };
@@ -126,6 +129,7 @@ export function createMemoryContextProvider(): PromptContextProvider {
             key: 'memory-context',
             title: 'Memory Context',
             content,
+            slot: 'after_memory',
           },
         ],
       };
@@ -166,6 +170,7 @@ export function createAdditionalDirectoriesProvider(): PromptContextProvider {
             content:
               'You may read, search, and edit files in these directories in addition to the primary working directory.\n\n' +
               additionalDirectories.map((dir) => `- ${dir}`).join('\n'),
+            slot: 'after_environment',
           },
         ],
       };

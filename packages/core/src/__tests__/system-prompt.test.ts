@@ -250,4 +250,75 @@ describe('buildSystemPrompt runtime snapshot', () => {
     expect(prompt).toContain('/tmp/one');
     expect(prompt).toContain('/tmp/two');
   });
+
+  it('supports slot-based prompt fragments with stable priority ordering', () => {
+    const prompt = buildSystemPrompt({
+      cwd: '/tmp/demo',
+      model: 'claude-sonnet-4-6',
+      tools: ['Read'],
+      permissionMode: 'default',
+      runtimeSnapshot: {
+        mcpServers: [{ name: 'docs', status: 'connected' }],
+      },
+      contextSections: [
+        {
+          key: 'final-note',
+          title: 'Final Note',
+          content: 'Always emit the final marker.',
+          slot: 'final',
+        },
+        {
+          key: 'runtime-a',
+          title: 'Runtime A',
+          content: 'A comes first.',
+          slot: 'after_runtime',
+          priority: 10,
+        },
+        {
+          key: 'runtime-b',
+          title: 'Runtime B',
+          content: 'B comes second.',
+          slot: 'after_runtime',
+          priority: 20,
+        },
+      ],
+    });
+
+    expect(prompt.indexOf('# Runtime Context')).toBeGreaterThan(-1);
+    expect(prompt.indexOf('# Runtime A')).toBeGreaterThan(prompt.indexOf('# Runtime Context'));
+    expect(prompt.indexOf('# Runtime B')).toBeGreaterThan(prompt.indexOf('# Runtime A'));
+    expect(prompt.indexOf('# Final Note')).toBeGreaterThan(prompt.indexOf('# Runtime B'));
+  });
+
+  it('deduplicates git and memory provider sections when dedicated sections are present', () => {
+    const prompt = buildSystemPrompt({
+      cwd: '/tmp/demo',
+      model: 'claude-sonnet-4-6',
+      tools: ['Read'],
+      permissionMode: 'default',
+      gitContext: 'branch: main',
+      memoryDir: '/tmp/demo/.open-agent/memory',
+      memoryContent: 'remember this',
+      contextSections: [
+        {
+          key: 'git-context',
+          title: 'Git Context',
+          content: 'duplicate git section',
+          slot: 'after_environment',
+        },
+        {
+          key: 'memory-context',
+          title: 'Memory Context',
+          content: 'duplicate memory section',
+          slot: 'after_memory',
+        },
+      ],
+    });
+
+    expect(prompt.match(/# Git Context/g)?.length).toBe(1);
+    expect(prompt).not.toContain('duplicate git section');
+    expect(prompt).not.toContain('# Memory Context');
+    expect(prompt).not.toContain('duplicate memory section');
+    expect(prompt).toContain('Current MEMORY.md contents');
+  });
 });
