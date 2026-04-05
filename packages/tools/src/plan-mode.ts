@@ -1,5 +1,6 @@
 import type { ToolDefinition, ToolContext } from './types.js';
 import { withToolDefaults } from './tool-defaults.js';
+import { feature } from '@open-agent/core';
 
 export interface PlanModeDeps {
   enterPlanMode: () => void;
@@ -136,6 +137,72 @@ export function createExitPlanModeTool(deps: PlanModeDeps | PlanModeEngineOpts):
       }
       deps.exitPlanMode(input.allowedPrompts);
       return 'Exited plan mode. The plan has been submitted for user approval.';
+    },
+  });
+}
+
+/** Options for ExitPlanModeV2 — engine must support registerAllowedPrompts (optional for compat). */
+export interface ExitPlanModeV2Opts {
+  engine: {
+    popMode(): void;
+    getMode(): string;
+    registerAllowedPrompts?: (prompts: Array<{ tool: string; prompt: string }>) => void;
+  };
+}
+
+/**
+ * createExitPlanModeV2Tool — factory for the ExitPlanModeV2 built-in tool.
+ *
+ * Feature-gated via `feature('EXIT_PLAN_MODE_V2')`. When the flag is off the
+ * tool returns an error payload and does NOT pop the mode stack.
+ *
+ * When enabled:
+ *   1. Registers `allowedPrompts` via `engine.registerAllowedPrompts` (if present).
+ *   2. Pops the current mode (exits plan mode).
+ *   3. Returns the new mode, the plan text, and how many prompts were registered.
+ */
+export function createExitPlanModeV2Tool(opts: ExitPlanModeV2Opts): ToolDefinition {
+  const { engine } = opts;
+  return withToolDefaults({
+    name: 'ExitPlanModeV2',
+    description:
+      'Exit plan mode and register semantic permission requests for the live phase. Each allowedPrompt names a tool category and a natural-language description of the intent (e.g., "run tests", "install dependencies"). The classifier uses these to auto-approve matching operations without prompting.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        plan: { type: 'string', description: 'The finalized plan body.' },
+        allowedPrompts: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              tool: { type: 'string' },
+              prompt: { type: 'string' },
+            },
+            required: ['tool', 'prompt'],
+          },
+          description: 'Semantic permission requests to pre-approve for the live phase.',
+        },
+      },
+      required: ['plan'],
+    },
+    async execute(input: { plan: string; allowedPrompts?: Array<{ tool: string; prompt: string }> }) {
+      if (!feature('EXIT_PLAN_MODE_V2')) {
+        return {
+          error: 'ExitPlanModeV2 is not enabled (set OPEN_AGENT_FEATURE_EXIT_PLAN_MODE_V2=1)',
+          fallback: 'Use ExitPlanMode (v1) instead.',
+        };
+      }
+      const prompts = Array.isArray(input.allowedPrompts) ? input.allowedPrompts : [];
+      if (prompts.length > 0 && engine.registerAllowedPrompts) {
+        engine.registerAllowedPrompts(prompts);
+      }
+      engine.popMode();
+      return {
+        mode: engine.getMode(),
+        plan: input.plan,
+        allowedPromptsRegistered: prompts.length,
+      };
     },
   });
 }

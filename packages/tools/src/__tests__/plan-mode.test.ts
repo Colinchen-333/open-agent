@@ -1,6 +1,7 @@
-import { describe, expect, test } from 'bun:test';
-import { createEnterPlanModeTool, createExitPlanModeTool } from '../plan-mode.js';
+import { describe, expect, test, afterEach } from 'bun:test';
+import { createEnterPlanModeTool, createExitPlanModeTool, createExitPlanModeV2Tool } from '../plan-mode.js';
 import { PermissionEngine } from '@open-agent/permissions';
+import { setFeatureDefault, clearFeatureOverrides } from '@open-agent/core';
 
 // Minimal ToolContext for execute() calls
 const ctx = { cwd: '/', sessionId: 's' } as any;
@@ -117,5 +118,67 @@ describe('plan-mode tools (legacy PlanModeDeps variant)', () => {
     const tool = createExitPlanModeTool(deps);
     const result = await tool.execute({}, ctx);
     expect(result).toContain('Not currently in plan mode');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ExitPlanModeV2
+// ---------------------------------------------------------------------------
+
+describe('ExitPlanModeV2', () => {
+  afterEach(() => {
+    clearFeatureOverrides();
+  });
+
+  test('returns error payload when feature flag is off', async () => {
+    // Flag defaults to false — no setFeatureDefault needed
+    const engine = new PermissionEngine({ mode: 'default' });
+    engine.pushMode('plan');
+    const tool = createExitPlanModeV2Tool({ engine });
+    const result = await tool.execute({ plan: 'do stuff' }, ctx) as any;
+    expect(result.error).toContain('ExitPlanModeV2 is not enabled');
+    expect(result.fallback).toContain('ExitPlanMode');
+    // mode must NOT have changed — flag was off so popMode was skipped
+    expect(engine.getMode()).toBe('plan');
+  });
+
+  test('pops mode and returns correct result when flag is on', async () => {
+    setFeatureDefault('EXIT_PLAN_MODE_V2', true);
+    const engine = new PermissionEngine({ mode: 'default' });
+    engine.pushMode('plan');
+    const tool = createExitPlanModeV2Tool({ engine });
+    const result = await tool.execute({ plan: 'my plan' }, ctx) as any;
+    expect(result.mode).toBe('default');
+    expect(result.plan).toBe('my plan');
+    expect(result.allowedPromptsRegistered).toBe(0);
+  });
+
+  test('registers allowedPrompts via engine.registerAllowedPrompts when flag is on', async () => {
+    setFeatureDefault('EXIT_PLAN_MODE_V2', true);
+    const engine = new PermissionEngine({ mode: 'default' });
+    engine.pushMode('plan');
+    const tool = createExitPlanModeV2Tool({ engine });
+    const prompts = [
+      { tool: 'Bash', prompt: 'run tests' },
+      { tool: 'Bash', prompt: 'install dependencies' },
+    ];
+    const result = await tool.execute({ plan: 'plan text', allowedPrompts: prompts }, ctx) as any;
+    expect(result.allowedPromptsRegistered).toBe(2);
+    expect(result.mode).toBe('default');
+    const registered = engine.getAllowedPrompts();
+    expect(registered).toHaveLength(2);
+    expect(registered[0]).toEqual({ tool: 'Bash', prompt: 'run tests' });
+    expect(registered[1]).toEqual({ tool: 'Bash', prompt: 'install dependencies' });
+  });
+
+  test('calling with no allowedPrompts still pops mode and returns allowedPromptsRegistered: 0', async () => {
+    setFeatureDefault('EXIT_PLAN_MODE_V2', true);
+    const engine = new PermissionEngine({ mode: 'acceptEdits' });
+    engine.pushMode('plan');
+    const tool = createExitPlanModeV2Tool({ engine });
+    const result = await tool.execute({ plan: 'empty prompts plan' }, ctx) as any;
+    expect(result.allowedPromptsRegistered).toBe(0);
+    expect(result.mode).toBe('acceptEdits');
+    expect(engine.getAllowedPrompts()).toHaveLength(0);
   });
 });

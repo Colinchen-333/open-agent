@@ -117,6 +117,9 @@ export class PermissionEngine {
   private deniedPaths: string[];
   private _permissionPromptToolName?: string;
 
+  /** Semantic allow entries registered by ExitPlanModeV2. Consumed by the classifier stage (L23). */
+  private allowedPrompts: Array<{ tool: string; prompt: string }> = [];
+
   /** @internal test instrumentation — set to a callback to observe pipeline stage execution order */
   public __trace?: (stage: PipelineStage) => void;
 
@@ -602,6 +605,25 @@ export class PermissionEngine {
    */
   getPermissionPromptToolName(): string | undefined {
     return this._permissionPromptToolName;
+  }
+
+  /** Register a batch of semantic permissions. Called by ExitPlanModeV2. */
+  registerAllowedPrompts(prompts: Array<{ tool: string; prompt: string }>): void {
+    for (const entry of prompts) {
+      if (entry.tool && entry.prompt) {
+        this.allowedPrompts.push({ tool: entry.tool, prompt: entry.prompt });
+      }
+    }
+  }
+
+  /** Get current allowed prompts (for classifier + testing). Returns a shallow copy so callers cannot mutate internal state. */
+  getAllowedPrompts(): ReadonlyArray<{ tool: string; prompt: string }> {
+    return [...this.allowedPrompts];
+  }
+
+  /** Clear all registered allowed prompts. Called when re-entering plan mode. */
+  clearAllowedPrompts(): void {
+    this.allowedPrompts = [];
   }
 
   /**

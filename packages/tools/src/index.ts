@@ -57,7 +57,9 @@ export { createWebSearchTool } from './web-search.js';
 export {
   createEnterPlanModeTool,
   createExitPlanModeTool,
+  createExitPlanModeV2Tool,
   type PlanModeDeps,
+  type ExitPlanModeV2Opts,
 } from './plan-mode.js';
 export { createEnterWorktreeTool, createWorktree, cleanupWorktree, hasWorktreeChanges } from './worktree.js';
 export type { WorktreeInfo } from './worktree.js';

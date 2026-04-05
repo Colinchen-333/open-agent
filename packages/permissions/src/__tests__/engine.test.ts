@@ -722,4 +722,73 @@ describe('PermissionEngine', () => {
       expect((await engine.evaluate(req('Bash', { command: 'echo hello' }))).behavior).toBe('deny');
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // allowedPrompts (ExitPlanModeV2 semantic permission storage)
+  // ---------------------------------------------------------------------------
+
+  describe('allowedPrompts', () => {
+    it('registerAllowedPrompts + getAllowedPrompts round-trip', () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      engine.registerAllowedPrompts([
+        { tool: 'Bash', prompt: 'run tests' },
+        { tool: 'Bash', prompt: 'install dependencies' },
+      ]);
+      const prompts = engine.getAllowedPrompts();
+      expect(prompts).toHaveLength(2);
+      expect(prompts[0]).toEqual({ tool: 'Bash', prompt: 'run tests' });
+      expect(prompts[1]).toEqual({ tool: 'Bash', prompt: 'install dependencies' });
+    });
+
+    it('clearAllowedPrompts empties the list', () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      engine.registerAllowedPrompts([
+        { tool: 'Bash', prompt: 'run tests' },
+      ]);
+      expect(engine.getAllowedPrompts()).toHaveLength(1);
+      engine.clearAllowedPrompts();
+      expect(engine.getAllowedPrompts()).toHaveLength(0);
+    });
+
+    it('registerAllowedPrompts skips entries missing tool', () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      engine.registerAllowedPrompts([
+        { tool: '', prompt: 'run tests' },          // empty tool — skipped
+        { tool: 'Bash', prompt: 'install deps' },   // valid
+      ] as any);
+      expect(engine.getAllowedPrompts()).toHaveLength(1);
+      expect(engine.getAllowedPrompts()[0]).toEqual({ tool: 'Bash', prompt: 'install deps' });
+    });
+
+    it('registerAllowedPrompts skips entries missing prompt', () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      engine.registerAllowedPrompts([
+        { tool: 'Bash', prompt: '' },               // empty prompt — skipped
+        { tool: 'Write', prompt: 'write config' },  // valid
+      ] as any);
+      expect(engine.getAllowedPrompts()).toHaveLength(1);
+      expect(engine.getAllowedPrompts()[0]).toEqual({ tool: 'Write', prompt: 'write config' });
+    });
+
+    it('getAllowedPrompts returns a ReadonlyArray — mutations do not affect internal state', () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      engine.registerAllowedPrompts([{ tool: 'Bash', prompt: 'run tests' }]);
+      const result = engine.getAllowedPrompts() as Array<{ tool: string; prompt: string }>;
+      // push to the returned array — engine should not be affected
+      result.push({ tool: 'evil', prompt: 'injected' });
+      expect(engine.getAllowedPrompts()).toHaveLength(1);
+    });
+
+    it('accumulates across multiple registerAllowedPrompts calls', () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      engine.registerAllowedPrompts([{ tool: 'Bash', prompt: 'run tests' }]);
+      engine.registerAllowedPrompts([{ tool: 'Write', prompt: 'write config' }]);
+      expect(engine.getAllowedPrompts()).toHaveLength(2);
+    });
+
+    it('getAllowedPrompts starts empty on a fresh engine', () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      expect(engine.getAllowedPrompts()).toHaveLength(0);
+    });
+  });
 });
