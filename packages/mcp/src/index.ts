@@ -7,3 +7,4 @@ export { McpStdioClient } from './stdio-transport';
 export { McpHttpClient } from './http-transport';
 export { McpSseClient } from './sse-transport';
 export { McpManager } from './manager';
+export { parseMcpToolName, buildMcpToolName, isMcpToolName } from './normalization';

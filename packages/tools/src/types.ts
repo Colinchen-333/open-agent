@@ -125,6 +125,12 @@ export interface ToolCapabilityManifest {
 export interface ToolDefinition {
   name: string;
   description: string;
+  /** MCP origin metadata. Set only on tools wrapped from MCP `listTools` responses. */
+  mcpInfo?: {
+    serverName: string;
+    /** The tool name as returned by the MCP server (without the `mcp__<server>__` prefix). */
+    toolName: string;
+  };
   inputSchema: Record<string, any>; // JSON Schema
   execute(input: any, context: ToolContext): Promise<any>;
   /** Optional short past-tense summary label used for tool_use_summary events. */

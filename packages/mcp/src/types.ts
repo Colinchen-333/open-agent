@@ -11,6 +11,12 @@ export interface McpToolInfo {
     openWorld?: boolean;
     idempotent?: boolean;
   };
+  /** MCP origin metadata — mirrors ToolDefinition.mcpInfo for the intermediate representation. */
+  mcpInfo?: {
+    serverName: string;
+    /** The tool name as returned by the MCP server (without the `mcp__<server>__` prefix). */
+    toolName: string;
+  };
 }
 
 export interface McpResourceInfo {

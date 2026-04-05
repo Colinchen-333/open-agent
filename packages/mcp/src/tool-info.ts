@@ -59,12 +59,17 @@ export function normalizeMcpAnnotations(annotations: RawMcpAnnotations): McpTool
 
 export function normalizeMcpToolInfo(serverName: string, tool: RawMcpTool): McpToolInfo {
   const annotations = normalizeMcpAnnotations(tool.annotations);
+  const toolName = tool.name;
+  const prefixedName = `mcp__${serverName}__${toolName}`;
+  const noPrefix = process.env.CLAUDE_AGENT_SDK_MCP_NO_PREFIX === '1';
+  const name = noPrefix ? toolName : prefixedName;
 
   return {
-    name: tool.name,
+    name,
     description: tool.description,
     inputSchema: tool.inputSchema ?? { type: 'object', properties: {} },
     serverName,
+    mcpInfo: { serverName, toolName },
     ...(annotations ? { annotations } : {}),
   };
 }

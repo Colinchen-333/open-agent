@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { normalizeMcpAnnotations, normalizeMcpToolInfo } from '../tool-info';
 
 describe('normalizeMcpAnnotations', () => {
@@ -73,6 +73,21 @@ describe('normalizeMcpAnnotations — MCP spec *Hint suffix mapping', () => {
 });
 
 describe('normalizeMcpToolInfo', () => {
+  let savedEnv: string | undefined;
+
+  beforeEach(() => {
+    savedEnv = process.env.CLAUDE_AGENT_SDK_MCP_NO_PREFIX;
+    delete process.env.CLAUDE_AGENT_SDK_MCP_NO_PREFIX;
+  });
+
+  afterEach(() => {
+    if (savedEnv === undefined) {
+      delete process.env.CLAUDE_AGENT_SDK_MCP_NO_PREFIX;
+    } else {
+      process.env.CLAUDE_AGENT_SDK_MCP_NO_PREFIX = savedEnv;
+    }
+  });
+
   it('保留 MCP annotations 并过滤非布尔值', () => {
     const tool = normalizeMcpToolInfo('demo', {
       name: 'deploy',
@@ -84,16 +99,14 @@ describe('normalizeMcpToolInfo', () => {
       },
     });
 
-    expect(tool).toEqual({
-      name: 'deploy',
-      description: 'Deploy remotely',
-      inputSchema: { type: 'object', properties: {} },
-      serverName: 'demo',
-      annotations: {
-        readOnly: false,
-        destructive: true,
-        openWorld: true,
-      },
+    expect(tool.name).toBe('mcp__demo__deploy');
+    expect(tool.description).toBe('Deploy remotely');
+    expect(tool.serverName).toBe('demo');
+    expect(tool.mcpInfo).toEqual({ serverName: 'demo', toolName: 'deploy' });
+    expect(tool.annotations).toEqual({
+      readOnly: false,
+      destructive: true,
+      openWorld: true,
     });
   });
 
@@ -108,12 +121,34 @@ describe('normalizeMcpToolInfo', () => {
       },
     });
 
-    expect(tool).toEqual({
-      name: 'echo',
-      description: undefined,
-      inputSchema: { type: 'object', properties: { value: { type: 'string' } } },
-      serverName: 'demo',
-    });
+    expect(tool.name).toBe('mcp__demo__echo');
+    expect(tool.inputSchema).toEqual({ type: 'object', properties: { value: { type: 'string' } } });
+    expect(tool.serverName).toBe('demo');
+    expect(tool.mcpInfo).toEqual({ serverName: 'demo', toolName: 'echo' });
     expect('annotations' in tool).toBe(false);
+  });
+
+  it('in normal mode, name is prefixed as mcp__<server>__<tool>', () => {
+    const tool = normalizeMcpToolInfo('myserver', { name: 'list_files' });
+    expect(tool.name).toBe('mcp__myserver__list_files');
+  });
+
+  it('always sets mcpInfo regardless of prefix mode', () => {
+    const tool = normalizeMcpToolInfo('myserver', { name: 'list_files' });
+    expect(tool.mcpInfo).toEqual({ serverName: 'myserver', toolName: 'list_files' });
+  });
+
+  it('with CLAUDE_AGENT_SDK_MCP_NO_PREFIX=1, name is unprefixed but mcpInfo still set', () => {
+    process.env.CLAUDE_AGENT_SDK_MCP_NO_PREFIX = '1';
+    const tool = normalizeMcpToolInfo('myserver', { name: 'list_files' });
+    expect(tool.name).toBe('list_files');
+    expect(tool.mcpInfo).toEqual({ serverName: 'myserver', toolName: 'list_files' });
+  });
+
+  it('CLAUDE_AGENT_SDK_MCP_NO_PREFIX set to non-1 value does not suppress prefix', () => {
+    process.env.CLAUDE_AGENT_SDK_MCP_NO_PREFIX = 'true';
+    const tool = normalizeMcpToolInfo('myserver', { name: 'list_files' });
+    expect(tool.name).toBe('mcp__myserver__list_files');
+    expect(tool.mcpInfo).toEqual({ serverName: 'myserver', toolName: 'list_files' });
   });
 });

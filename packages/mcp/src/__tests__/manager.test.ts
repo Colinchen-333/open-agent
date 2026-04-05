@@ -29,10 +29,11 @@ describe('McpManager SDK servers', () => {
     expect(status?.status).toBe('connected');
     expect(status?.tools).toEqual([
       {
-        name: 'inspect',
+        name: 'mcp__demo__inspect',
         description: 'Inspect remote state',
         inputSchema: { type: 'object', properties: {} },
         serverName: 'demo',
+        mcpInfo: { serverName: 'demo', toolName: 'inspect' },
         annotations: {
           readOnly: true,
           openWorld: true,
