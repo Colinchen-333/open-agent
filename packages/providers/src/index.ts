@@ -17,6 +17,8 @@ export { AnthropicProvider } from './anthropic.js';
 export { OpenAIProvider } from './openai.js';
 export { OllamaProvider } from './ollama.js';
 export { calculateCost } from './pricing.js';
+export type { ModelCapability } from './model-capability.js';
+export { getModelCapability, supportsThinking, getContextWindowForModel } from './model-capability.js';
 
 import type { LLMProvider } from './types.js';
 import { AnthropicProvider } from './anthropic.js';
