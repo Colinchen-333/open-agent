@@ -37,7 +37,7 @@ import {
 import type { AppState } from '@open-agent/state';
 import { AgentLoader, AgentExecutor, TeamManager, TaskManager } from '@open-agent/agents';
 import type { AgentLoaderDiagnostic } from '@open-agent/agents';
-import type { SubagentStreamEvent, AgentSession, TaskItem, TeamConfig, TeamInboxEntry, TeamMember, TeamMessage } from '@open-agent/agents';
+import type { SubagentStreamEvent, AgentSession, ExecuteForkedOptions, TaskItem, TeamConfig, TeamInboxEntry, TeamMember, TeamMessage } from '@open-agent/agents';
 import {
   createDefaultToolRegistry,
   createTaskTool,
@@ -1509,6 +1509,11 @@ export function query(
           } : {}),
         };
 
+        // Fork-mode dispatch: isolation === 'fork' routes through executeForked()
+        // so the parent's message history is snapshotted by createForkContext()
+        // before the subagent runs — making the fork cache-stable and isolated.
+        const useFork = isolation === 'fork' && typeof sdkAgentExecutor.executeForked === 'function';
+
         if (runInBackground) {
           const bg = await sdkAgentExecutor.executeInBackground(executeOptions);
           return JSON.stringify({
@@ -1527,6 +1532,52 @@ export function query(
               task_type: 'agent',
             },
             ...(worktreePath ? { worktree_path: worktreePath, worktree_branch: worktreeBranch } : {}),
+          });
+        }
+
+        if (useFork) {
+          // Snapshot the parent conversation at dispatch time.
+          // loop.getMessages() is safe here because this callback only runs
+          // during loop.run(), at which point `loop` is already initialised.
+          const parentMessages = loop.getMessages();
+          const forkedExecOptions: ExecuteForkedOptions = {
+            ...executeOptions,
+            parentMessages,
+            root: effectiveAgentCwd,
+            permissionMode: executeOptions.mode as ExecuteForkedOptions['permissionMode'] | undefined,
+          };
+          const { agentId, outputFile: sidechainFile } = await sdkAgentExecutor.executeForked(forkedExecOptions);
+          // executeForked returns agentId + sidechain path; load session for stats.
+          const agentSession = sdkAgentExecutor.getAgent(agentId);
+          const defaultUsage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: null, cache_read_input_tokens: null, server_tool_use: null, service_tier: null, cache_creation: null };
+          const agentResult = agentSession?.result ?? '';
+          const orchestrationTemplates = buildTaskOrchestrationTemplates({
+            taskId: agentId,
+            status: 'completed',
+            description: name ?? subagentType,
+            summary: summarizePlainText(agentResult),
+            result: agentResult,
+          });
+          return JSON.stringify({
+            status: 'completed',
+            agentId,
+            content: [{ type: 'text', text: agentResult }],
+            sidechainFile,
+            totalToolUseCount: agentSession?.totalToolUseCount ?? 0,
+            totalDurationMs: agentSession?.durationMs ?? 0,
+            totalTokens: agentSession?.totalTokens ?? 0,
+            usage: agentSession?.usage ?? defaultUsage,
+            prompt: agentPrompt,
+            orchestration_templates: orchestrationTemplates,
+            task_event: {
+              type: 'system',
+              subtype: 'task_notification',
+              task_id: agentId,
+              ...(parentToolUseId ? { tool_use_id: parentToolUseId } : {}),
+              status: 'completed',
+              ...(teamName ? { team_name: teamName } : {}),
+              ...(name ? { description: name } : {}),
+            },
           });
         }
 
@@ -2861,6 +2912,11 @@ export function query(
     setAppState: (updater) => appStore.setState(updater),
   });
 
+  // Activate proactive autocompact by default so the snip + microcompact
+  // pipeline fires before each turn when token thresholds are hit, rather
+  // than waiting for a reactive 429/context-exceeded error.
+  loop.setAutoCompactPolicy('proactive');
+
   const syncLoopToolsFromRegistry = () => {
     loop.setTools(new Map(toolRegistry.list().map((t) => [t.name, t])));
     syncAppRuntimeControlPlane();
@@ -3315,6 +3371,7 @@ export function query(
   // ------------------------------------------------------------------
   const queryObj = gen as unknown as Query;
   (queryObj as Query & { __internal_getAppState?: () => AppState }).__internal_getAppState = () => appStore.getState();
+  (queryObj as Query & { __internal_getLoop?: () => ConversationLoop }).__internal_getLoop = () => loop;
   const finalizeGenerator = () => {
     const returnPromise = queryObj.return?.(undefined as any) as Promise<IteratorResult<SDKMessage, void>> | undefined;
     if (returnPromise) {

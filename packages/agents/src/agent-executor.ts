@@ -64,6 +64,13 @@ export interface ExecuteOptions {
   onEvent?: (event: SubagentStreamEvent) => void;
   /** Optional abort signal for foreground runs. */
   abortSignal?: AbortSignal;
+  /**
+   * Pre-built initial message list to inject into the runner directly.
+   * When set, this takes precedence over the transcript loaded from disk
+   * (even when `resume` is also set).  Used by `executeForked()` to pass
+   * the cache-stable fork context built by `createForkContext()`.
+   */
+  initialMessages?: import('@open-agent/providers').Message[];
 }
 
 /**
@@ -191,6 +198,9 @@ export class AgentExecutor {
     const forkedOptions: ExecuteOptions = {
       ...options,
       resume: agentId,
+      // KEY FIX: inject the cache-stable forked messages as initialMessages so
+      // execute() uses them directly instead of loading an empty transcript.
+      initialMessages: forkCtx.messages as import('@open-agent/providers').Message[],
       // Intercept onMessage via onEvent wrapper — we attach via the runner path below
       onEvent: upstreamOnMessage,
     };
@@ -276,9 +286,12 @@ export class AgentExecutor {
       // Import AgentRunner dynamically to avoid circular deps
       const AgentRunner = await this.loadAgentRunnerFactory();
 
-      // Load previous messages if resuming
+      // Load previous messages if resuming, unless the caller already
+      // provided a pre-built list (e.g. createForkContext output from executeForked).
       let initialMessages: import('@open-agent/providers').Message[] | undefined;
-      if (options.resume) {
+      if (options.initialMessages) {
+        initialMessages = options.initialMessages;
+      } else if (options.resume) {
         initialMessages = this.loadTranscript(options.resume);
       }
 

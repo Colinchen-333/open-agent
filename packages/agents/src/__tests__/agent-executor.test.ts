@@ -563,6 +563,48 @@ describe('AgentExecutor', () => {
 
       expect(outputFile).toBe(`${tmpRoot}/sidechain/${agentId}/messages.jsonl`);
     });
+
+    test('executeForked passes createForkContext output as initial messages to the runner', async () => {
+      // Provide a parent message that createForkContext will clone + append a directive to.
+      const parentMessages: unknown[] = [
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'parent context message' }],
+        },
+      ];
+
+      await executor.executeForked({
+        definition: mockDefinition,
+        provider: mockProvider as any,
+        tools: mockTools,
+        prompt: 'fork with real messages',
+        cwd: '/tmp',
+        parentMessages,
+        root: tmpRoot,
+      });
+
+      // The runner must have received initialMessages derived from createForkContext,
+      // NOT the raw parentMessages.  createForkContext appends a directive user message,
+      // so the runner sees length === parentMessages.length + 1.
+      expect(lastRunnerOptions).not.toBeNull();
+      expect(lastRunnerOptions.initialMessages).toBeDefined();
+      // Fork context adds a directive user message → length > original
+      expect((lastRunnerOptions.initialMessages as unknown[]).length).toBeGreaterThan(
+        parentMessages.length,
+      );
+      // The last injected message must be the directive user message
+      const lastMsg = lastRunnerOptions.initialMessages[lastRunnerOptions.initialMessages.length - 1] as any;
+      expect(lastMsg.role).toBe('user');
+      // Its content array must include a text block with the child directive text
+      const textBlock = (lastMsg.content as any[]).find(
+        (b: any) => b.type === 'text' && typeof b.text === 'string',
+      );
+      expect(textBlock).toBeDefined();
+      expect(textBlock.text).toContain('forked subagent');
+
+      // Parent messages must remain untouched (fork isolation)
+      expect(parentMessages).toHaveLength(1);
+    });
   });
 
   describe('A3: AgentRunner onEvent try-catch 源码保护', () => {

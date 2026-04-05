@@ -248,6 +248,10 @@ export class AgentRunner {
       setAppState: (updater) => appStore.setState(updater),
     });
 
+    // Activate proactive autocompact for subagent runs so long-running agents
+    // compact their context before hitting the provider's token limit.
+    loop.setAutoCompactPolicy('proactive');
+
     let resultText = '';
     let isError = false;
     let numTurns = 0;

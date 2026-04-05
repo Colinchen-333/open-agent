@@ -776,6 +776,10 @@ async function main(): Promise<void> {
     setAppState: (updater) => appStore.setState(updater),
   });
 
+  // Activate proactive autocompact so the snip + microcompact pipeline fires
+  // before each turn when token thresholds are hit, not just reactively.
+  loop.setAutoCompactPolicy('proactive');
+
   // Expose loop for plan mode tool access
   (globalThis as any).__openAgentLoop = loop;
 

@@ -8,4 +8,4 @@ export { AgentRunner, type AgentRunnerOptions, type AgentResult, type AgentUsage
 export { TeamManager } from './team-manager';
 export { TaskManager } from './task-manager';
 export { AgentExecutor } from './agent-executor';
-export type { AgentSession, AgentState, ExecuteOptions, AgentHookExecutor } from './agent-executor';
+export type { AgentSession, AgentState, ExecuteOptions, ExecuteForkedOptions, AgentHookExecutor } from './agent-executor';
