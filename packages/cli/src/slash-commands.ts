@@ -146,6 +146,15 @@ const SLASH_COMMANDS: Record<
         '    /init            Create AGENT.md for this project',
         '    /doctor          Diagnose environment issues',
         '',
+        '  Info',
+        '    /insights        Session insights: turns, tokens, cost',
+        '    /version         Print open-agent version',
+        '    /env             Print non-sensitive environment info',
+        '    /upgrade         Check for newer versions (stub)',
+        '    /plugins         List loaded plugins (stub)',
+        '    /workflow        Show workflow status (stub)',
+        '    /keybindings     Show keybindings (stub)',
+        '',
         '  General',
         '    /help            Show this help',
         '    /clear           Clear the terminal',
@@ -611,6 +620,107 @@ const SLASH_COMMANDS: Record<
         checks.push(`  ✓ Tool capability presets: ${snapshot.presets.map((preset) => `${preset.name}(${preset.toolCount})`).join(', ')}`);
       }
       return { handled: true, output: `Environment check:\n${checks.join('\n')}` };
+    },
+  },
+  '/plugins': {
+    description: 'List loaded plugins',
+    handler: async (_args, _ctx) => {
+      return {
+        handled: true,
+        output: 'Plugin registry not yet implemented (Round 3 scope). No plugins loaded.',
+      };
+    },
+  },
+  '/workflow': {
+    description: 'Show workflow status',
+    handler: async (_args, _ctx) => {
+      return {
+        handled: true,
+        output: 'Workflow system not yet implemented (Round 3 scope).',
+      };
+    },
+  },
+  '/keybindings': {
+    description: 'Show current keybindings',
+    handler: async (_args, _ctx) => {
+      return {
+        handled: true,
+        output: 'Keybindings configuration not yet implemented (Round 3 scope).',
+      };
+    },
+  },
+  '/insights': {
+    description: 'Show session insights: turns, token usage, cost',
+    handler: async (_args, ctx) => {
+      const turns = ctx.loop.getTurnCount();
+      const { totalCostUsd, totalInputTokens, totalOutputTokens } = ctx.loop.getTotalCost();
+      const totalTokens = totalInputTokens + totalOutputTokens;
+      const costStr = totalCostUsd > 0 ? `$${totalCostUsd.toFixed(6)}` : '$0.000000';
+      const lines = [
+        'Session insights:',
+        `  Turns:           ${turns}`,
+        `  Input tokens:    ${totalInputTokens.toLocaleString()}`,
+        `  Output tokens:   ${totalOutputTokens.toLocaleString()}`,
+        `  Total tokens:    ${totalTokens.toLocaleString()}`,
+        `  Estimated cost:  ${costStr}`,
+        '',
+        '  Per-tool call breakdown: not yet available (Round 3 scope).',
+      ];
+      return { handled: true, output: lines.join('\n') };
+    },
+  },
+  '/upgrade': {
+    description: 'Check for newer open-agent versions',
+    handler: async (_args, _ctx) => {
+      return {
+        handled: true,
+        output: 'Version check not yet implemented (Round 3 scope). Check https://github.com/Colinchen-333/open-agent for updates.',
+      };
+    },
+  },
+  '/version': {
+    description: 'Print the open-agent version',
+    handler: async (_args, _ctx) => {
+      // Resolve version from the root package.json at runtime.
+      let version = 'unknown';
+      try {
+        const { readFileSync } = await import('fs');
+        const { join } = await import('path');
+        // Walk up from this file to find the workspace root package.json.
+        // In production (bundled binary) __dirname may not be reliable, so we
+        // fall back gracefully.
+        const candidates = [
+          join(process.cwd(), 'package.json'),
+          join(import.meta.dir, '../../../../package.json'),
+          join(import.meta.dir, '../../../package.json'),
+        ];
+        for (const p of candidates) {
+          try {
+            const pkg = JSON.parse(readFileSync(p, 'utf-8'));
+            if (typeof pkg.version === 'string') {
+              version = pkg.version;
+              break;
+            }
+          } catch { /* keep trying */ }
+        }
+      } catch { /* ignore */ }
+      return { handled: true, output: `open-agent version: ${version}` };
+    },
+  },
+  '/env': {
+    description: 'Print non-sensitive environment info',
+    handler: async (_args, ctx) => {
+      const { runtimeVersion } = await import('@open-agent/core');
+      const runtime = ('Bun' in globalThis) ? `Bun ${runtimeVersion}` : `Node.js ${runtimeVersion}`;
+      const lines = [
+        'Environment:',
+        `  CWD:       ${ctx.cwd}`,
+        `  Platform:  ${process.platform}`,
+        `  Runtime:   ${runtime}`,
+        `  Model:     ${ctx.model}`,
+        `  Provider:  ${(ctx as unknown as Record<string, unknown>).provider as string ?? 'unknown'}`,
+      ];
+      return { handled: true, output: lines.join('\n') };
     },
   },
   '/rewind': {
