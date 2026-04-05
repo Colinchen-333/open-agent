@@ -147,11 +147,13 @@ describe('createSession()', () => {
     expect(session.sessionId.length).toBeGreaterThan(0);
     expect(typeof session.send).toBe('function');
     expect(typeof session.interrupt).toBe('function');
+    expect(typeof session.getSessionState).toBe('function');
     expect(typeof session.setPermissionMode).toBe('function');
     expect(typeof session.setModel).toBe('function');
     expect(typeof session.setMaxThinkingTokens).toBe('function');
     expect(typeof session.supportedCommands).toBe('function');
     expect(typeof session.supportedModels).toBe('function');
+    expect(typeof session.getProviderCapabilities).toBe('function');
     expect(typeof session.supportedAgents).toBe('function');
     expect(typeof session.supportedSkills).toBe('function');
     expect(typeof session.readRuntimeControlPlane).toBe('function');
@@ -164,6 +166,9 @@ describe('createSession()', () => {
     expect(typeof session.acknowledgeTeamInbox).toBe('function');
     expect(typeof session.listPendingTeamApprovals).toBe('function');
     expect(typeof session.respondToTeamApproval).toBe('function');
+    expect(typeof session.listRegisteredTools).toBe('function');
+    expect(typeof session.registerRuntimeTools).toBe('function');
+    expect(typeof session.unregisterRuntimeTools).toBe('function');
     expect(typeof session.listBackgroundTasks).toBe('function');
     expect(typeof session.getBackgroundTask).toBe('function');
     expect(typeof session.dispatchNextTask).toBe('function');
@@ -177,6 +182,8 @@ describe('createSession()', () => {
     expect(typeof session.requeueTaskDispatcherAssignment).toBe('function');
     expect(typeof session.stopTaskDispatcher).toBe('function');
     expect(typeof session.stopTask).toBe('function');
+    expect(typeof session.listRunningSubagents).toBe('function');
+    expect(typeof session.cancelSubagent).toBe('function');
     expect(typeof session.streamInput).toBe('function');
     expect(typeof session.reconnectMcpServer).toBe('function');
     expect(typeof session.toggleMcpServer).toBe('function');

@@ -42,9 +42,13 @@ export interface ModelInfo {
   value: string;
   displayName: string;
   description: string;
+  supportsThinking?: boolean;
   supportsEffort?: boolean;
   supportedEffortLevels?: ('low' | 'medium' | 'high' | 'max')[];
   supportsAdaptiveThinking?: boolean;
+  supportsStructuredOutput?: boolean;
+  supportsImages?: boolean;
+  supportsServerTools?: boolean;
 }
 
 // Model usage statistics

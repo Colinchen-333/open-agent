@@ -2325,17 +2325,17 @@ export function query(
             resultEmittedForTurn = true;
           }
           if (resultMessage && !resultEmittedForTurn) {
+            if (!modelError) {
+              touchSessionState({
+                status: 'idle',
+                activeTurn: false,
+                lastResultAt: new Date().toISOString(),
+                idleReason: 'awaiting_input',
+                lastError: undefined,
+              });
+            }
             yield* flushPendingSubagentMessages();
             yield resultMessage;
-          }
-          if (!modelError) {
-            touchSessionState({
-              status: 'idle',
-              activeTurn: false,
-              lastResultAt: new Date().toISOString(),
-              idleReason: sourceExhausted ? 'awaiting_input' : 'awaiting_input',
-              lastError: undefined,
-            });
           }
         }
       }
