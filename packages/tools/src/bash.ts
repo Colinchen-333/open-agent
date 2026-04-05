@@ -74,6 +74,7 @@ export function createBashTool(): ToolDefinition {
   return withToolDefaults({
     name: 'Bash',
     isConcurrencySafe: false,
+    annotations: { destructive: true, openWorld: true },
     description:
       'Execute a bash command in the current working directory. Stdout is captured and returned. Output exceeding 30 000 characters is truncated. Working directory persists between commands; shell state (everything else) does not.',
     getToolUseSummary(input: BashInput, _result, isError) {

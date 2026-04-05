@@ -32,6 +32,7 @@ export function createGlobTool(): ToolDefinition {
     name: 'Glob',
     description: 'Find files matching a glob pattern, sorted by modification time (newest first). Returns up to 100 results.',
     isReadOnly: true,
+    annotations: { readOnly: true, idempotent: true },
     getToolUseSummary(input: GlobInput) {
       return `Matched ${truncateSummary(input.pattern, 40)}`;
     },

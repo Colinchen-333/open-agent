@@ -1,5 +1,16 @@
 import type { PermissionMode } from '@open-agent/core';
 
+/**
+ * MCP-aligned tool annotations forwarded from ToolDefinition.
+ * Shape mirrors ToolAnnotations in @open-agent/tools to avoid a circular dep.
+ */
+export interface ToolAnnotationsRef {
+  readOnly?: boolean;
+  destructive?: boolean;
+  openWorld?: boolean;
+  idempotent?: boolean;
+}
+
 export interface PermissionRule {
   toolName: string;
   ruleContent?: string; // e.g. glob pattern, command prefix/regex pattern
@@ -20,6 +31,10 @@ export interface PermissionRequest {
   toolUseId: string;
   agentId?: string;
   metadata?: PermissionRequestMetadata;
+  /** MCP-aligned tool annotations propagated from ToolDefinition.annotations.
+   *  Informational only — does not alter existing deny/allow outcomes.
+   *  Downstream stages (e.g. L23 classifier) may consume this field. */
+  annotations?: ToolAnnotationsRef;
 }
 
 export interface PermissionRequestCapabilityMetadata {

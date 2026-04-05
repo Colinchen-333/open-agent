@@ -78,6 +78,21 @@ export interface GrepOutput {
   numMatches?: number;
 }
 
+/**
+ * Tool annotations aligned with the MCP spec (2024-11-05).
+ * These are optional hints consumed by the permission engine and rendering layer.
+ */
+export interface ToolAnnotations {
+  /** Tool only reads data; safe to auto-approve. */
+  readOnly?: boolean;
+  /** Tool performs destructive mutations (writes, deletes, exec). */
+  destructive?: boolean;
+  /** Tool interacts with the open web or external systems (network risk). */
+  openWorld?: boolean;
+  /** Tool is idempotent — calling it twice with the same input yields the same result. */
+  idempotent?: boolean;
+}
+
 export type ToolCapabilityCategory =
   | 'filesystem'
   | 'shell'
@@ -139,6 +154,10 @@ export interface ToolDefinition {
   /** When true, this tool is not surfaced in the initial tool list. It must be
    *  explicitly discovered via ToolSearch. Defaults to false. */
   shouldDefer?: boolean;
+
+  /** MCP-aligned annotations describing the behavioral nature of this tool.
+   *  Used by the permission engine and rendering layer; does not change execution. */
+  annotations?: ToolAnnotations;
 
   /** Maximum size of the tool's result in characters before truncation. Default: 100_000. */
   maxResultSizeChars?: number;

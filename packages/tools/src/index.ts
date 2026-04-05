@@ -20,6 +20,7 @@ export type {
   ToolCapabilityManifest,
   ToolCapabilityRisk,
   ResolvedToolCapability,
+  ToolAnnotations,
 } from './types.js';
 
 export { ToolRegistry, createDefaultToolRegistry } from './registry.js';

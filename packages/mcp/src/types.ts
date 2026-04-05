@@ -9,6 +9,7 @@ export interface McpToolInfo {
     readOnly?: boolean;
     destructive?: boolean;
     openWorld?: boolean;
+    idempotent?: boolean;
   };
 }
 

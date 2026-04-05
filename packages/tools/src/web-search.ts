@@ -166,6 +166,7 @@ export function createWebSearchTool(): ToolDefinition {
     description:
       'Search the web and return results. Use this for current events and recent information.',
     isReadOnly: true,
+    annotations: { readOnly: true, openWorld: true },
     getToolUseSummary(input: { query: string }) {
       return `Searched web for ${truncateSummary(input.query, 40)}`;
     },

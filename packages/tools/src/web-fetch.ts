@@ -116,6 +116,7 @@ export function createWebFetchTool(): ToolDefinition {
       'The prompt parameter describes what you are looking for; use it to guide ' +
       'your own interpretation of the returned content.',
     isReadOnly: true,
+    annotations: { readOnly: true, openWorld: true },
     getToolUseSummary(input: { url: string }) {
       return `Fetched ${truncateSummary(input.url, 45)}`;
     },

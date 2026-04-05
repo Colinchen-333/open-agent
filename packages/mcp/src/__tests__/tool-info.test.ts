@@ -25,6 +25,53 @@ describe('normalizeMcpAnnotations', () => {
   });
 });
 
+describe('normalizeMcpAnnotations — MCP spec *Hint suffix mapping', () => {
+  it('maps readOnlyHint → readOnly, destructiveHint → destructive, openWorldHint → openWorld, idempotentHint → idempotent', () => {
+    expect(normalizeMcpAnnotations({
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: true,
+      idempotentHint: false,
+    } as any)).toEqual({
+      readOnly: true,
+      destructive: false,
+      openWorld: true,
+      idempotent: false,
+    });
+  });
+
+  it('Hint-suffixed form takes precedence over un-suffixed when both present', () => {
+    expect(normalizeMcpAnnotations({
+      readOnly: false,
+      readOnlyHint: true,   // Hint wins
+      destructive: true,
+      destructiveHint: false, // Hint wins
+    } as any)).toEqual({
+      readOnly: true,
+      destructive: false,
+    });
+  });
+
+  it('idempotentHint is included in the result', () => {
+    const result = normalizeMcpAnnotations({ idempotentHint: true } as any);
+    expect(result).toEqual({ idempotent: true });
+  });
+
+  it('falls back to un-suffixed when *Hint fields are absent', () => {
+    expect(normalizeMcpAnnotations({
+      readOnly: true,
+      idempotent: true,
+    } as any)).toEqual({ readOnly: true, idempotent: true });
+  });
+
+  it('returns undefined when only non-boolean Hint fields are present', () => {
+    expect(normalizeMcpAnnotations({
+      readOnlyHint: 'yes',
+      destructiveHint: null,
+    } as any)).toBeUndefined();
+  });
+});
+
 describe('normalizeMcpToolInfo', () => {
   it('保留 MCP annotations 并过滤非布尔值', () => {
     const tool = normalizeMcpToolInfo('demo', {
