@@ -357,9 +357,13 @@ export class OpenAgentRuntime {
 
   private resolveMcpToolName(tool: McpToolInfo): string {
     if (this.options.mcp?.toolNameStyle === 'namespaced') {
-      return `mcp__${tool.serverName}__${tool.name}`;
+      // tool.name already carries the mcp__<server>__<tool> prefix post-L36;
+      // return it directly to avoid double-prefixing.
+      return tool.name;
     }
-    return tool.name;
+    // Raw style: use the bare tool name from mcpInfo so the tool is registered
+    // under its original short name (e.g. "echo") rather than the prefixed form.
+    return tool.mcpInfo?.toolName ?? tool.name;
   }
 
   private shouldRegisterMcpTool(toolName: string, tool: McpToolInfo): boolean {
@@ -406,7 +410,10 @@ export class OpenAgentRuntime {
         concurrencySafe: readOnly,
       },
       execute: async (input: Record<string, unknown>) => {
-        const result = await this.mcpManager.callTool(tool.serverName, tool.name, input);
+        // Use the bare toolName from mcpInfo so callTool receives the original
+        // server-side name, not the prefixed runtime name introduced by L36.
+        const bareToolName = tool.mcpInfo?.toolName ?? tool.name;
+        const result = await this.mcpManager.callTool(tool.serverName, bareToolName, input);
         return this.options.mcp?.formatResult?.(result) ?? result;
       },
     };
