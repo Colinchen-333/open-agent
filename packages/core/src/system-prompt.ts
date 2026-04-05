@@ -36,6 +36,20 @@ export interface SystemPromptOptions {
     coordinator?: CoordinatorContext;
   };
   contextSections?: PromptContextSection[];
+  /**
+   * Optional output style to inject after the main prompt. The `instructions`
+   * field is appended as a new dynamic section so the model actually follows
+   * the configured style.
+   *
+   * NOTE: `keepCodingInstructions: false` suppression of standard coding
+   * guidance is deferred — the style block is always appended alongside the
+   * default instructions for now.
+   */
+  activeOutputStyle?: {
+    name: string;
+    instructions: string;
+    keepCodingInstructions: boolean;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +396,17 @@ ${options.agentInstructions.join('\n\n---\n\n')}`);
   }
 
   dynamicParts.push(...contextSections.final);
+
+  // ── Dynamic: Active output style ─────────────────────────────────────
+  // Inject after all other dynamic sections so the style instructions land
+  // near the end of the prompt where they are most salient to the model.
+  // keepCodingInstructions suppression is deferred; the block is always
+  // appended alongside the default instructions.
+  if (options.activeOutputStyle && options.activeOutputStyle.instructions.trim().length > 0) {
+    dynamicParts.push(
+      `## Output style: ${options.activeOutputStyle.name}\n\n${options.activeOutputStyle.instructions.trim()}`,
+    );
+  }
 
   // Assemble: all static blocks first, then all dynamic blocks.
   // Filter out empty strings to avoid blank blocks.

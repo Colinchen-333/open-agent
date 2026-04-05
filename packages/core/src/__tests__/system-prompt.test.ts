@@ -346,6 +346,33 @@ describe('buildSystemPrompt runtime snapshot', () => {
       expect(prompt).toContain(phrase);
     }
   });
+
+  it('injects output style instructions when activeOutputStyle is provided', () => {
+    const prompt = buildSystemPrompt({
+      cwd: '/tmp',
+      model: 'glm-4.7',
+      permissionMode: 'default',
+      tools: [],
+      activeOutputStyle: {
+        name: 'verbose',
+        instructions: 'Be thorough and cite files whenever possible.',
+        keepCodingInstructions: true,
+      },
+    });
+    expect(prompt).toContain('Output style: verbose');
+    expect(prompt).toContain('Be thorough and cite files');
+  });
+
+  it('omits output style section when activeOutputStyle instructions are empty', () => {
+    const prompt = buildSystemPrompt({
+      cwd: '/tmp',
+      model: 'glm-4.7',
+      permissionMode: 'default',
+      tools: [],
+      activeOutputStyle: { name: 'default', instructions: '', keepCodingInstructions: true },
+    });
+    expect(prompt).not.toContain('Output style: default');
+  });
 });
 
 describe('buildSystemPromptBlocks', () => {
