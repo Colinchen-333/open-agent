@@ -804,19 +804,21 @@ async function main(): Promise<void> {
       isPrintMode,
     });
 
+  const applyCliSettingsState = (nextSettings: Settings | Record<string, unknown> | null | undefined) => {
+    settings = (nextSettings ?? {}) as Settings;
+    try {
+      const nextHooks = nextSettings && typeof nextSettings === 'object' && nextSettings.hooks && typeof nextSettings.hooks === 'object'
+        ? nextSettings.hooks as any
+        : {};
+      _hookExecutor.replaceShellHooksFromConfig(nextHooks, 'settings_json');
+    } catch {
+      _hookExecutor.replaceShellHooksFromConfig({}, 'settings_json');
+    }
+  };
+
   const settingsWatcher = cliPermissionRuntime.watchSettings(['user', 'project', 'local'], {
     onRefresh(nextSettings, source) {
       void (async () => {
-        settings = nextSettings as Settings;
-        try {
-          const nextHooks = nextSettings.hooks && typeof nextSettings.hooks === 'object'
-            ? nextSettings.hooks as any
-            : {};
-          _hookExecutor.replaceShellHooksFromConfig(nextHooks, 'settings_json');
-        } catch {
-          _hookExecutor.replaceShellHooksFromConfig({}, 'settings_json');
-        }
-
         await applyCliRuntimeSettingsRefresh({
           runtime,
           toolRegistry,
@@ -825,6 +827,7 @@ async function main(): Promise<void> {
           buildSystemPrompt: buildCliSystemPrompt,
           syncLoopTools: syncCliLoopTools,
           isPrintMode: false,
+          applySettingsState: applyCliSettingsState,
         }, nextSettings);
 
         await hookExecutor.execute('ConfigChange', {

@@ -241,4 +241,105 @@ describe('applyCliRuntimeSettingsRefresh', () => {
     expect(store.getState().runtime.agentNames).toEqual([]);
     expect(callOrder).toEqual(['set', 'ready', 'sync-tools']);
   });
+
+  it('applies settings-backed state before rebuilding the prompt surface', async () => {
+    const callOrder: string[] = [];
+    let lastSystemPrompt = '';
+
+    const store = createStore(createDefaultAppState({
+      sessionId: 'session-1',
+      cwd: '/tmp/project',
+      model: 'mock-model',
+      permissionMode: 'default',
+      tools: new Map(),
+      thinkingConfig: { type: 'adaptive' },
+      verbose: false,
+    }));
+
+    await applyCliRuntimeSettingsRefresh({
+      runtime: {
+        async setMcpServers() {
+          callOrder.push('set-mcp');
+          return { added: [], removed: [], errors: {} };
+        },
+        waitForMcpReady() {
+          callOrder.push('wait-ready');
+          return undefined;
+        },
+        buildSnapshot() {
+          callOrder.push('build-snapshot');
+          return {
+            tools: [],
+            agents: [],
+            skills: [],
+            mcpServers: [],
+            capabilitySnapshot: {
+              totalTools: 0,
+              profiles: [],
+              presets: [],
+              summary: {
+                accessCounts: { 'read-only': 0, mutable: 0, meta: 0, external: 0 },
+                groupCounts: { files: 0, execution: 0, coordination: 0, integration: 0, external: 0, utility: 0 },
+                mcpTools: 0,
+                dynamicTools: 0,
+              },
+            },
+            plugins: [],
+            hooks: [],
+            diagnostics: [],
+            diagnosticSummary: {
+              total: 0,
+              info: 0,
+              warning: 0,
+              error: 0,
+              bySource: {},
+            },
+          };
+        },
+        listMcpServerStatus() {
+          return [];
+        },
+      },
+      toolRegistry: {
+        list() {
+          callOrder.push('list-tools');
+          return [];
+        },
+      },
+      loop: {
+        setSystemPrompt(prompt) {
+          callOrder.push('set-prompt');
+          lastSystemPrompt = prompt ?? '';
+        },
+      },
+      appStore: store,
+      buildSystemPrompt() {
+        callOrder.push('build-prompt');
+        return 'prompt-after-settings-state';
+      },
+      syncLoopTools() {
+        callOrder.push('sync-tools');
+      },
+      isPrintMode: false,
+      applySettingsState() {
+        callOrder.push('apply-settings-state');
+      },
+    }, {
+      hooks: {
+        Notification: [{ command: 'echo updated-hook' }],
+      },
+    });
+
+    expect(callOrder).toEqual([
+      'set-mcp',
+      'apply-settings-state',
+      'wait-ready',
+      'list-tools',
+      'sync-tools',
+      'build-snapshot',
+      'build-prompt',
+      'set-prompt',
+    ]);
+    expect(lastSystemPrompt).toBe('prompt-after-settings-state');
+  });
 });

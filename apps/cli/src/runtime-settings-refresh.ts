@@ -17,6 +17,7 @@ export interface CliRuntimeRefreshContext {
   buildSystemPrompt(): string;
   syncLoopTools(tools: ToolDefinition[]): void;
   isPrintMode: boolean;
+  applySettingsState?(settings: Settings | Record<string, unknown> | null | undefined): Promise<void> | void;
 }
 
 export interface CliRuntimeRefreshResult {
@@ -67,5 +68,6 @@ export async function applyCliRuntimeSettingsRefresh(
 ): Promise<CliRuntimeRefreshResult> {
   const mcpServers = ((settings as Settings | undefined)?.mcpServers ?? {}) as Record<string, McpServerConfig>;
   await context.runtime.setMcpServers(mcpServers);
+  await context.applySettingsState?.(settings);
   return refreshCliRuntimeSurface(context);
 }
