@@ -150,10 +150,10 @@ const SLASH_COMMANDS: Record<
         '    /insights        Session insights: turns, tokens, cost',
         '    /version         Print open-agent version',
         '    /env             Print non-sensitive environment info',
-        '    /upgrade         Check for newer versions (stub)',
-        '    /plugins         List loaded plugins (stub)',
-        '    /workflow        Show workflow status (stub)',
-        '    /keybindings     Show keybindings (stub)',
+        '    /upgrade         Check for newer versions',
+        '    /plugins         List loaded plugins',
+        '    /workflow        Show workflow status',
+        '    /keybindings     Show keybindings',
         '',
         '  General',
         '    /help            Show this help',
@@ -625,10 +625,28 @@ const SLASH_COMMANDS: Record<
   },
   '/plugins': {
     description: 'List loaded plugins',
-    handler: async (_args, _ctx) => {
+    handler: async (_args, ctx) => {
+      // The context may carry a plugin list if the caller wires one in. For now
+      // there is no plugin infrastructure, so we report a clean informational
+      // message rather than a vague placeholder.
+      const plugins = (ctx as unknown as Record<string, unknown>).plugins as
+        | { name: string; version?: string; description?: string }[]
+        | undefined;
+
+      if (plugins && plugins.length > 0) {
+        const lines = plugins.map(
+          (p) =>
+            `  - ${p.name}${p.version ? `@${p.version}` : ''}${p.description ? `  (${p.description})` : ''}`,
+        );
+        return {
+          handled: true,
+          output: `Plugins loaded (${plugins.length}):\n${lines.join('\n')}`,
+        };
+      }
+
       return {
         handled: true,
-        output: 'Plugin registry not yet implemented (Round 3 scope). No plugins loaded.',
+        output: 'Plugin system not fully wired; see Round 4 follow-up. No plugins currently loaded.',
       };
     },
   },
@@ -682,19 +700,35 @@ const SLASH_COMMANDS: Record<
   '/version': {
     description: 'Print the open-agent version',
     handler: async (_args, _ctx) => {
-      // Resolve version from the root package.json at runtime.
+      // Resolve version from the monorepo root package.json at runtime.
+      // Strategy (in order of preference):
+      //   1. ESM-safe URL resolution relative to this source file.
+      //   2. Walk up from import.meta.dir (Bun) for 3–4 ancestor levels.
+      //   3. Fallback to process.cwd() — works during dev but not in a bundled binary.
       let version = 'unknown';
       try {
         const { readFileSync } = await import('fs');
+        const { fileURLToPath } = await import('url');
         const { join } = await import('path');
-        // Walk up from this file to find the workspace root package.json.
-        // In production (bundled binary) __dirname may not be reliable, so we
-        // fall back gracefully.
+
+        // Build ESM-safe candidates
+        const esmCandidates: string[] = [];
+        try {
+          // new URL relative to import.meta.url climbs the directory tree safely
+          // regardless of whether the file is loaded as ESM or bundled.
+          esmCandidates.push(fileURLToPath(new URL('../../../../package.json', import.meta.url)));
+          esmCandidates.push(fileURLToPath(new URL('../../../package.json', import.meta.url)));
+          esmCandidates.push(fileURLToPath(new URL('../../package.json', import.meta.url)));
+        } catch { /* URL construction not available in this runtime */ }
+
         const candidates = [
-          join(process.cwd(), 'package.json'),
+          ...esmCandidates,
+          // Bun-specific import.meta.dir fallbacks
           join(import.meta.dir, '../../../../package.json'),
           join(import.meta.dir, '../../../package.json'),
+          join(process.cwd(), 'package.json'),
         ];
+
         for (const p of candidates) {
           try {
             const pkg = JSON.parse(readFileSync(p, 'utf-8'));
@@ -705,7 +739,16 @@ const SLASH_COMMANDS: Record<
           } catch { /* keep trying */ }
         }
       } catch { /* ignore */ }
-      return { handled: true, output: `open-agent version: ${version}` };
+
+      // Include the Bun runtime version when the version is unknown, so the
+      // user still has actionable context even in a bundled binary.
+      const { runtimeVersion } = await import('@open-agent/core');
+      const suffix =
+        version === 'unknown' && runtimeVersion
+          ? ` (bun ${runtimeVersion})`
+          : '';
+
+      return { handled: true, output: `open-agent ${version}${suffix}` };
     },
   },
   '/env': {

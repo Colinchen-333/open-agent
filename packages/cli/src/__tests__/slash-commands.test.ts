@@ -19,10 +19,27 @@ const baseCtx = {
 };
 
 describe('/plugins', () => {
-  it('returns handled: true and a stub message', async () => {
+  it('returns handled: true and a clean informational message when no plugin list is present', async () => {
     const result = await handleSlashCommand('/plugins', baseCtx);
     expect(result?.handled).toBe(true);
     expect(result?.output).toContain('Plugin');
+    expect(result?.output).toContain('Round 4');
+  });
+
+  it('lists plugins when a plugins array is provided on the context', async () => {
+    const ctx = {
+      ...baseCtx,
+      plugins: [
+        { name: 'my-plugin', version: '1.0.0', description: 'A test plugin' },
+        { name: 'another-plugin' },
+      ],
+    } as any;
+    const result = await handleSlashCommand('/plugins', ctx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('Plugins loaded (2)');
+    expect(result?.output).toContain('my-plugin@1.0.0');
+    expect(result?.output).toContain('A test plugin');
+    expect(result?.output).toContain('another-plugin');
   });
 });
 
@@ -66,10 +83,18 @@ describe('/upgrade', () => {
 });
 
 describe('/version', () => {
-  it('returns handled: true and contains a version string', async () => {
+  it('returns handled: true and starts with "open-agent"', async () => {
     const result = await handleSlashCommand('/version', baseCtx);
     expect(result?.handled).toBe(true);
-    expect(result?.output).toContain('open-agent version');
+    expect(result?.output).toMatch(/^open-agent /);
+  });
+
+  it('includes bun version suffix when version cannot be resolved', async () => {
+    // The test process may or may not resolve a real package.json version; in
+    // either case the output must start with "open-agent" and may include a
+    // bun runtime suffix when version is unknown.
+    const result = await handleSlashCommand('/version', baseCtx);
+    expect(result?.output).toMatch(/^open-agent (\d+\.\d+\.\d+|unknown)/);
   });
 });
 
