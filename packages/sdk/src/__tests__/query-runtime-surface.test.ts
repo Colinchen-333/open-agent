@@ -34,6 +34,45 @@ function writeJson(filePath: string, value: unknown): void {
   writeFileSync(filePath, JSON.stringify(value), 'utf-8');
 }
 
+function createPluginFixture() {
+  const pluginDir = mkdtempSync(join(tmpdir(), 'open-agent-runtime-prompt-plugin-'));
+  mkdirSync(join(pluginDir, 'skills'), { recursive: true });
+  mkdirSync(join(pluginDir, 'commands'), { recursive: true });
+  mkdirSync(join(pluginDir, 'agents'), { recursive: true });
+
+  writeFileSync(join(pluginDir, 'plugin.json'), JSON.stringify({
+    name: 'runtime-review-kit',
+    version: '1.0.0',
+    description: 'Runtime prompt plugin fixture',
+    hooks: {
+      UnknownEvent: [
+        { command: 'echo invalid-hook', timeout: 5 },
+      ],
+      PreToolUse: [
+        { command: 'echo plugin-hook', timeout: 5 },
+      ],
+    },
+  }, null, 2));
+  writeFileSync(join(pluginDir, 'skills', 'runtime-review.md'), `---
+name: runtime-review
+description: Runtime review skill
+---
+Use this skill for runtime review tasks.`);
+  writeFileSync(join(pluginDir, 'commands', 'runtime-review.md'), `---
+name: runtime-review
+description: Runtime review command
+---
+Run runtime review command body.`);
+  writeFileSync(join(pluginDir, 'agents', 'runtime-reviewer.md'), `---
+description: Runtime reviewer agent
+model: sonnet
+tools: Read
+---
+You are the runtime reviewer.`);
+
+  return pluginDir;
+}
+
 function makeBlockingProvider(): { provider: LLMProvider; release(): void; waitUntilStarted(): Promise<void> } {
   let releaseRun: (() => void) | null = null;
   let startedResolve: (() => void) | null = null;
@@ -83,6 +122,35 @@ function makeMetadataProvider(models: ModelInfo[]): LLMProvider {
     },
     async listModels(): Promise<ModelInfo[]> {
       return models;
+    },
+  };
+}
+
+function makePromptCaptureProvider(): { provider: LLMProvider; getPrompt(): string } {
+  let capturedPrompt = '';
+  return {
+    provider: {
+      name: 'mock-prompt-capture-provider',
+      async *chat(_messages: Message[], options: ChatOptions): AsyncGenerator<StreamEvent> {
+        capturedPrompt = typeof options.systemPrompt === 'string' ? options.systemPrompt : '';
+        yield { type: 'text_delta', text: 'captured' };
+        yield { type: 'message_end', message: {}, usage: { input_tokens: 1, output_tokens: 1 } };
+      },
+      async listModels(): Promise<ModelInfo[]> {
+        return [{
+          value: 'mock-model',
+          displayName: 'Mock Model',
+          description: 'Prompt capture test model',
+          supportsThinking: false,
+          supportsStructuredOutput: true,
+          supportsImages: false,
+          supportsServerTools: false,
+          supportsEffort: false,
+        }];
+      },
+    },
+    getPrompt() {
+      return capturedPrompt;
     },
   };
 }
@@ -283,6 +351,43 @@ describe('SDK runtime control surface', () => {
       await iterator.return?.();
       session.close();
     } finally {
+      cleanup();
+    }
+  });
+
+  it('injects runtime plugin, hook, and diagnostic prompt fragments into managed system prompts', async () => {
+    const { cwd, cleanup } = makeTempHome('open-agent-runtime-prompt-surface-');
+    const pluginDir = createPluginFixture();
+    const capture = makePromptCaptureProvider();
+    try {
+      const session = createSession({
+        cwd,
+        model: 'mock-model',
+        provider: capture.provider,
+        plugins: [{ type: 'local', path: pluginDir }],
+        hooks: {
+          Notification: [
+            { command: 'echo session-hook', timeout: 5 },
+          ],
+        },
+      });
+
+      const turn = session.send('describe runtime surface');
+      for await (const _msg of turn) {
+        // drain
+      }
+
+      const prompt = capture.getPrompt();
+      expect(prompt).toContain('# Runtime Plugins');
+      expect(prompt).toContain('runtime-review-kit');
+      expect(prompt).toContain('# Runtime Hook Surface');
+      expect(prompt).toContain('PreToolUse');
+      expect(prompt).toContain('Notification');
+      expect(prompt).toContain('# Runtime Diagnostics');
+      expect(prompt).toContain('Sources: hook: 1');
+      session.close();
+    } finally {
+      rmSync(pluginDir, { recursive: true, force: true });
       cleanup();
     }
   });

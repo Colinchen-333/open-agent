@@ -13,7 +13,7 @@ import type {
   SDKTaskNotificationMessage,
   SDKPromptSuggestionMessage,
 } from '@open-agent/core';
-import { ConversationLoop, SessionManager, buildSystemPrompt, FileCheckpoint, isGitRepository, buildTaskOrchestrationTemplates, loadPromptContext, buildCoordinatorContext, HOOK_EVENTS } from '@open-agent/core';
+import { ConversationLoop, SessionManager, buildSystemPrompt, FileCheckpoint, isGitRepository, buildTaskOrchestrationTemplates, loadPromptContext, buildCoordinatorContext, buildRuntimeHookSurfaceSummary, HOOK_EVENTS } from '@open-agent/core';
 import {
   createStore,
   appendTimelineControlPlane,
@@ -1606,6 +1606,17 @@ export function query(
     pluginRuntime.hookConfig,
     options.hooks,
   );
+  const buildPromptHookSurface = (): RuntimeHookSummary[] => buildRuntimeHookSurfaceSummary(
+    pluginRuntime.hooks,
+    {
+      source: 'settings_json',
+      config: loadedSettings?.hooks as Partial<Record<HookEvent, any[]>> | undefined,
+    },
+    {
+      source: 'query_options',
+      config: options.hooks,
+    },
+  );
   if (configuredHooks && Object.keys(configuredHooks).length > 0) {
     hookExecutor = new HookExecutor();
     hookExecutor.loadFromConfig(configuredHooks);
@@ -2074,6 +2085,10 @@ export function query(
           agents: runtimeSnapshot.agents,
           skills: runtimeSnapshot.skills,
           mcpServers: runtimeSnapshot.mcpServers,
+          plugins: runtimeSnapshot.plugins,
+          hooks: buildPromptHookSurface(),
+          diagnostics: runtimeSnapshot.diagnostics,
+          diagnosticSummary: runtimeSnapshot.diagnosticSummary,
           capabilitySnapshot: runtimeSnapshot.capabilitySnapshot,
           coordinator: coordinatorContext,
         },

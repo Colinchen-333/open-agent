@@ -36,6 +36,14 @@ export interface RuntimePromptDiagnostic {
   source?: string;
 }
 
+export interface RuntimePromptDiagnosticSummary {
+  total: number;
+  info: number;
+  warning: number;
+  error: number;
+  bySource: Record<string, number>;
+}
+
 export interface RuntimePromptCapabilitySnapshot {
   summary: {
     accessCounts: {
@@ -68,6 +76,7 @@ export interface SystemPromptRuntimeSnapshot {
   plugins?: RuntimePromptPlugin[];
   hooks?: RuntimePromptHook[];
   diagnostics?: RuntimePromptDiagnostic[];
+  diagnosticSummary?: RuntimePromptDiagnosticSummary;
   capabilitySnapshot?: RuntimePromptCapabilitySnapshot;
   coordinator?: CoordinatorContext;
 }
@@ -192,27 +201,25 @@ export function buildRuntimePromptSections(
     }
   }
 
-  if (snapshot.diagnostics && snapshot.diagnostics.length > 0) {
-    const summary = snapshot.diagnostics.reduce<{
-      total: number;
-      info: number;
-      warning: number;
-      error: number;
-      bySource: Record<string, number>;
-    }>((acc, diagnostic) => {
-      acc.total += 1;
-      acc[diagnostic.severity] += 1;
-      if (diagnostic.source) {
-        acc.bySource[diagnostic.source] = (acc.bySource[diagnostic.source] ?? 0) + 1;
-      }
-      return acc;
-    }, {
-      total: 0,
-      info: 0,
-      warning: 0,
-      error: 0,
-      bySource: {},
-    });
+  if (
+    (snapshot.diagnostics && snapshot.diagnostics.length > 0)
+    || (snapshot.diagnosticSummary && snapshot.diagnosticSummary.total > 0)
+  ) {
+    const summary = snapshot.diagnosticSummary
+      ?? snapshot.diagnostics!.reduce<RuntimePromptDiagnosticSummary>((acc, diagnostic) => {
+        acc.total += 1;
+        acc[diagnostic.severity] += 1;
+        if (diagnostic.source) {
+          acc.bySource[diagnostic.source] = (acc.bySource[diagnostic.source] ?? 0) + 1;
+        }
+        return acc;
+      }, {
+        total: 0,
+        info: 0,
+        warning: 0,
+        error: 0,
+        bySource: {},
+      });
     const lines = [
       `- Summary: ${summary.total} total (${summary.info} info, ${summary.warning} warning, ${summary.error} error)`,
     ];
@@ -222,7 +229,7 @@ export function buildRuntimePromptSections(
     if (sourceSummary) {
       lines.push(`- Sources: ${sourceSummary}`);
     }
-    for (const diagnostic of snapshot.diagnostics.slice(0, 8)) {
+    for (const diagnostic of (snapshot.diagnostics ?? []).slice(0, 8)) {
       const prefix = diagnostic.source ? `[${diagnostic.source}] ` : '';
       lines.push(`- **${diagnostic.severity}** ${prefix}${diagnostic.message}`);
     }

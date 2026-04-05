@@ -43,9 +43,15 @@ export {
   type RuntimePromptPlugin,
   type RuntimePromptHook,
   type RuntimePromptDiagnostic,
+  type RuntimePromptDiagnosticSummary,
   type RuntimePromptCapabilitySnapshot,
   type SystemPromptRuntimeSnapshot,
 } from './runtime-prompt-sections.js';
+export {
+  buildRuntimeHookSurfaceSummary,
+  type RuntimeHookSurfaceSummary,
+  type RuntimeHookSurfaceConfig,
+} from './runtime-hook-surface.js';
 export { buildSystemPrompt, isGitRepository, type SystemPromptOptions } from './system-prompt.js';
 export {
   buildTaskOrchestrationTemplates,

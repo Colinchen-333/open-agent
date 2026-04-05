@@ -91,4 +91,24 @@ describe('buildRuntimePromptSections', () => {
     expect(buildRuntimePromptSections()).toEqual([]);
     expect(buildRuntimePromptSections({})).toEqual([]);
   });
+
+  it('uses diagnostic summary even when detailed diagnostics are unavailable', () => {
+    const sections = buildRuntimePromptSections({
+      diagnosticSummary: {
+        total: 3,
+        info: 1,
+        warning: 1,
+        error: 1,
+        bySource: {
+          plugin: 2,
+          runtime: 1,
+        },
+      },
+    });
+
+    expect(sections).toHaveLength(1);
+    expect(sections[0]?.key).toBe('runtime-diagnostics');
+    expect(sections[0]?.content).toContain('Summary: 3 total (1 info, 1 warning, 1 error)');
+    expect(sections[0]?.content).toContain('Sources: plugin: 2, runtime: 1');
+  });
 });

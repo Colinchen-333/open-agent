@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { parseArgs, TerminalRenderer, REPL, emitStreamJson, emitStreamJsonInit, TerminalPermissionPrompter, handleSlashCommand } from '@open-agent/cli';
-import { ConversationLoop, SessionManager, ConfigLoader, buildSystemPrompt, isGitRepository, FileCheckpoint, buildTaskOrchestrationTemplates, loadPromptContext } from '@open-agent/core';
+import { ConversationLoop, SessionManager, ConfigLoader, buildSystemPrompt, isGitRepository, FileCheckpoint, buildTaskOrchestrationTemplates, loadPromptContext, buildRuntimeHookSurfaceSummary } from '@open-agent/core';
 import { createStore, createDefaultAppState } from '@open-agent/state';
 import type { AppState } from '@open-agent/state';
 import { renderApp } from '@open-agent/ink';
@@ -598,6 +598,28 @@ async function main(): Promise<void> {
     }
   }
 
+  const buildCliPromptHookSurface = () => buildRuntimeHookSurfaceSummary(
+    runtime.buildSnapshot().hooks,
+    existsSync(globalHooksPath)
+      ? {
+          source: 'global_hooks_json',
+          config: safeReadHookConfig(globalHooksPath),
+        }
+      : undefined,
+    existsSync(projectHooksPath)
+      ? {
+          source: 'project_hooks_json',
+          config: safeReadHookConfig(projectHooksPath),
+        }
+      : undefined,
+    settings.hooks && typeof settings.hooks === 'object'
+      ? {
+          source: 'settings_json',
+          config: settings.hooks as any,
+        }
+      : undefined,
+  );
+
   // Adapter: bridge HookExecutor's strict HookInput signature to the loose
   // Record<string, unknown> interface expected by ConversationLoop.
   // Also intercepts PreToolUse events for file-modifying tools to save
@@ -731,6 +753,10 @@ async function main(): Promise<void> {
         agents: runtimeSnapshot.agents,
         skills: runtimeSnapshot.skills,
         mcpServers: runtimeSnapshot.mcpServers,
+        plugins: runtimeSnapshot.plugins,
+        hooks: buildCliPromptHookSurface(),
+        diagnostics: runtimeSnapshot.diagnostics,
+        diagnosticSummary: runtimeSnapshot.diagnosticSummary,
         capabilitySnapshot: promptCapabilitySnapshot,
         coordinator: {
           workerTools: currentToolNames.filter((name) => name !== 'Task').sort(),
@@ -1085,6 +1111,18 @@ async function main(): Promise<void> {
     });
   } catch {
     // SessionEnd hooks are non-fatal.
+  }
+}
+
+function safeReadHookConfig(filePath: string): Record<string, unknown[]> | undefined {
+  try {
+    const raw = JSON.parse(readFileSync(filePath, 'utf-8'));
+    if (!raw || typeof raw !== 'object') {
+      return undefined;
+    }
+    return raw as Record<string, unknown[]>;
+  } catch {
+    return undefined;
   }
 }
 
