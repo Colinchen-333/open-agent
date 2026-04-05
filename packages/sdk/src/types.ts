@@ -227,6 +227,12 @@ export interface QueryOptions {
    * Used by desktop adapter to surface subagent progress in real-time.
    */
   onSubagentEvent?: (parentToolCallId: string, event: import('@open-agent/agents').SubagentStreamEvent) => void;
+  /**
+   * Shared worker budget across all task dispatchers created by this query/session.
+   * When set, dispatchers will stop claiming new work once the aggregate active
+   * worker count reaches this budget.
+   */
+  globalDispatcherWorkerBudget?: number;
 }
 
 // --------------------------------------------------------------------------
@@ -420,6 +426,8 @@ export interface OrchestrationControlPlaneSummary {
   runningWorkerCount: number;
   idleWorkerCount: number;
   terminalWorkerCount: number;
+  globalDispatcherWorkerBudget: number | null;
+  availableDispatcherWorkerBudget: number | null;
   dispatcherCount: number;
   liveDispatcherCount: number;
   ledgerDispatcherCount: number;

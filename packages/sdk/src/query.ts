@@ -686,6 +686,10 @@ export function query(
   };
   const DEFAULT_TASK_DISPATCHER_POLL_INTERVAL_MS = 250;
   const DEFAULT_TASK_LEASE_MS = 5 * 60 * 1000;
+  const globalDispatcherWorkerBudget = options.globalDispatcherWorkerBudget !== undefined
+    ? Math.max(1, Math.trunc(options.globalDispatcherWorkerBudget))
+    : null;
+  let reservedDispatcherWorkerSlots = 0;
 
   interface TaskDispatcherAssignment {
     taskId: string;
@@ -724,6 +728,44 @@ export function query(
     JSON.parse(JSON.stringify(record))
   );
   const queryInstanceId = randomUUID();
+  const countActiveDispatcherAssignments = (): number => {
+    let total = 0;
+    for (const state of taskDispatchers.values()) {
+      if (state.disposed || state.record.status === 'stopped') continue;
+      total += state.activeAssignments.size;
+    }
+    return total;
+  };
+  const getAvailableDispatcherWorkerBudget = (): number | null => {
+    if (globalDispatcherWorkerBudget === null) {
+      return null;
+    }
+    return Math.max(0, globalDispatcherWorkerBudget - countActiveDispatcherAssignments() - reservedDispatcherWorkerSlots);
+  };
+  const tryReserveDispatcherWorkerSlot = (): boolean => {
+    if (globalDispatcherWorkerBudget === null) {
+      return true;
+    }
+    const available = getAvailableDispatcherWorkerBudget();
+    if (available === null || available <= 0) {
+      return false;
+    }
+    reservedDispatcherWorkerSlots += 1;
+    return true;
+  };
+  const releaseReservedDispatcherWorkerSlot = (): void => {
+    if (reservedDispatcherWorkerSlots > 0) {
+      reservedDispatcherWorkerSlots -= 1;
+    }
+  };
+  const countSchedulableDispatchers = (): number => {
+    let total = 0;
+    for (const state of taskDispatchers.values()) {
+      if (state.disposed || state.record.status !== 'running') continue;
+      total += 1;
+    }
+    return total;
+  };
   const toWorkerRecord = (session: AgentSession): WorkerRecord => ({
     workerId: session.agentId,
     workerType: session.agentType,
@@ -1920,6 +1962,8 @@ export function query(
       runningWorkerCount: workers.filter((entry) => entry.status === 'running' || entry.status === 'spawning').length,
       idleWorkerCount: workers.filter((entry) => entry.status === 'idle').length,
       terminalWorkerCount: workers.filter((entry) => entry.status === 'completed' || entry.status === 'failed' || entry.status === 'shutdown').length,
+      globalDispatcherWorkerBudget,
+      availableDispatcherWorkerBudget: getAvailableDispatcherWorkerBudget(),
       dispatcherCount: dispatchers.length,
       liveDispatcherCount: dispatchers.filter((entry) => entry.source === 'live').length,
       ledgerDispatcherCount: dispatchers.filter((entry) => entry.source === 'ledger').length,
@@ -2918,6 +2962,7 @@ export function query(
     }
 
     state.running = true;
+    let shouldContinueImmediately = false;
     try {
       const heartbeatNow = new Date();
       for (const assignment of [...state.activeAssignments.values()]) {
@@ -2946,24 +2991,43 @@ export function query(
         return;
       }
 
-      while (
+      const dispatcherCapacity = state.record.maxConcurrentWorkers - state.activeAssignments.size;
+      const availableWorkerBudget = getAvailableDispatcherWorkerBudget();
+      const sharedCapacity = availableWorkerBudget === null
+        ? dispatcherCapacity
+        : Math.min(dispatcherCapacity, availableWorkerBudget);
+      const dispatchLimit = countSchedulableDispatchers() > 1
+        ? Math.min(sharedCapacity, 1)
+        : sharedCapacity;
+
+      for (
+        let dispatchedCount = 0;
         !state.disposed &&
         state.record.status === 'running' &&
-        state.activeAssignments.size < state.record.maxConcurrentWorkers
+        dispatchedCount < dispatchLimit;
+        dispatchedCount += 1
       ) {
-        const dispatched = await queryObj.dispatchNextTask({
-          owner: state.record.owner,
-          teamName: state.record.teamName,
-          leaseMs: state.record.leaseMs,
-          workerType: state.record.workerType,
-          ...(state.name ? { name: state.name } : {}),
-          ...(state.prompt ? { prompt: state.prompt } : {}),
-          ...(state.model ? { model: state.model } : {}),
-          ...(state.maxTurns !== undefined ? { maxTurns: state.maxTurns } : {}),
-          ...(state.mode ? { mode: state.mode } : {}),
-          ...(state.cwd ? { cwd: state.cwd } : {}),
-          ...(state.isolation ? { isolation: state.isolation } : {}),
-        });
+        if (!tryReserveDispatcherWorkerSlot()) {
+          break;
+        }
+        let dispatched: Awaited<ReturnType<typeof queryObj.dispatchNextTask>> = null;
+        try {
+          dispatched = await queryObj.dispatchNextTask({
+            owner: state.record.owner,
+            teamName: state.record.teamName,
+            leaseMs: state.record.leaseMs,
+            workerType: state.record.workerType,
+            ...(state.name ? { name: state.name } : {}),
+            ...(state.prompt ? { prompt: state.prompt } : {}),
+            ...(state.model ? { model: state.model } : {}),
+            ...(state.maxTurns !== undefined ? { maxTurns: state.maxTurns } : {}),
+            ...(state.mode ? { mode: state.mode } : {}),
+            ...(state.cwd ? { cwd: state.cwd } : {}),
+            ...(state.isolation ? { isolation: state.isolation } : {}),
+          });
+        } finally {
+          releaseReservedDispatcherWorkerSlot();
+        }
         if (!dispatched) {
           break;
         }
@@ -2988,6 +3052,10 @@ export function query(
           taskStatus: dispatched.task.status,
           timestamp: state.record.lastDispatchAt,
         });
+        const remainingDispatcherCapacity = state.record.maxConcurrentWorkers - state.activeAssignments.size;
+        const remainingWorkerBudget = getAvailableDispatcherWorkerBudget();
+        shouldContinueImmediately = remainingDispatcherCapacity > 0
+          && (remainingWorkerBudget === null || remainingWorkerBudget > 0);
       }
     } finally {
       state.running = false;
@@ -3001,6 +3069,10 @@ export function query(
       }
       if (state.record.status === 'draining' && state.activeAssignments.size === 0) {
         markTaskDispatcherStopped(state);
+        return;
+      }
+      if (shouldContinueImmediately) {
+        scheduleTaskDispatcherRun(state, 0);
         return;
       }
       scheduleTaskDispatcherRun(state, state.record.pollIntervalMs);

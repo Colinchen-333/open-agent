@@ -69,6 +69,60 @@ function makeControlledFailureProvider(): { provider: LLMProvider; releaseFailur
   };
 }
 
+function makeControlledCompletionProvider(): {
+  provider: LLMProvider;
+  releaseNext(): void;
+  waitForStarted(count: number): Promise<void>;
+} {
+  let startedCount = 0;
+  const startedWaiters: Array<{ count: number; resolve: () => void }> = [];
+  const releases: Array<() => void> = [];
+
+  const flushStartedWaiters = () => {
+    for (let i = startedWaiters.length - 1; i >= 0; i -= 1) {
+      if (startedCount >= startedWaiters[i].count) {
+        const waiter = startedWaiters.splice(i, 1)[0];
+        waiter?.resolve();
+      }
+    }
+  };
+
+  return {
+    provider: {
+      name: 'mock-task-dispatcher-controlled-complete-provider',
+      async *chat(_messages: Message[], options: ChatOptions): AsyncGenerator<StreamEvent> {
+        startedCount += 1;
+        flushStartedWaiters();
+        await new Promise<void>((resolve) => {
+          releases.push(resolve);
+          if (options.signal?.aborted) {
+            resolve();
+            return;
+          }
+          options.signal?.addEventListener('abort', resolve, { once: true });
+        });
+        yield { type: 'text_delta', text: 'done' };
+        yield { type: 'message_end', message: {}, usage: { input_tokens: 5, output_tokens: 8 } };
+      },
+      async listModels() {
+        return [{ value: 'mock-model', displayName: 'Mock Model', description: 'Task dispatcher controlled completion model' }];
+      },
+    },
+    releaseNext() {
+      const release = releases.shift();
+      release?.();
+    },
+    waitForStarted(count: number) {
+      if (startedCount >= count) {
+        return Promise.resolve();
+      }
+      return new Promise<void>((resolve) => {
+        startedWaiters.push({ count, resolve });
+      });
+    },
+  };
+}
+
 async function waitForTask(
   q: Query,
   taskId: string,
@@ -171,6 +225,91 @@ describe('query() task dispatcher control plane', () => {
       await expect(q.stopTaskDispatcher(dispatcher.dispatcherId)).resolves.toMatchObject({
         success: true,
         dispatcher: { status: 'stopped' },
+      });
+      q.close();
+    } finally {
+      temp.cleanup();
+    }
+  });
+
+  it('shares a global worker budget across multiple dispatchers in the same query', async () => {
+    const temp = makeTempHome('open-agent-sdk-task-dispatcher-budget-');
+    const controlled = makeControlledCompletionProvider();
+    const teamAlpha = `dispatcher-team-alpha-${Date.now()}`;
+    const teamBeta = `dispatcher-team-beta-${Date.now()}`;
+
+    try {
+      const q = query('dispatcher shared worker budget', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: controlled.provider,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        globalDispatcherWorkerBudget: 1,
+      } as any);
+
+      await q.createTeam({ name: teamAlpha });
+      await q.createTeam({ name: teamBeta, setActive: true });
+      const alphaTask = await q.createTask({
+        teamName: teamAlpha,
+        subject: 'Alpha task',
+        description: 'Alpha work',
+      });
+      const betaTask = await q.createTask({
+        teamName: teamBeta,
+        subject: 'Beta task',
+        description: 'Beta work',
+      });
+
+      const alphaDispatcher = await q.startTaskDispatcher({
+        dispatcherId: `dispatcher-alpha-${Date.now()}`,
+        owner: 'dispatcher-owner',
+        teamName: teamAlpha,
+        pollIntervalMs: 25,
+        leaseMs: 500,
+      });
+      const betaDispatcher = await q.startTaskDispatcher({
+        dispatcherId: `dispatcher-beta-${Date.now()}`,
+        owner: 'dispatcher-owner',
+        teamName: teamBeta,
+        pollIntervalMs: 25,
+        leaseMs: 500,
+      });
+
+      await controlled.waitForStarted(1);
+
+      const saturated = await (async () => {
+        const timeoutAt = Date.now() + 4_000;
+        while (Date.now() < timeoutAt) {
+          const snapshot = await q.readOrchestrationControlPlane();
+          if (snapshot.summary.activeAssignmentCount === 1 && snapshot.summary.availableDispatcherWorkerBudget === 0) {
+            return snapshot;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        throw new Error('Timed out waiting for shared worker budget saturation');
+      })();
+      expect(saturated.summary.globalDispatcherWorkerBudget).toBe(1);
+      expect(saturated.summary.availableDispatcherWorkerBudget).toBe(0);
+
+      const alphaState = saturated.dispatchers.find((item) => item.dispatcherId === alphaDispatcher.dispatcherId);
+      const betaState = saturated.dispatchers.find((item) => item.dispatcherId === betaDispatcher.dispatcherId);
+      expect((alphaState?.activeAssignments.length ?? 0) + (betaState?.activeAssignments.length ?? 0)).toBe(1);
+
+      controlled.releaseNext();
+      await controlled.waitForStarted(2);
+      controlled.releaseNext();
+
+      const completedAlpha = await waitForTask(q, alphaTask.id, teamAlpha, (task) => task.status === 'completed');
+      const completedBeta = await waitForTask(q, betaTask.id, teamBeta, (task) => task.status === 'completed');
+      expect(completedAlpha.owner).toBe('dispatcher-owner');
+      expect(completedBeta.owner).toBe('dispatcher-owner');
+
+      await expect(q.stopTaskDispatcher(alphaDispatcher.dispatcherId)).resolves.toMatchObject({
+        success: true,
+      });
+      await expect(q.stopTaskDispatcher(betaDispatcher.dispatcherId)).resolves.toMatchObject({
+        success: true,
       });
       q.close();
     } finally {
