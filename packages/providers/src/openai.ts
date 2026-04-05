@@ -9,6 +9,11 @@ import type {
   StreamEvent,
   ToolSpec,
 } from './types.js';
+import { supportsThinking, getContextWindowForModel } from './model-capability.js';
+
+// Track which models we have already warned about unsupported thinking so we
+// emit the console.warn at most once per process (not once per request).
+const _thinkingWarnedModels = new Set<string>();
 
 // Convert unified Message[] to OpenAI ChatCompletionMessageParam[].
 // Handles system, user, assistant, and tool result messages.
@@ -221,6 +226,25 @@ export class OpenAIProvider implements LLMProvider {
     options: ChatOptions,
   ): AsyncGenerator<StreamEvent> {
     try {
+      // Observability: warn once per model when thinking is requested but the
+      // model does not support it.  No behaviour change — thinking is not wired
+      // in OpenAIProvider; this guard is purely informational.
+      if (options.thinking && options.thinking.type !== 'disabled') {
+        if (!supportsThinking(options.model) && !_thinkingWarnedModels.has(options.model)) {
+          _thinkingWarnedModels.add(options.model);
+          console.warn(
+            `[OpenAIProvider] thinking was requested for model "${options.model}" but this model does not support extended thinking — the setting will be ignored.`,
+          );
+        }
+      }
+
+      // Derive context window size from capability registry for any future
+      // compact-budget or truncation threshold computations.
+      // Currently there is no hardcoded token ceiling in this provider, so
+      // this is captured as a named variable for forward-compatibility.
+      const _contextWindow = getContextWindowForModel(options.model);
+      void _contextWindow; // used when token-budget logic lands
+
       const oaiMessages = convertMessages(messages, options.systemPrompt);
       const tools =
         options.tools && options.tools.length > 0

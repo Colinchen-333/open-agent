@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach, spyOn } from 'bun:test';
 import { OpenAIProvider } from '../openai.js';
+import { supportsThinking, getContextWindowForModel } from '../model-capability.js';
 import type { Message, StreamEvent } from '../types.js';
 
 function makeProviderWithChunks(chunks: any[]): OpenAIProvider {
@@ -227,5 +228,88 @@ describe('OpenAIProvider request compatibility', () => {
     expect(calls[0].stream_options).toEqual({ include_usage: true });
     expect(calls[1].stream_options).toBeUndefined();
     expect(events.some((e) => e.type === 'message_end')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Model capability queries (Part B — R3.4)
+// ---------------------------------------------------------------------------
+
+describe('model-capability: supportsThinking for GLM-4.7', () => {
+  it('returns false for glm-4.7', () => {
+    expect(supportsThinking('glm-4.7')).toBe(false);
+  });
+
+  it('returns false for unknown models (conservative default)', () => {
+    expect(supportsThinking('some-unknown-model-xyz')).toBe(false);
+  });
+});
+
+describe('model-capability: getContextWindowForModel for GLM-4.7', () => {
+  it('returns 128_000 for glm-4.7', () => {
+    expect(getContextWindowForModel('glm-4.7')).toBe(128_000);
+  });
+});
+
+describe('OpenAIProvider: thinking-unsupported warning', () => {
+  function makeNoopProvider(): OpenAIProvider {
+    const provider = new OpenAIProvider({ apiKey: 'test-key' });
+    (provider as any).client = {
+      chat: {
+        completions: {
+          create: async () =>
+            (async function* () {
+              yield { choices: [{ delta: {}, finish_reason: 'stop' }], usage: null };
+            })(),
+        },
+      },
+    };
+    return provider;
+  }
+
+  it('emits a console.warn when thinking is requested for a model that does not support it', async () => {
+    const provider = makeNoopProvider();
+    const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      // Clear the module-level warn-set so the warn fires even if a prior test
+      // already triggered it for glm-4.7.
+      const mod = await import('../openai.js');
+      (mod as any)._thinkingWarnedModels?.clear?.();
+    } catch { /* access may be restricted — best effort */ }
+
+    const events: StreamEvent[] = [];
+    for await (const evt of provider.chat(
+      [{ role: 'user', content: 'hello' }],
+      { model: 'glm-4.7', thinking: { type: 'enabled', budgetTokens: 2000 } },
+    )) {
+      events.push(evt);
+    }
+
+    expect(events.some((e) => e.type === 'message_end')).toBe(true);
+    expect(warnSpy).toHaveBeenCalled();
+    const warnMsg: string = warnSpy.mock.calls[0]?.[0] ?? '';
+    expect(warnMsg).toContain('glm-4.7');
+    expect(warnMsg).toContain('thinking');
+
+    warnSpy.mockRestore();
+  });
+
+  it('does not warn when thinking is disabled', async () => {
+    const provider = makeNoopProvider();
+    const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+
+    const events: StreamEvent[] = [];
+    for await (const evt of provider.chat(
+      [{ role: 'user', content: 'hello' }],
+      { model: 'glm-4.7', thinking: { type: 'disabled' } },
+    )) {
+      events.push(evt);
+    }
+
+    expect(events.some((e) => e.type === 'message_end')).toBe(true);
+    expect(warnSpy).not.toHaveBeenCalled();
+
+    warnSpy.mockRestore();
   });
 });
