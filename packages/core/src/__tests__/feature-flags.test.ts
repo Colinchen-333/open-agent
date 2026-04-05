@@ -52,4 +52,27 @@ describe('feature flags', () => {
     process.env.OPEN_AGENT_FEATURE_REACTIVE_COMPACT = 'maybe';
     expect(feature('REACTIVE_COMPACT')).toBe(FEATURE_FLAG_DEFAULTS.REACTIVE_COMPACT);
   });
+
+  test('DARWIN_SANDBOX flag defaults to false', () => {
+    expect(FEATURE_FLAG_DEFAULTS.DARWIN_SANDBOX).toBe(false);
+    expect(feature('DARWIN_SANDBOX')).toBe(false);
+  });
+
+  test('DARWIN_SANDBOX can be enabled via setFeatureDefault', () => {
+    setFeatureDefault('DARWIN_SANDBOX', true);
+    expect(feature('DARWIN_SANDBOX')).toBe(true);
+  });
+
+  test('all flags in FEATURE_FLAG_DEFAULTS are valid FeatureFlagName values', () => {
+    const flagNames: FeatureFlagName[] = Object.keys(FEATURE_FLAG_DEFAULTS) as FeatureFlagName[];
+    // Verifies DARWIN_SANDBOX is present alongside all previously declared flags
+    expect(flagNames).toContain('DARWIN_SANDBOX');
+    expect(flagNames).toContain('REACTIVE_COMPACT');
+    expect(flagNames).toContain('TRANSCRIPT_CLASSIFIER');
+    expect(flagNames).toContain('FORK_SUBAGENT');
+    expect(flagNames).toContain('THINKING_ADAPTIVE');
+    expect(flagNames).toContain('FILE_HISTORY');
+    expect(flagNames).toContain('WORKFLOW_SCRIPTS');
+    expect(flagNames).toContain('EXIT_PLAN_MODE_V2');
+  });
 });

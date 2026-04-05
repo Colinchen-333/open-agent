@@ -6,6 +6,8 @@ import { createBashTool } from '../bash.js';
 import { createTaskOutputTool } from '../task-management.js';
 import { BASH_SANDBOX_POLICY_FIELD, buildBashSandboxPolicy } from '../../../permissions/src/sandbox-adapter.js';
 import { closeBashPty } from '../bash-pty.js';
+import { setFeatureDefault, clearFeatureOverrides } from '@open-agent/core';
+import { isDarwinSandboxAvailable, wrapWithDarwinSandbox } from '../sandbox/darwin-runner.js';
 
 describe('Bash tool', () => {
   let tmpDir: string;
@@ -337,5 +339,81 @@ describe('Bash tool', () => {
         outcome: 'blocked',
       }),
     }));
+  });
+
+  // ---------------------------------------------------------------------------
+  // Darwin sandbox runner (R4.2)
+  // ---------------------------------------------------------------------------
+
+  describe('Darwin sandbox runner (wrapWithDarwinSandbox)', () => {
+    afterEach(() => clearFeatureOverrides());
+
+    it('wrapWithDarwinSandbox produces an argv starting with sandbox-exec on darwin', async () => {
+      // Unit test of the low-level runner — does not require DARWIN_SANDBOX flag.
+      if (!isDarwinSandboxAvailable()) return; // skip on non-darwin
+
+      const result = await wrapWithDarwinSandbox(['/bin/bash', '-c', 'echo hi']);
+      try {
+        expect(result.argv[0]).toBe('sandbox-exec');
+        expect(result.argv[1]).toBe('-f');
+        expect(result.argv[2]).toMatch(/\.sb$/);
+        expect(result.argv.slice(3)).toEqual(['/bin/bash', '-c', 'echo hi']);
+      } finally {
+        await result.cleanup();
+      }
+    });
+
+    it('wrapWithDarwinSandbox profile contains expected rules for writablePaths', async () => {
+      if (!isDarwinSandboxAvailable()) return;
+
+      const result = await wrapWithDarwinSandbox(['/bin/bash', '-c', 'true'], {
+        writablePaths: ['/Users/test/project'],
+        blockNetwork: true,
+        allowUnixSockets: false,
+      });
+      try {
+        expect(result.profile).toContain('(deny default)');
+        expect(result.profile).toContain('/Users/test/project');
+        expect(result.profile).toContain('(deny network*)');
+      } finally {
+        await result.cleanup();
+      }
+    });
+
+    it('Bash tool takes the unsandboxed path when DARWIN_SANDBOX flag is off', async () => {
+      // Flag defaults to false — with sandbox: true in input, the tool should still
+      // execute normally (no sandbox-exec wrapping), because the flag gates the feature.
+      setFeatureDefault('DARWIN_SANDBOX', false);
+
+      const ctx = makeStatefulCtx();
+      const result = await tool.execute(
+        { command: 'echo "no-sandbox-flag"', sandbox: true } as any,
+        ctx as any,
+      );
+      // Command should succeed normally
+      expect(result).toContain('no-sandbox-flag');
+    });
+
+    it('Bash tool takes the Darwin sandbox path when flag is on and sandbox:true (darwin only)', async () => {
+      if (!isDarwinSandboxAvailable()) return; // skip on non-darwin CI
+
+      setFeatureDefault('DARWIN_SANDBOX', true);
+
+      const ctx = makeStatefulCtx();
+      // sandbox:true uses the non-PTY path, which runs the actual command through sandbox-exec.
+      // The command itself is harmless; we just verify it runs and produces output.
+      const result = await tool.execute(
+        { command: 'echo "darwin-sandbox-active"', sandbox: true } as any,
+        ctx as any,
+      );
+      expect(result).toContain('darwin-sandbox-active');
+
+      // The diagnostics should reflect wrappedWithSandboxExec: true
+      const startedRecord = ctx.diagnostics.find(
+        (d) => (d.payload as any)?.outcome === 'started',
+      );
+      expect(startedRecord).toBeDefined();
+      expect((startedRecord!.payload as any).provenance.wrappedWithSandboxExec).toBe(true);
+    }, 15_000);
   });
 });

@@ -11,8 +11,13 @@ import {
   registerBackgroundTask,
   updateBackgroundTask,
 } from './background-registry.js';
-import { spawnProcess } from '@open-agent/core';
+import { spawnProcess, feature } from '@open-agent/core';
 import { summarizeCommand } from './tool-summary.js';
+import {
+  isDarwinSandboxAvailable,
+  wrapWithDarwinSandbox,
+  type DarwinSandboxRunResult,
+} from './sandbox/darwin-runner.js';
 import { getBackgroundTaskOutputFile } from './background-task-store.js';
 import type {
   BashSandboxExecutionFinding,
@@ -104,12 +109,20 @@ export function createBashTool(): ToolDefinition {
           type: 'boolean',
           description: 'Bypass sandbox restrictions for this command (requires explicit user approval)',
         },
+        sandbox: {
+          type: 'boolean',
+          description:
+            'Run this command inside a macOS Darwin sandbox (sandbox-exec). ' +
+            'Only effective on macOS when the DARWIN_SANDBOX feature flag is enabled. ' +
+            'Restricts filesystem writes to the working directory and /tmp; ' +
+            'does not restrict network by default.',
+        },
       },
       required: ['command'],
     },
 
     async execute(
-      input: BashInput & { dangerouslyDisableSandbox?: boolean; [key: string]: unknown },
+      input: BashInput & { dangerouslyDisableSandbox?: boolean; sandbox?: boolean; [key: string]: unknown },
       ctx: ToolContext,
     ): Promise<string> {
       const timeout = Math.min(input.timeout ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
@@ -136,16 +149,30 @@ export function createBashTool(): ToolDefinition {
       }
       const sandboxEnv = buildSandboxEnv(sandboxPolicy);
 
+      // Determine whether to apply the Darwin sandbox runner for this call.
+      // Evaluated early so the PTY path can skip itself when Darwin sandbox is requested.
+      // Background tasks are excluded — their fire-and-forget lifecycle makes async
+      // profile cleanup unreliable, and the existing policy-based sandbox covers that path.
+      const wantDarwinRunner =
+        input.sandbox === true &&
+        !input.run_in_background &&
+        feature('DARWIN_SANDBOX') &&
+        isDarwinSandboxAvailable();
+
       // -------------------------------------------------------------------
       // Persistent PTY path: for ordinary foreground commands that have no
       // sandbox policy and are not run in the background, use a persistent
       // node-pty shell so that cwd, env variables, shell functions, and
       // aliases survive across consecutive Bash tool calls within the same
       // agent session.
+      // Darwin sandbox wrapping is incompatible with the long-lived PTY
+      // shell (the PTY is persistent; sandbox-exec only wraps a single
+      // process invocation), so wantDarwinRunner forces the spawn path.
       // -------------------------------------------------------------------
       const usePersistentPty =
         input.run_in_background !== true &&
         !sandboxPolicy?.enforce &&
+        !wantDarwinRunner &&
         ctx.sessionId;
 
       if (usePersistentPty) {
@@ -210,6 +237,7 @@ export function createBashTool(): ToolDefinition {
         ['bash', '-lc', wrappedCommand],
         sandboxPolicy,
       );
+
       const sandboxExecutionStarted = buildSandboxExecutionRecord({
         ctx,
         command: input.command,
@@ -217,7 +245,7 @@ export function createBashTool(): ToolDefinition {
         runInBackground: input.run_in_background === true,
         policy: sandboxPolicy,
         outcome: 'started',
-        wrappedWithSandboxExec: sandboxedCommand.command === DARWIN_SANDBOX_EXEC,
+        wrappedWithSandboxExec: sandboxedCommand.command === DARWIN_SANDBOX_EXEC || wantDarwinRunner,
         findings: collectSandboxFindings(sandboxPolicy),
       });
       appendSandboxExecutionDiagnostic(ctx, sandboxExecutionStarted);
@@ -291,7 +319,26 @@ export function createBashTool(): ToolDefinition {
       }
 
       // Foreground execution
-      const proc = await spawnProcess([sandboxedCommand.command, ...sandboxedCommand.args], {
+      // If the Darwin runner is requested, build a file-based sandbox-exec argv.
+      // The result holds a temp .sb profile that must be cleaned up after the process exits.
+      let darwinRunResult: DarwinSandboxRunResult | null = null;
+      if (wantDarwinRunner) {
+        darwinRunResult = await wrapWithDarwinSandbox(
+          [sandboxedCommand.command, ...sandboxedCommand.args],
+          {
+            writablePaths: [effectiveCwd, '/tmp', ...(sandboxPolicy?.allowWritePaths ?? [])],
+            deniedReadPaths: sandboxPolicy?.denyReadPaths ?? [],
+            blockNetwork: sandboxPolicy?.networkDisabled ?? false,
+            allowUnixSockets: true,
+          },
+        );
+      }
+
+      const spawnArgv = darwinRunResult
+        ? darwinRunResult.argv
+        : [sandboxedCommand.command, ...sandboxedCommand.args];
+
+      const proc = await spawnProcess(spawnArgv, {
         cwd: effectiveCwd,
         env: { TERM: 'dumb', ...sandboxEnv },
       });
@@ -310,6 +357,9 @@ export function createBashTool(): ToolDefinition {
       };
       ctx.abortSignal?.addEventListener('abort', onAbort, { once: true });
 
+      const wrappedWithSandboxExec =
+        sandboxedCommand.command === DARWIN_SANDBOX_EXEC || darwinRunResult !== null;
+
       let rawStdout: string;
       let rawStderr: string;
       try {
@@ -320,6 +370,7 @@ export function createBashTool(): ToolDefinition {
       } finally {
         clearTimeout(timer);
         ctx.abortSignal?.removeEventListener('abort', onAbort);
+        await darwinRunResult?.cleanup();
       }
 
       const exitCode = await proc.exited;
@@ -332,7 +383,7 @@ export function createBashTool(): ToolDefinition {
           runInBackground: false,
           policy: sandboxPolicy,
           outcome: 'aborted',
-          wrappedWithSandboxExec: sandboxedCommand.command === DARWIN_SANDBOX_EXEC,
+          wrappedWithSandboxExec,
           exitCode,
           findings: collectSandboxFindings(
             sandboxPolicy,
@@ -377,7 +428,7 @@ export function createBashTool(): ToolDefinition {
         runInBackground: false,
         policy: sandboxPolicy,
         outcome: finalOutcome,
-        wrappedWithSandboxExec: sandboxedCommand.command === DARWIN_SANDBOX_EXEC,
+        wrappedWithSandboxExec,
         exitCode,
         finalCwd,
         outputLength: output.length,
