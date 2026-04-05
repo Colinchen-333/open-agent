@@ -337,6 +337,69 @@ describe('PermissionEngine', () => {
       engine.setMode('dontAsk');
       expect(engine.getMode()).toBe('dontAsk');
     });
+
+    it('suspends dangerous allow rules in acceptEdits mode and restores them when leaving', () => {
+      const engine = new PermissionEngine({
+        mode: 'default',
+        allowRules: [
+          { toolName: 'Bash', ruleContent: 'python:*' },
+          { toolName: 'Bash', ruleContent: 'git status' },
+          { toolName: 'Task' },
+        ],
+      });
+
+      expect(engine.evaluate(req('Bash', { command: 'python -c "print(1)"' })).behavior).toBe('allow');
+      expect(engine.evaluate(req('Task')).behavior).toBe('allow');
+
+      engine.setMode('acceptEdits');
+
+      const acceptSummary = engine.getSummary();
+      expect(acceptSummary.allowRules).toEqual([{ toolName: 'Bash', ruleContent: 'git status' }]);
+      expect(acceptSummary.suspendedAllowRules).toEqual(expect.arrayContaining([
+        { toolName: 'Bash', ruleContent: 'python:*' },
+        { toolName: 'Task' },
+      ]));
+      expect(engine.evaluate(req('Bash', { command: 'python -c "print(1)"' })).behavior).toBe('ask');
+      expect(engine.evaluate(req('Task')).behavior).toBe('ask');
+
+      engine.setMode('default');
+
+      const restoredSummary = engine.getSummary();
+      expect(restoredSummary.suspendedAllowRules).toEqual([]);
+      expect(restoredSummary.allowRules).toEqual(expect.arrayContaining([
+        { toolName: 'Bash', ruleContent: 'python:*' },
+        { toolName: 'Bash', ruleContent: 'git status' },
+        { toolName: 'Task' },
+      ]));
+      expect(engine.evaluate(req('Bash', { command: 'python -c "print(1)"' })).behavior).toBe('allow');
+      expect(engine.evaluate(req('Task')).behavior).toBe('allow');
+    });
+
+    it('suspends wildcard allow rules in plan mode', () => {
+      const engine = new PermissionEngine({
+        mode: 'default',
+        allowRules: [{ toolName: '*' }],
+      });
+
+      engine.setMode('plan');
+      const summary = engine.getSummary();
+      expect(summary.allowRules).toEqual([]);
+      expect(summary.suspendedAllowRules).toEqual([{ toolName: '*' }]);
+      expect(engine.evaluate(req('Write')).behavior).toBe('deny');
+    });
+
+    it('removeRule also clears suspended dangerous allow rules', () => {
+      const engine = new PermissionEngine({
+        mode: 'acceptEdits',
+        allowRules: [{ toolName: 'Bash', ruleContent: 'python:*' }],
+      });
+
+      expect(engine.getSummary().suspendedAllowRules).toEqual([{ toolName: 'Bash', ruleContent: 'python:*' }]);
+      engine.removeRule('allow', { toolName: 'Bash', ruleContent: 'python:*' });
+      expect(engine.getSummary().suspendedAllowRules).toEqual([]);
+      engine.setMode('default');
+      expect(engine.getSummary().allowRules).toEqual([]);
+    });
   });
 
   // ---------------------------------------------------------------------------

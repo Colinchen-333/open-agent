@@ -50,6 +50,7 @@ export interface SlashCommandContext {
     getSummary(): {
       mode: string;
       allowRules: { toolName: string; ruleContent?: string }[];
+      suspendedAllowRules: { toolName: string; ruleContent?: string }[];
       denyRules: { toolName: string; ruleContent?: string }[];
       askRules: { toolName: string; ruleContent?: string }[];
       allowedPaths: string[];
@@ -332,6 +333,11 @@ const SLASH_COMMANDS: Record<
         if (summary.allowRules.length > 0) {
           lines.push('Allow rules:');
           for (const r of summary.allowRules) lines.push(`  + ${formatRule(r)}`);
+          lines.push('');
+        }
+        if (summary.suspendedAllowRules.length > 0) {
+          lines.push('Suspended allow rules:');
+          for (const r of summary.suspendedAllowRules) lines.push(`  ~ ${formatRule(r)}`);
           lines.push('');
         }
         if (summary.denyRules.length > 0) {

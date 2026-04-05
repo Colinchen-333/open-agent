@@ -37,6 +37,59 @@ function dynamicReadOnlyReason(request: PermissionRequest): string {
   return `${source}${request.metadata?.serverName ? ` from ${request.metadata.serverName}` : ''}`;
 }
 
+const DANGEROUS_BASH_ALLOW_PREFIXES = [
+  'python',
+  'python3',
+  'node',
+  'deno',
+  'bun',
+  'bash',
+  'sh',
+  'zsh',
+  'ruby',
+  'perl',
+  'php',
+  'lua',
+  'pwsh',
+  'powershell',
+  'cmd',
+  'wsl',
+] as const;
+
+function normalizeRuleKey(rule: PermissionRule): string {
+  return `${rule.toolName}\u0000${rule.ruleContent ?? ''}`;
+}
+
+function isDangerousBashAllowRule(rule: PermissionRule): boolean {
+  if (rule.toolName !== 'Bash') {
+    return false;
+  }
+  if (rule.ruleContent === undefined || rule.ruleContent.trim() === '') {
+    return true;
+  }
+  const content = rule.ruleContent.trim().toLowerCase();
+  if (content === '*') {
+    return true;
+  }
+  return DANGEROUS_BASH_ALLOW_PREFIXES.some((prefix) => (
+    content === prefix
+    || content === `${prefix}:*`
+    || content === `${prefix}*`
+    || content === `${prefix} *`
+    || (content.startsWith(`${prefix} -`) && content.endsWith('*'))
+  ));
+}
+
+function isDangerousClassifierAllowRule(rule: PermissionRule): boolean {
+  if (rule.toolName === '*') {
+    return true;
+  }
+  if (rule.toolName === 'Task' || rule.toolName === 'Agent' || rule.toolName === 'PowerShell') {
+    return true;
+  }
+  return isDangerousBashAllowRule(rule);
+}
+
 export class PermissionEngine {
   private mode: PermissionMode;
   private rules: {
@@ -44,6 +97,7 @@ export class PermissionEngine {
     deny: PermissionRule[];
     ask: PermissionRule[];
   };
+  private suspendedAllowRules: PermissionRule[];
   private sandbox: SandboxConfig;
   private allowedPaths: string[];
   private deniedPaths: string[];
@@ -56,9 +110,11 @@ export class PermissionEngine {
       deny: config?.denyRules ?? [],
       ask: config?.askRules ?? [],
     };
+    this.suspendedAllowRules = [];
     this.sandbox = config?.sandbox ?? { enabled: false };
     this.allowedPaths = config?.allowedPaths ?? [];
     this.deniedPaths = config?.deniedPaths ?? [];
+    this.reconcileDangerousAllowRulesForMode();
   }
 
   /**
@@ -287,21 +343,28 @@ export class PermissionEngine {
   // ── Dynamic rule management ─────────────────────────────────────────────────
 
   addRule(behavior: PermissionBehavior, rule: PermissionRule): void {
+    if (behavior === 'allow' && this.shouldSuspendDangerousAllowRules() && isDangerousClassifierAllowRule(rule)) {
+      this.suspendedAllowRules = this.deduplicateRules([...this.suspendedAllowRules, rule]);
+      return;
+    }
     this.rules[behavior].push(rule);
+    if (behavior === 'allow') {
+      this.rules.allow = this.deduplicateRules(this.rules.allow);
+    }
   }
 
   removeRule(behavior: PermissionBehavior, rule: PermissionRule): void {
-    const list = this.rules[behavior];
-    const idx = list.findIndex(
-      r => r.toolName === rule.toolName && r.ruleContent === rule.ruleContent
-    );
-    if (idx >= 0) {
-      list.splice(idx, 1);
+    const key = normalizeRuleKey(rule);
+    const list = this.rules[behavior].filter((entry) => normalizeRuleKey(entry) !== key);
+    this.rules[behavior] = list;
+    if (behavior === 'allow') {
+      this.suspendedAllowRules = this.suspendedAllowRules.filter((entry) => normalizeRuleKey(entry) !== key);
     }
   }
 
   setMode(mode: PermissionMode): void {
     this.mode = mode;
+    this.reconcileDangerousAllowRulesForMode();
   }
 
   getMode(): PermissionMode {
@@ -319,6 +382,7 @@ export class PermissionEngine {
   getSummary(): {
     mode: PermissionMode;
     allowRules: PermissionRule[];
+    suspendedAllowRules: PermissionRule[];
     denyRules: PermissionRule[];
     askRules: PermissionRule[];
     allowedPaths: string[];
@@ -327,6 +391,7 @@ export class PermissionEngine {
     return {
       mode: this.mode,
       allowRules: [...this.rules.allow],
+      suspendedAllowRules: [...this.suspendedAllowRules],
       denyRules: [...this.rules.deny],
       askRules: [...this.rules.ask],
       allowedPaths: [...this.allowedPaths],
@@ -396,6 +461,46 @@ export class PermissionEngine {
     if (Array.isArray(perms.deniedPaths)) {
       this.setDeniedPaths(perms.deniedPaths.filter((p: unknown): p is string => typeof p === 'string'));
     }
+    this.reconcileDangerousAllowRulesForMode();
+  }
+
+  private shouldSuspendDangerousAllowRules(): boolean {
+    return this.mode === 'acceptEdits' || this.mode === 'plan';
+  }
+
+  private deduplicateRules(rules: PermissionRule[]): PermissionRule[] {
+    const seen = new Set<string>();
+    const deduped: PermissionRule[] = [];
+    for (const rule of rules) {
+      const key = normalizeRuleKey(rule);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(rule);
+    }
+    return deduped;
+  }
+
+  private reconcileDangerousAllowRulesForMode(): void {
+    if (this.shouldSuspendDangerousAllowRules()) {
+      const kept: PermissionRule[] = [];
+      const suspended = [...this.suspendedAllowRules];
+      for (const rule of this.rules.allow) {
+        if (isDangerousClassifierAllowRule(rule)) {
+          suspended.push(rule);
+        } else {
+          kept.push(rule);
+        }
+      }
+      this.rules.allow = this.deduplicateRules(kept);
+      this.suspendedAllowRules = this.deduplicateRules(suspended);
+      return;
+    }
+
+    if (this.suspendedAllowRules.length === 0) {
+      return;
+    }
+    this.rules.allow = this.deduplicateRules([...this.rules.allow, ...this.suspendedAllowRules]);
+    this.suspendedAllowRules = [];
   }
 
   // ── Private helpers ──────────────────────────────────────────────────────────
