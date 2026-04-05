@@ -36,6 +36,16 @@ export {
   type CoordinatorTaskNotificationLike,
   type BuildCoordinatorContextOptions,
 } from './coordinator-context.js';
+export {
+  buildRuntimePromptSections,
+  type RuntimePromptAgent,
+  type RuntimePromptSkill,
+  type RuntimePromptPlugin,
+  type RuntimePromptHook,
+  type RuntimePromptDiagnostic,
+  type RuntimePromptCapabilitySnapshot,
+  type SystemPromptRuntimeSnapshot,
+} from './runtime-prompt-sections.js';
 export { buildSystemPrompt, isGitRepository, type SystemPromptOptions } from './system-prompt.js';
 export {
   buildTaskOrchestrationTemplates,
