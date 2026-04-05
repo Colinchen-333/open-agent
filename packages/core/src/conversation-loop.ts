@@ -324,7 +324,8 @@ export class ConversationLoop {
       }
       if (Array.isArray(message.content)) {
         const texts = message.content
-          .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
+          .filter((block): block is ContentBlock & { type: 'text'; text: string } =>
+            Boolean(block && typeof block === 'object' && 'type' in block && block.type === 'text' && 'text' in block))
           .map((block) => block.text)
           .filter(Boolean);
         if (texts.length > 0) {
@@ -375,7 +376,7 @@ export class ConversationLoop {
         }
       : undefined;
     const tags = tool.capability?.tags ?? [];
-    const source = tags.includes('mcp')
+    const source: 'builtin' | 'dynamic' | 'mcp' = tags.includes('mcp')
       ? 'mcp'
       : (tool.name === 'ToolSearch' ? 'dynamic' : 'builtin');
     const openWorld = tags.includes('network') || tags.includes('external');

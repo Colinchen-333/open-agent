@@ -4,9 +4,11 @@ import { homedir } from 'os';
 import { dirname, join } from 'path';
 import type {
   SDKMessage,
+  SDKResultMessage,
   SDKUserMessage,
   SlashCommand,
   AccountInfo,
+  McpServerConfig,
   McpServerStatusConfig,
   AgentDefinition,
   HookEvent,
@@ -126,6 +128,7 @@ import type {
   SubscribeOrchestrationEventsOptions,
   SDKTaskDispatcherEvent,
   SDKTimelineItem,
+  SDKOrchestrationEventKind,
   SchedulerControlPlaneSnapshot,
   SchedulerQueueEntry,
   SubscribeTimelineOptions,
@@ -1732,7 +1735,7 @@ export function query(
   const permMode = requestedPermissionMode;
   if (sessionMgr) {
     try {
-      sessionMgr.updateSession(
+      sessionMgr.updateSession?.(
         cwd,
         sessionId,
         {
@@ -2544,6 +2547,7 @@ export function query(
         capabilitySummary: {
           ...state.runtime.capabilitySummary,
         },
+        provider: state.runtime.provider ? { ...state.runtime.provider } : null,
       },
     };
   };
@@ -2570,7 +2574,7 @@ export function query(
       .map((entry) => entry.payload as TaskDispatcherHealthReport)
       .filter((entry) => !teamName || entry.dispatcher.teamName === teamName)
       .sort((left, right) => left.observedAt.localeCompare(right.observedAt));
-    const scheduler = {
+    const scheduler: SchedulerControlPlaneSnapshot = {
       ownerQueryInstanceId: state.scheduler.ownerQueryInstanceId,
       ownerSessionId: state.scheduler.ownerSessionId,
       ownerScope: state.scheduler.ownerScope,
@@ -2582,7 +2586,23 @@ export function query(
       updatedAt: state.scheduler.updatedAt,
       queue: state.scheduler.queue
         .filter((entry) => !teamName || entry.teamName === teamName)
-        .map((entry) => ({ ...entry })),
+        .map((entry): SchedulerQueueEntry => ({
+          dispatcherId: entry.dispatcherId,
+          teamName: entry.teamName,
+          status: entry.status as SchedulerQueueEntry['status'],
+          schedulerState: entry.schedulerState as SchedulerQueueEntry['schedulerState'],
+          activeAssignments: entry.activeAssignments,
+          maxConcurrentWorkers: entry.maxConcurrentWorkers,
+          startedAt: entry.startedAt,
+          updatedAt: entry.updatedAt,
+          nextTurn: entry.nextTurn,
+          ...(entry.lastBlockedReason === 'scheduler_owner'
+            || entry.lastBlockedReason === 'global_worker_budget'
+            || entry.lastBlockedReason === 'team_worker_budget'
+            || entry.lastBlockedReason === 'fairness_turn'
+            ? { lastBlockedReason: entry.lastBlockedReason }
+            : {}),
+        })),
     };
     const summary = {
       taskCount: tasks.length,
@@ -3067,7 +3087,7 @@ export function query(
               const promptText = extractUserPromptText(msg);
               if (promptText) {
                 try {
-                  sessionMgr.updateSession(
+                  sessionMgr.updateSession?.(
                     cwd,
                     sessionId,
                     buildPromptSessionMetadata(promptText, options.sessionTitle),
@@ -3088,7 +3108,7 @@ export function query(
 
             if (msg.type === 'result') {
               try {
-                sessionMgr.updateSession(
+                sessionMgr.updateSession?.(
                   cwd,
                   sessionId,
                   buildResultSessionMetadata(
@@ -3127,7 +3147,7 @@ export function query(
           }
         } finally {
           try {
-            sessionMgr.touchSession(cwd, sessionId);
+            sessionMgr?.touchSession?.(cwd, sessionId);
           } catch {
             // Non-fatal
           }
@@ -3801,7 +3821,8 @@ export function query(
           leaseExpiresAt: dispatched.task.lease?.expiresAt,
           attempts: dispatched.task.lease?.attempts,
         });
-        state.record.lastDispatchAt = new Date().toISOString();
+        const lastDispatchAt = new Date().toISOString();
+        state.record.lastDispatchAt = lastDispatchAt;
         refreshWorkerPoolSlot(
           (slot) => slot.slotId === reservedSlot.slotId,
           (slot) => ({
@@ -3809,7 +3830,7 @@ export function query(
             status: 'active',
             taskId: dispatched.task.id,
             workerId: dispatched.worker.workerId,
-            heartbeatAt: state.record.lastDispatchAt,
+            heartbeatAt: lastDispatchAt,
             expiresAt: dispatched.task.lease?.expiresAt ?? computeWorkerPoolSlotExpiry(state.record),
           }),
         );
@@ -3824,7 +3845,7 @@ export function query(
           taskId: dispatched.task.id,
           workerId: dispatched.worker.workerId,
           taskStatus: dispatched.task.status,
-          timestamp: state.record.lastDispatchAt,
+          timestamp: lastDispatchAt,
         });
         noteDispatcherFairnessDispatch(state);
         const remainingDispatcherCapacity = state.record.maxConcurrentWorkers - state.activeAssignments.size;
@@ -3839,7 +3860,8 @@ export function query(
       }
     } finally {
       state.running = false;
-      if (state.disposed || state.record.status === 'stopped') {
+      const dispatcherStatus = state.record.status as TaskDispatcherRecord['status'];
+      if (state.disposed || dispatcherStatus === 'stopped') {
         return;
       }
       if (state.rerunRequested) {
@@ -3847,7 +3869,7 @@ export function query(
         scheduleTaskDispatcherRun(state, 0);
         return;
       }
-      if (state.record.status === 'draining' && state.activeAssignments.size === 0) {
+      if (dispatcherStatus === 'draining' && state.activeAssignments.size === 0) {
         markTaskDispatcherStopped(state);
         return;
       }
@@ -4001,7 +4023,7 @@ export function query(
         subscriber.close();
         return { done: true, value: undefined };
       },
-    };
+    } as AsyncIterableIterator<SessionStateSnapshot>;
   };
 
   queryObj.setPermissionMode = async (mode) => {
@@ -4019,7 +4041,7 @@ export function query(
       syncAppPermissionControlPlane();
       emitSessionStateSnapshot();
       try {
-        sessionMgr?.updateSession(cwd, sessionId, { permissionMode: mode }, { touch: false });
+        sessionMgr?.updateSession?.(cwd, sessionId, { permissionMode: mode }, { touch: false });
       } catch {
         // Non-fatal
       }
@@ -4039,7 +4061,7 @@ export function query(
       refreshManagedSystemPrompt();
       emitSessionStateSnapshot();
       try {
-        sessionMgr?.updateSession(cwd, sessionId, { model: newModel }, { touch: false });
+        sessionMgr?.updateSession?.(cwd, sessionId, { model: newModel }, { touch: false });
       } catch {
         // Non-fatal
       }
@@ -4329,7 +4351,10 @@ export function query(
       .filter((entry) => !options?.unreadOnly || !entry.readAt)
       .filter((entry) => !options?.after || entry.messageId > options.after)
       .slice(0, options?.limit ?? Number.POSITIVE_INFINITY)
-      .map((entry) => ({ ...entry }));
+      .map((entry) => ({
+        ...entry,
+        requestType: entry.requestType as TeamApprovalRecord['requestType'],
+      }));
   };
 
   queryObj.respondToTeamApproval = async (
@@ -4519,7 +4544,7 @@ export function query(
         subscriber.close();
         return { done: true, value: undefined };
       },
-    };
+    } as AsyncIterableIterator<SDKOrchestrationEvent>;
   };
 
   queryObj.subscribeTimeline = (
@@ -4659,7 +4684,7 @@ export function query(
         await close();
         return { done: true, value: undefined };
       },
-    };
+    } as AsyncIterableIterator<SDKTimelineItem>;
   };
 
   const collectTimelineTaskNotifications = (
@@ -4884,7 +4909,10 @@ export function query(
   queryObj.listRegisteredTools = async (): Promise<ToolCapabilityExportEntry[]> => (
     toolRegistry.listCapabilities().map((entry) => ({
       ...entry,
-      ...(entry.tags ? { tags: [...entry.tags] } : {}),
+      capability: {
+        ...entry.capability,
+        ...(entry.capability.tags ? { tags: [...entry.capability.tags] } : {}),
+      },
     }))
   );
 
@@ -5126,7 +5154,7 @@ export function query(
       observation,
       language: responseLanguage,
     })
-      .filter((item): item is WorkerFollowUpSuggestion => Boolean(item.scaffold))
+      .filter((item) => Boolean(item.scaffold))
       .map((item) => ({
         suggestion: item.suggestion,
         scaffold: item.scaffold!,
@@ -5419,29 +5447,34 @@ export function query(
     return cloneTaskDispatcherRecord(state.record);
   };
 
-  const getTaskDispatcherLedgerPath = () => sessionMgr
-    ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.dispatchers.json`)
+  const getSessionTranscriptDir = () => (
+    sessionMgr?.getTranscriptPath
+      ? dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId))
+      : null
+  );
+  const getTaskDispatcherLedgerPath = () => getSessionTranscriptDir()
+    ? join(getSessionTranscriptDir()!, `${sessionId}.dispatchers.json`)
     : join(cwd, '.open-agent', 'dispatcher-ledgers', `${sessionId}.json`);
-  const getTaskDispatcherOwnershipPath = (dispatcherId: string) => sessionMgr
-    ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.dispatcher-ownership.${dispatcherId}.json`)
+  const getTaskDispatcherOwnershipPath = (dispatcherId: string) => getSessionTranscriptDir()
+    ? join(getSessionTranscriptDir()!, `${sessionId}.dispatcher-ownership.${dispatcherId}.json`)
     : join(cwd, '.open-agent', 'dispatcher-ledgers', `${sessionId}.${dispatcherId}.ownership.json`);
-  const getTaskSchedulerOwnershipPath = () => sessionMgr
-    ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.scheduler-ownership.json`)
+  const getTaskSchedulerOwnershipPath = () => getSessionTranscriptDir()
+    ? join(getSessionTranscriptDir()!, `${sessionId}.scheduler-ownership.json`)
     : join(cwd, '.open-agent', 'dispatcher-ledgers', `${sessionId}.scheduler-ownership.json`);
-  const getTaskDispatcherDiagnosisLedgerPath = () => sessionMgr
-    ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.dispatcher-diagnoses.json`)
+  const getTaskDispatcherDiagnosisLedgerPath = () => getSessionTranscriptDir()
+    ? join(getSessionTranscriptDir()!, `${sessionId}.dispatcher-diagnoses.json`)
     : join(cwd, '.open-agent', 'dispatcher-ledgers', `${sessionId}.diagnoses.json`);
-  const getTaskLedgerPath = () => sessionMgr
-    ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.tasks.json`)
+  const getTaskLedgerPath = () => getSessionTranscriptDir()
+    ? join(getSessionTranscriptDir()!, `${sessionId}.tasks.json`)
     : join(cwd, '.open-agent', 'orchestration-ledgers', `${sessionId}.tasks.json`);
-  const getWorkerLedgerPath = () => sessionMgr
-    ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.workers.json`)
+  const getWorkerLedgerPath = () => getSessionTranscriptDir()
+    ? join(getSessionTranscriptDir()!, `${sessionId}.workers.json`)
     : join(cwd, '.open-agent', 'orchestration-ledgers', `${sessionId}.workers.json`);
-  const getOrchestrationTimelineLedgerPath = () => sessionMgr
-    ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.orchestration-timeline.json`)
+  const getOrchestrationTimelineLedgerPath = () => getSessionTranscriptDir()
+    ? join(getSessionTranscriptDir()!, `${sessionId}.orchestration-timeline.json`)
     : join(cwd, '.open-agent', 'orchestration-ledgers', `${sessionId}.timeline.json`);
-  const getUnifiedOrchestrationLedgerPath = () => sessionMgr
-    ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.orchestration.json`)
+  const getUnifiedOrchestrationLedgerPath = () => getSessionTranscriptDir()
+    ? join(getSessionTranscriptDir()!, `${sessionId}.orchestration.json`)
     : join(cwd, '.open-agent', 'orchestration-ledgers', `${sessionId}.orchestration.json`);
 
   const readUnifiedOrchestrationLedger = (): PersistedOrchestrationLedgerFile | null => {
@@ -6147,6 +6180,9 @@ export function query(
           ...(dispatcherEvent.mode ? { mode: dispatcherEvent.mode } : {}),
           ...(dispatcherEvent.cwd ? { cwd: dispatcherEvent.cwd } : {}),
           ...(dispatcherEvent.isolation ? { isolation: dispatcherEvent.isolation } : {}),
+          schedulerState: dispatcherEvent.schedulerState,
+          ...(dispatcherEvent.lastBlockedReason ? { lastBlockedReason: dispatcherEvent.lastBlockedReason } : {}),
+          ...(dispatcherEvent.lastBlockedAt ? { lastBlockedAt: dispatcherEvent.lastBlockedAt } : {}),
           activeTaskIds: [...dispatcherEvent.activeTaskIds],
           activeWorkerIds: [...dispatcherEvent.activeWorkerIds],
           activeAssignments: [...dispatcherEvent.activeAssignments],
@@ -7299,7 +7335,7 @@ function sanitizeMcpStatusConfig(config: unknown): McpServerStatusConfig | undef
 
 function resolveRewindCheckpointId(
   checkpoints: Array<{ toolUseId: string }>,
-  sessionManager: SessionManager | null,
+  sessionManager: Pick<SessionManager, 'readTranscript'> | null,
   cwd: string,
   sessionId: string,
   userMessageId: string,
@@ -7917,14 +7953,11 @@ function buildTimelineTaskNotificationFollowUps(
   observation.lastTaskDescription = normalizeOptionalString(message.description) ?? observation.lastTaskDescription;
   observation.lastTaskTemplates = message.orchestration_templates;
 
-  const resultMessage: SDKResultMessage = {
-    type: 'result',
-    subtype: message.status === 'failed' ? 'error_max_turns' : 'success',
+  const baseResultMessage = {
+    type: 'result' as const,
     duration_ms: message.usage?.duration_ms ?? 0,
     duration_api_ms: 0,
-    is_error: message.status === 'failed',
     num_turns: 0,
-    result: message.result ?? message.summary ?? '',
     stop_reason: 'end_turn',
     total_cost_usd: 0,
     usage: {
@@ -7936,13 +7969,26 @@ function buildTimelineTaskNotificationFollowUps(
     uuid: message.uuid ?? randomUUID(),
     session_id: message.session_id,
   };
+  const resultMessage: SDKResultMessage = message.status === 'failed'
+    ? {
+        ...baseResultMessage,
+        subtype: 'error_max_turns',
+        is_error: true,
+        errors: [message.result ?? message.summary ?? ''],
+      }
+    : {
+        ...baseResultMessage,
+        subtype: 'success',
+        is_error: false,
+        result: message.result ?? message.summary ?? '',
+      };
 
   return __internal_buildPromptSuggestions({
     result: resultMessage,
     observation,
     language,
   })
-    .filter((item): item is WorkerFollowUpSuggestion => Boolean(item.scaffold))
+    .filter((item) => Boolean(item.scaffold))
     .map((item) => ({
       suggestion: item.suggestion,
       scaffold: item.scaffold!,
@@ -7980,7 +8026,7 @@ function normalizeTimelineMessageType(
 }
 
 function extractTimelineTimestamp(event: SDKOrchestrationEvent): string {
-  const raw = event.raw as Record<string, unknown>;
+  const raw = event.raw as unknown as Record<string, unknown>;
   const completedAt = typeof raw.completedAt === 'string' ? raw.completedAt : undefined;
   const timestamp = typeof raw.timestamp === 'string' ? raw.timestamp : undefined;
   return completedAt ?? timestamp ?? new Date().toISOString();
@@ -8038,7 +8084,7 @@ function extractTimelineDispatcherEventsFromTranscriptEntries(
             ? (dispatcherEvent.activeWorkerIds[index] ?? `unknown-worker-${index}`)
             : `unknown-worker-${index}`,
         }));
-    const normalizedDispatcherEvent = {
+    const normalizedDispatcherEvent: SDKTaskDispatcherEvent = {
       ...dispatcherEvent,
       source: dispatcherEvent.source === 'transcript' ? 'transcript' : 'live',
       activeAssignments: fallbackActiveAssignments,
@@ -8046,13 +8092,7 @@ function extractTimelineDispatcherEventsFromTranscriptEntries(
       updatedAt: dispatcherEvent.updatedAt ?? dispatcherEvent.timestamp,
       followUps: Array.isArray(dispatcherEvent.followUps)
         ? dispatcherEvent.followUps
-        : buildTaskDispatcherFollowUps({
-            ...(dispatcherEvent as Omit<SDKTaskDispatcherEvent, 'followUps'>),
-            source: dispatcherEvent.source === 'transcript' ? 'transcript' : 'live',
-            activeAssignments: fallbackActiveAssignments,
-            startedAt: dispatcherEvent.startedAt ?? dispatcherEvent.timestamp,
-            updatedAt: dispatcherEvent.updatedAt ?? dispatcherEvent.timestamp,
-          }),
+        : [],
     };
     events.push({
       kind: 'task_dispatcher',
@@ -8060,11 +8100,11 @@ function extractTimelineDispatcherEventsFromTranscriptEntries(
       parentToolCallId: `sdk-dispatcher:${dispatcherId}`,
       dispatcherId,
       teamName,
-      ...(normalizeOptionalString((normalizedDispatcherEvent as Record<string, unknown>).workerId)
-        ? { workerId: normalizeOptionalString((normalizedDispatcherEvent as Record<string, unknown>).workerId) }
+      ...(normalizeOptionalString((normalizedDispatcherEvent as unknown as Record<string, unknown>).workerId)
+        ? { workerId: normalizeOptionalString((normalizedDispatcherEvent as unknown as Record<string, unknown>).workerId) }
         : {}),
-      ...(normalizeOptionalString((normalizedDispatcherEvent as Record<string, unknown>).taskId)
-        ? { taskId: normalizeOptionalString((normalizedDispatcherEvent as Record<string, unknown>).taskId) }
+      ...(normalizeOptionalString((normalizedDispatcherEvent as unknown as Record<string, unknown>).taskId)
+        ? { taskId: normalizeOptionalString((normalizedDispatcherEvent as unknown as Record<string, unknown>).taskId) }
         : {}),
       dispatcherEvent: normalizedDispatcherEvent,
       raw: normalizedDispatcherEvent,
@@ -8082,7 +8122,7 @@ function extractTimelineTaskNotificationsFromTranscriptEntries(
     if (!entry || typeof entry !== 'object') continue;
     const record = entry as Record<string, unknown>;
     if (record.type !== 'system' || record.subtype !== 'task_notification') continue;
-    notifications.push(cloneTaskNotificationMessage(record as SDKTaskNotificationMessage));
+    notifications.push(cloneTaskNotificationMessage(record as unknown as SDKTaskNotificationMessage));
   }
   return notifications;
 }

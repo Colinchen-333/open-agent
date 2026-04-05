@@ -33,7 +33,7 @@ const persistentCwdBySession = new Map<string, string>();
 
 interface BashSandboxPreflightFinding extends BashSandboxExecutionFinding {
   phase: 'preflight';
-  feature: 'bypass' | 'network' | 'writePaths';
+  feature: 'bypass' | 'network' | 'writePaths' | 'readPaths';
   executionEngine: BashSandboxExecutionPolicy['executionEngine'];
   boundaryKind: BashSandboxExecutionPolicy['boundaryKind'];
 }

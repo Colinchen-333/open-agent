@@ -23,7 +23,7 @@ describe('McpManager SDK servers', () => {
           },
         ],
       },
-    });
+    } as any);
 
     const status = manager.getStatus().find((entry) => entry.name === 'demo');
     expect(status?.status).toBe('connected');
@@ -40,7 +40,7 @@ describe('McpManager SDK servers', () => {
       },
     ]);
 
-    expect(manager.getAllTools()).toEqual(status?.tools);
+    expect(manager.getAllTools()).toEqual(status?.tools ?? []);
     expect(await manager.callTool('demo', 'inspect', { value: 'ok' })).toEqual({ echoed: 'ok' });
   });
 });

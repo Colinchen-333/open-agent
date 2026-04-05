@@ -288,7 +288,7 @@ describe('query().subscribeOrchestrationEvents()', () => {
       expect(dispatched.value.dispatcherEvent?.workerId).toBeTruthy();
       expect(dispatched.value.dispatcherEvent?.activeAssignments).toHaveLength(1);
       expect(dispatched.value.dispatcherEvent?.followUps).toHaveLength(2);
-      expect(dispatched.value.dispatcherEvent?.followUps.some((item) =>
+      expect(dispatched.value.dispatcherEvent?.followUps.some((item: any) =>
         item.scaffold.action?.tool === 'TaskDispatcher'
         && item.scaffold.action.arguments['action'] === 'requeue'
       )).toBe(true);

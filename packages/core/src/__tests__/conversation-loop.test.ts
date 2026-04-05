@@ -4,6 +4,7 @@ import type { ConversationLoopOptions, PermissionChecker, PermissionPrompter } f
 import type { LLMProvider, Message, StreamEvent, ChatOptions } from '@open-agent/providers';
 import type { ModelInfo } from '@open-agent/core';
 import type { SDKMessage } from '../types.js';
+import type { ToolDefinition } from '@open-agent/tools';
 
 // ---------------------------------------------------------------------------
 // Mock LLM provider helpers
@@ -771,7 +772,7 @@ describe('ConversationLoop', () => {
 
       const loop = new ConversationLoop(baseOptions(
         provider,
-        new Map([
+        new Map<string, ToolDefinition>([
           ['HookedSuccess', successTool],
           ['HookedFailure', failTool],
         ]),

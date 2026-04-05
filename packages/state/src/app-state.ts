@@ -97,6 +97,22 @@ export interface RuntimeCapabilitySummaryState {
   dynamicTools: number;
 }
 
+export interface RuntimeProviderCapabilityState {
+  provider: string;
+  model: string;
+  thinkingMode: 'native' | 'best_effort' | 'unsupported';
+  structuredOutputMode: 'native' | 'best_effort' | 'unsupported';
+  toolUseMode: 'native' | 'best_effort' | 'unsupported';
+  serverToolsMode: 'native' | 'best_effort' | 'unsupported';
+  supportsThinking: boolean;
+  supportsAdaptiveThinking: boolean;
+  supportsStructuredOutput: boolean;
+  supportsImages: boolean;
+  supportsServerTools: boolean;
+  supportsEffort: boolean;
+  supportedEffortLevels: Array<'low' | 'medium' | 'high' | 'max'>;
+}
+
 export interface PermissionRuleState {
   toolName: string;
   ruleContent?: string;
@@ -119,6 +135,7 @@ export interface RuntimeControlPlaneState {
   diagnostics: RuntimeDiagnosticState[];
   diagnosticSummary: RuntimeDiagnosticSummaryState;
   capabilitySummary: RuntimeCapabilitySummaryState;
+  provider: RuntimeProviderCapabilityState | null;
 }
 
 export interface DispatcherControlPlaneState {
@@ -306,6 +323,7 @@ export function createDefaultAppState(overrides: Partial<AppState> = {}): AppSta
         mcpTools: 0,
         dynamicTools: 0,
       },
+      provider: null,
     },
     workers: {},
     dispatchers: {},

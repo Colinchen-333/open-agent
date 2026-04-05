@@ -31,7 +31,12 @@ describe('TeamManager inbox consumption', () => {
     try {
       const manager = new TeamManager();
       manager.createTeam(teamName);
-      manager.addMember(teamName, { name: 'lead', role: 'lead', status: 'active' });
+      manager.addMember(teamName, {
+        name: 'lead',
+        agentId: 'lead-agent',
+        agentType: 'worker',
+        status: 'active',
+      });
       manager.sendMessage(teamName, {
         type: 'message',
         from: 'worker',

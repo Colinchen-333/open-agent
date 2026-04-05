@@ -129,6 +129,13 @@ export interface QueryOptions {
     readTranscript(cwd: string, sessionId: string): unknown[];
     getSession(cwd: string, sessionId: string): SessionInfo | null;
     touchSession?(cwd: string, sessionId: string): unknown;
+    updateSession?(
+      cwd: string,
+      sessionId: string,
+      update: Record<string, unknown>,
+      options?: { touch?: boolean },
+    ): unknown;
+    getTranscriptPath?(cwd: string, sessionId: string): string;
   };
   includePartialMessages?: boolean;
   thinking?: ThinkingConfig;

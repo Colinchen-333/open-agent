@@ -613,7 +613,7 @@ describe('SDK runtime control surface', () => {
             allowWrite: [baselineDir],
           },
         },
-        canUseTool(toolName, input) {
+        canUseTool(toolName: string, input: Record<string, unknown>) {
           if (toolName !== 'Bash') {
             return true;
           }
@@ -698,7 +698,7 @@ describe('SDK runtime control surface', () => {
           toolUseResponse('bash-refresh-2', 'Bash', { command: 'pwd' }),
           textResponse('second'),
         ]),
-        canUseTool(toolName, input) {
+        canUseTool(toolName: string, input: Record<string, unknown>) {
           if (toolName === 'Bash') {
             const policy = input[BASH_SANDBOX_POLICY_FIELD] as {
               allowWritePaths?: string[];

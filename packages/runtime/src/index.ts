@@ -546,8 +546,8 @@ function determineCapabilitySource(entry: ToolCapabilityExportEntry): 'built-in'
 
 function buildCapabilityProfile(entry: ToolCapabilityExportEntry): ToolCapabilityProfile {
   const group = determineCapabilityGroup(entry.name, entry.capability.category);
-  const readOnly = entry.capability.readOnly;
-  const concurrencySafe = entry.capability.concurrencySafe;
+  const readOnly = entry.capability.readOnly ?? false;
+  const concurrencySafe = entry.capability.concurrencySafe ?? false;
   const access = determineCapabilityAccess(entry, group);
   const tags = [
     group,
@@ -570,8 +570,8 @@ function buildCapabilityProfile(entry: ToolCapabilityExportEntry): ToolCapabilit
     access,
     readOnly,
     concurrencySafe,
-    risk: entry.capability.risk,
-    needsWorkspaceWrite: entry.capability.needsWorkspaceWrite,
+    risk: entry.capability.risk ?? 'medium',
+    needsWorkspaceWrite: entry.capability.needsWorkspaceWrite ?? false,
     source: determineCapabilitySource(entry),
     tags: [...new Set(tags)],
   };

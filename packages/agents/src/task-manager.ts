@@ -259,7 +259,7 @@ export class TaskManager {
           status: latest.status === 'completed' ? 'completed' : 'pending',
           updatedAt: now.toISOString(),
         };
-        if (nextTask.owner === nextTask.lease.owner) {
+        if (nextTask.lease && nextTask.owner === nextTask.lease.owner) {
           delete nextTask.owner;
         }
         return {

@@ -39,6 +39,7 @@ describe('OpenAgentRuntime MCP wiring', () => {
         description: 'Read files',
         capability: {
           category: 'filesystem',
+          source: 'explicit',
           readOnly: true,
           concurrencySafe: true,
           risk: 'low',
@@ -50,6 +51,7 @@ describe('OpenAgentRuntime MCP wiring', () => {
         description: 'Write files',
         capability: {
           category: 'filesystem',
+          source: 'explicit',
           readOnly: false,
           concurrencySafe: false,
           risk: 'medium',
@@ -61,6 +63,7 @@ describe('OpenAgentRuntime MCP wiring', () => {
         description: 'Spawn agents',
         capability: {
           category: 'agent',
+          source: 'explicit',
           readOnly: false,
           concurrencySafe: true,
           risk: 'medium',
@@ -72,6 +75,7 @@ describe('OpenAgentRuntime MCP wiring', () => {
         description: 'Echo from MCP',
         capability: {
           category: 'mcp',
+          source: 'explicit',
           readOnly: true,
           concurrencySafe: true,
           risk: 'low',
@@ -83,6 +87,7 @@ describe('OpenAgentRuntime MCP wiring', () => {
         description: 'Load deferred tools',
         capability: {
           category: 'utility',
+          source: 'explicit',
           readOnly: true,
           concurrencySafe: true,
           risk: 'low',
@@ -117,6 +122,7 @@ describe('OpenAgentRuntime MCP wiring', () => {
         description: 'Read files',
         capability: {
           category: 'filesystem',
+          source: 'explicit',
           readOnly: true,
           concurrencySafe: true,
           risk: 'low',
@@ -128,6 +134,7 @@ describe('OpenAgentRuntime MCP wiring', () => {
         description: 'Write files',
         capability: {
           category: 'filesystem',
+          source: 'explicit',
           readOnly: false,
           concurrencySafe: false,
           risk: 'medium',
@@ -139,6 +146,7 @@ describe('OpenAgentRuntime MCP wiring', () => {
         description: 'Deploy from MCP',
         capability: {
           category: 'mcp',
+          source: 'explicit',
           readOnly: false,
           concurrencySafe: false,
           risk: 'high',

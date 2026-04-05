@@ -54,7 +54,7 @@ function makeControlledFailureProvider(): { provider: LLMProvider; releaseFailur
             resolve();
             return;
           }
-          options.signal?.addEventListener('abort', resolve, { once: true });
+          options.signal?.addEventListener('abort', () => resolve(), { once: true });
         });
 
         throw new Error('dispatcher worker failed for test');
@@ -99,7 +99,7 @@ function makeControlledCompletionProvider(): {
             resolve();
             return;
           }
-          options.signal?.addEventListener('abort', resolve, { once: true });
+          options.signal?.addEventListener('abort', () => resolve(), { once: true });
         });
         yield { type: 'text_delta', text: 'done' };
         yield { type: 'message_end', message: {}, usage: { input_tokens: 5, output_tokens: 8 } };

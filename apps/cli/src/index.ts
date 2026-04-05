@@ -28,7 +28,7 @@ import { AgentLoader, AgentExecutor, TaskManager, TeamManager } from '@open-agen
 import type { AgentSession } from '@open-agent/agents';
 import { HookExecutor } from '@open-agent/hooks';
 import { OpenAgentRuntime, filterCapabilitySnapshot } from '@open-agent/runtime';
-import type { SDKMessage, AgentDefinition, SDKTaskNotificationMessage } from '@open-agent/core';
+import type { SDKMessage, AgentDefinition, SDKTaskNotificationMessage, Settings } from '@open-agent/core';
 import type { PermissionMode } from '@open-agent/core';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';

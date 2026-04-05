@@ -45,7 +45,7 @@ describe('query() team approval control plane', () => {
         feedback: 'Proceed with the refactor.',
       });
       expect(response.acknowledged).toBe(1);
-      expect(response.request.requestId).toBe(request.requestId);
+      expect(response.request.requestId).toBe(request.requestId!);
       expect(response.response.type).toBe('plan_approval_response');
       expect(response.response.approve).toBe(true);
       expect(await q.getTeamInboxCount('lead', { teamName })).toBe(0);

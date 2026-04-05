@@ -77,6 +77,68 @@ async function collectMessages(gen: AsyncGenerator<SDKMessage>): Promise<SDKMess
   return messages;
 }
 
+function isSubagentSystemPrompt(systemPrompt: ChatOptions['systemPrompt']): boolean {
+  return typeof systemPrompt === 'string'
+    && systemPrompt.includes('You are a subagent working on behalf of another OpenAgent agent.');
+}
+
+function createBackgroundWorkerProvider(input: {
+  taskToolUseId: string;
+  workerName: string;
+  teamName: string;
+}): {
+  provider: LLMProvider;
+  waitForWorkerStart: Promise<void>;
+} {
+  let workerStartedResolve: (() => void) | null = null;
+  const waitForWorkerStart = new Promise<void>((resolve) => {
+    workerStartedResolve = resolve;
+  });
+
+  return {
+    provider: {
+      name: 'mock-background-worker-provider',
+      async *chat(messages: Message[], options: ChatOptions): AsyncGenerator<StreamEvent> {
+        if (!isSubagentSystemPrompt(options.systemPrompt)) {
+          const hasTaskResult = messages.some((message) =>
+            Array.isArray(message.content)
+            && message.content.some((block) => block?.type === 'tool_result'),
+          );
+
+          if (!hasTaskResult) {
+            yield* toolUseResponse(input.taskToolUseId, 'Task', {
+              description: 'Launch background worker',
+              prompt: 'Wait until you are stopped.',
+              subagent_type: 'worker',
+              name: input.workerName,
+              team_name: input.teamName,
+              run_in_background: true,
+            });
+            return;
+          }
+
+          yield* textResponse('parent done');
+          return;
+        }
+
+        workerStartedResolve?.();
+        workerStartedResolve = null;
+        await new Promise<void>((resolve) => {
+          if (options.signal?.aborted) {
+            resolve();
+            return;
+          }
+          options.signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+      },
+      async listModels(): Promise<ModelInfo[]> {
+        return [{ value: 'mock-model', displayName: 'Mock Model', description: 'Background worker test model' }];
+      },
+    },
+    waitForWorkerStart,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // initializationResult()
 // ---------------------------------------------------------------------------
@@ -266,6 +328,67 @@ describe('query() team control plane', () => {
       temp.restore();
     }
   });
+
+  it('lists and responds to pending team approvals', async () => {
+    const temp = createTempHome('open-agent-sdk-team-approvals-');
+
+    try {
+      const q = query('team approvals', { cwd: temp.cwd, model: 'claude-sonnet-4-6' });
+      const teamName = `alpha-${Date.now()}`;
+      await q.createTeam({ name: teamName });
+
+      const request = await q.sendTeamMessage({
+        teamName,
+        type: 'plan_approval_request',
+        from: 'worker-1',
+        recipient: 'lead',
+        content: 'Approve the planned refactor.',
+        summary: 'plan approval',
+      });
+      expect(request.requestId).toBeTruthy();
+
+      const pending = await q.listPendingTeamApprovals({
+        teamName,
+        memberName: 'lead',
+        unreadOnly: true,
+      });
+      expect(pending).toHaveLength(1);
+      expect(pending[0]?.requestType).toBe('plan_approval_request');
+
+      const response = await q.respondToTeamApproval({
+        teamName,
+        memberName: 'lead',
+        messageId: pending[0]!.messageId,
+        approve: true,
+        from: 'team-lead',
+        feedback: 'Proceed with the refactor.',
+      });
+      expect(response.acknowledged).toBe(1);
+      expect(response.request.requestId).toBe(request.requestId!);
+      expect(response.response.type).toBe('plan_approval_response');
+      expect(response.response.approve).toBe(true);
+
+      const workerInbox = await q.readTeamInbox({ teamName, memberName: 'worker-1', consume: false });
+      expect(
+        workerInbox.some(
+          (message) =>
+            message.type === 'plan_approval_response'
+            && message.requestId === request.requestId
+            && message.approve === true,
+        ),
+      ).toBe(true);
+      expect(
+        await q.listPendingTeamApprovals({
+          teamName,
+          memberName: 'lead',
+          unreadOnly: true,
+        }),
+      ).toHaveLength(0);
+      q.close();
+    } finally {
+      temp.restore();
+    }
+  });
 });
 
 describe('query() orchestration event subscriptions', () => {
@@ -392,6 +515,53 @@ describe('query() orchestration event subscriptions', () => {
       q.close();
 
       await expect(lifecycleOnly.next()).resolves.toEqual({ done: true, value: undefined });
+    } finally {
+      temp.restore();
+    }
+  });
+});
+
+describe('query() worker lifecycle control plane', () => {
+  it('lists, retrieves, and stops live background workers', async () => {
+    const temp = createTempHome('open-agent-sdk-workers-');
+
+    try {
+      const workerName = `alice-${Date.now()}`;
+      const taskToolUseId = `task-parent-bg-${Date.now()}`;
+      const teamName = 'alpha-team';
+      const { provider, waitForWorkerStart } = createBackgroundWorkerProvider({
+        taskToolUseId,
+        workerName,
+        teamName,
+      });
+      const q = query('launch a background worker', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+      });
+
+      await collectMessages(q);
+      await waitForWorkerStart;
+
+      const workers = await q.listWorkers({ teamName: 'alpha-team' });
+      const worker = workers.find((entry) =>
+        entry.parentToolCallId === taskToolUseId
+        && entry.name === workerName
+        && entry.teamName === teamName,
+      );
+      expect(worker).toBeDefined();
+      expect(worker?.workerType).toBe('worker');
+      expect(worker?.status === 'running' || worker?.status === 'spawning').toBe(true);
+
+      const fetched = await q.getWorker(worker!.workerId);
+      expect(fetched?.workerId).toBe(worker?.workerId);
+      expect(fetched?.teamName).toBe(teamName);
+
+      await expect(q.stopWorker(worker!.workerId)).resolves.toEqual({ success: true });
+      expect((await q.getWorker(worker!.workerId))?.status).toBe('shutdown');
+      q.close();
     } finally {
       temp.restore();
     }
@@ -539,6 +709,50 @@ describe('query() shared task control plane', () => {
         process.env.HOME = originalHome;
       }
       rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('dispatches the next available task into a background worker', async () => {
+    const temp = createTempHome('open-agent-sdk-task-dispatch-');
+
+    try {
+      const teamName = `dispatch-team-${Date.now()}`;
+      const { provider, waitForWorkerStart } = createBackgroundWorkerProvider({
+        taskToolUseId: `dispatch-parent-${Date.now()}`,
+        workerName: 'dispatch-worker',
+        teamName,
+      });
+      const q = query('dispatch tasks', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+      });
+
+      const task = await q.createTask({
+        teamName,
+        subject: 'Implement approval bridge',
+        description: 'Claim this task and launch a worker.',
+        priority: 10,
+      });
+
+      const dispatched = await q.dispatchNextTask({
+        owner: 'dispatch-owner',
+        teamName,
+        name: 'dispatch-worker',
+      });
+      expect(dispatched).not.toBeNull();
+      expect(dispatched?.task.id).toBe(task.id);
+      expect(dispatched?.task.lease?.owner).toBe('dispatch-owner');
+      expect(dispatched?.worker.teamName).toBe(teamName);
+
+      await waitForWorkerStart;
+      expect(await q.stopWorker(dispatched!.worker.workerId)).toEqual({ success: true });
+      expect((await q.getWorker(dispatched!.worker.workerId))?.status).toBe('shutdown');
+      q.close();
+    } finally {
+      temp.restore();
     }
   });
 });

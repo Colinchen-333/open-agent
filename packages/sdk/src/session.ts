@@ -144,6 +144,7 @@ type SessionControlMethods = Pick<
   | 'claimNextTask'
   | 'heartbeatTask'
   | 'releaseTask'
+  | 'dispatchNextTask'
   | 'startTaskDispatcher'
   | 'resumeTaskDispatcher'
   | 'getTaskDispatcher'

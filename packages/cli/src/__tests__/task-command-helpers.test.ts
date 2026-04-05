@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'bun:test';
 import {
   buildBackgroundAgentListEntries,
+  buildTaskInspection,
+  formatTaskInspectionForDisplay,
   listBackgroundTasksForDisplay,
 } from '../task-command-helpers.js';
 
@@ -54,6 +56,33 @@ describe('listBackgroundTasksForDisplay', () => {
     expect(result.output).toContain('bg_keep');
     expect(result.output).not.toContain('bg_skip');
   });
+
+  it('supports all-session view and shows log path', () => {
+    const result = listBackgroundTasksForDisplay({
+      sessionFilter: 'all',
+      tasks: [
+        {
+          task_id: 'bg_all_1',
+          type: 'bash',
+          status: 'completed',
+          summary: 'Build done',
+          session_id: 'session-1',
+          output_file: '/tmp/bg_all_1.log',
+        },
+        {
+          task_id: 'bg_all_2',
+          type: 'bash',
+          status: 'running',
+          summary: 'Deploy',
+          session_id: 'session-2',
+        },
+      ],
+    });
+
+    expect(result.tasks).toHaveLength(2);
+    expect(result.output).toContain('logs=/tmp/bg_all_1.log');
+    expect(result.output).toContain('session=session-2');
+  });
 });
 
 describe('buildBackgroundAgentListEntries', () => {
@@ -79,5 +108,51 @@ describe('buildBackgroundAgentListEntries', () => {
         summary: 'Scanning repo',
       },
     ]);
+  });
+});
+
+describe('buildTaskInspection + formatTaskInspectionForDisplay', () => {
+  it('builds normalized inspection from task output payload', () => {
+    const inspection = buildTaskInspection(JSON.stringify({
+      task_id: 'bg_logs_1',
+      type: 'bash',
+      status: 'completed',
+      state: 'completed',
+      output: 'line 1\nline 2',
+      durationMs: 1234,
+      output_file: '/tmp/bg_logs_1.log',
+      metadata: {
+        summary: 'Task done',
+        session_id: 'session-a',
+        command: 'bun test',
+        start_time: 1700000000000,
+      },
+    }));
+
+    expect(inspection).not.toBeNull();
+    expect(inspection?.task_id).toBe('bg_logs_1');
+    expect(inspection?.summary).toBe('Task done');
+    expect(inspection?.output_file).toBe('/tmp/bg_logs_1.log');
+    expect(inspection?.output_preview).toContain('line 1');
+    expect(inspection?.session_id).toBe('session-a');
+  });
+
+  it('formats logs view with summary and log file path', () => {
+    const inspection = buildTaskInspection(JSON.stringify({
+      task_id: 'bg_logs_2',
+      type: 'bash',
+      status: 'running',
+      output: 'streaming output',
+      output_file: '/tmp/bg_logs_2.log',
+      metadata: {
+        summary: 'Still running',
+      },
+    }));
+
+    const output = formatTaskInspectionForDisplay(inspection!, { view: 'logs' });
+    expect(output).toContain('Task logs: bg_logs_2');
+    expect(output).toContain('Summary: Still running');
+    expect(output).toContain('Log file: /tmp/bg_logs_2.log');
+    expect(output).toContain('Output preview:');
   });
 });

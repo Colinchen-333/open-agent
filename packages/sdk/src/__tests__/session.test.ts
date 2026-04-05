@@ -306,7 +306,7 @@ describe('createSession()', () => {
       unreadOnly: true,
     });
     expect(pending).toHaveLength(1);
-    expect(pending[0]?.requestId).toBe(request.requestId);
+    expect(pending[0]?.requestId).toBe(request.requestId!);
 
     const response = await session.respondToTeamApproval({
       teamName,
@@ -408,7 +408,7 @@ describe('createSession()', () => {
       ]),
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
-      setupTools(registry) {
+      setupTools(registry: any) {
         registry.register({
           name: 'DummyTool',
           description: 'Return a stable string for session orchestration tests.',
@@ -419,7 +419,7 @@ describe('createSession()', () => {
             },
             required: ['value'],
           },
-          async execute(input) {
+          async execute(input: any) {
             return `dummy:${String((input as { value?: string }).value ?? '')}`;
           },
         });
@@ -464,8 +464,9 @@ describe('createSession()', () => {
     } else {
       expect(resumed.kind).toBe('worker');
       if (resumed.kind === 'worker') {
-        expect(resumed.worker.workerId).toBe(workers[0]!.workerId);
-        expect(await session.stopWorker(resumed.worker.workerId)).toEqual({ success: true });
+        const worker = resumed.worker!;
+        expect(worker.workerId).toBe(workers[0]!.workerId);
+        expect(await session.stopWorker(worker.workerId)).toEqual({ success: true });
       }
     }
     expect(turnMessages.some((message) => message.type === 'result' && message.result === 'session parent done')).toBe(true);

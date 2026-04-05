@@ -27,4 +27,22 @@ describe('buildSubagentSystemPrompt', () => {
     expect(prompt).toContain('You are a specialized agent. Complete the given task.');
     expect(prompt).toContain('Current working directory: /tmp/project');
   });
+
+  it('accepts prebuilt coordinator context', () => {
+    const prompt = buildSubagentSystemPrompt(
+      'Implement the task.',
+      '/tmp/project',
+      {
+        coordinator: {
+          workerTools: ['Read', 'Bash'],
+          activeTeam: 'beta-team',
+          scratchpadDir: '/tmp/project/.open-agent/scratchpad',
+        },
+      },
+    );
+
+    expect(prompt).toContain('Available tools for this run: Bash, Read');
+    expect(prompt).toContain('Team context: beta-team');
+    expect(prompt).toContain('Scratchpad directory: /tmp/project/.open-agent/scratchpad');
+  });
 });

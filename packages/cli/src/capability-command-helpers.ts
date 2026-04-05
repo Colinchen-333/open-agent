@@ -17,7 +17,7 @@ export interface CapabilityProfile {
   concurrencySafe?: boolean;
   risk?: 'low' | 'medium' | 'high';
   needsWorkspaceWrite?: boolean;
-  source: 'builtin' | 'dynamic' | 'mcp';
+  source: 'built-in' | 'dynamic' | 'mcp';
   tags: string[];
 }
 
@@ -132,14 +132,14 @@ function determineAccess(name: string, group: CapabilityGroup): CapabilityAccess
   return 'read-only';
 }
 
-function determineSource(name: string): 'builtin' | 'dynamic' | 'mcp' {
+function determineSource(name: string): 'built-in' | 'dynamic' | 'mcp' {
   if (hasMcpPrefix(name) || name === 'ListMcpResourcesTool' || name === 'ReadMcpResourceTool') {
     return 'mcp';
   }
   if (name === 'ToolSearch') {
     return 'dynamic';
   }
-  return 'builtin';
+  return 'built-in';
 }
 
 export function buildCapabilitySnapshotFromTools(toolNames: string[]): CapabilitySnapshot {
@@ -149,7 +149,7 @@ export function buildCapabilitySnapshotFromTools(toolNames: string[]): Capabilit
       const group = determineGroup(toolName);
       const access = determineAccess(toolName, group);
       const source = determineSource(toolName);
-      const tags = [group, access];
+      const tags: string[] = [group, access];
       if (source === 'mcp') tags.push('mcp');
       if (source === 'dynamic') tags.push('dynamic');
       if (group === 'execution') tags.push('workspace');
@@ -163,7 +163,7 @@ export function buildCapabilitySnapshotFromTools(toolNames: string[]): Capabilit
         access,
         readOnly: access === 'read-only',
         concurrencySafe: access !== 'mutable',
-        risk: access === 'external' ? 'low' : access === 'mutable' ? 'medium' : 'low',
+        risk: (access === 'external' ? 'low' : access === 'mutable' ? 'medium' : 'low') as CapabilityProfile['risk'],
         needsWorkspaceWrite: access === 'mutable',
         source,
         tags: [...new Set(tags)],

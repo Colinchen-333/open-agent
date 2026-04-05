@@ -159,9 +159,10 @@ describe('query() follow-up dispatcher', () => {
       });
       expect(dispatched.kind).toBe('worker');
       if (dispatched.kind === 'worker') {
+        const worker = dispatched.worker!;
         expect(dispatched.followUpKind).toBe('stopped_worker_followup');
-        expect(dispatched.worker.workerId).toBe(workerId);
-        expect(dispatched.worker.teamName).toBe(teamName);
+        expect(worker.workerId).toBe(workerId);
+        expect(worker.teamName).toBe(teamName);
         expect(await q.stopWorker(workerId)).toEqual({ success: true });
         await waitForWorkerStatus(q, workerId, 'shutdown');
       }

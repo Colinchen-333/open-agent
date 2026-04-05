@@ -8,6 +8,7 @@ import type {
   PermissionControlPlaneState,
   RuntimeDiagnosticState,
   RuntimeHookState,
+  RuntimeProviderCapabilityState,
   RuntimePluginState,
   SchedulerControlPlaneState,
   TeamApprovalControlPlaneState,
@@ -32,6 +33,7 @@ export interface RuntimeControlPlaneSnapshotInput {
       dynamicTools: number;
     };
   };
+  provider?: RuntimeProviderCapabilityState | null;
 }
 
 export interface PermissionControlPlaneSnapshotInput {
@@ -121,6 +123,12 @@ export function syncRuntimeControlPlane(
         mcpTools: snapshot.capabilitySnapshot?.summary.mcpTools ?? 0,
         dynamicTools: snapshot.capabilitySnapshot?.summary.dynamicTools ?? 0,
       },
+      provider: snapshot.provider
+        ? {
+          ...snapshot.provider,
+          supportedEffortLevels: [...snapshot.provider.supportedEffortLevels],
+        }
+        : null,
     },
   };
 }

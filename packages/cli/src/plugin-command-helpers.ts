@@ -109,7 +109,7 @@ export class PluginCommandHelpers {
         ok: false,
         output: 'Plugin name is required. Usage: /plugin <enable|disable> <name>',
         data: undefined,
-      } as PluginCommandResult<PluginToggleData>;
+      } as unknown as PluginCommandResult<PluginToggleData>;
     }
 
     this.ensureLoader();
@@ -123,7 +123,7 @@ export class PluginCommandHelpers {
         ok: false,
         output: `Plugin not found: ${trimmed}${suffix}`,
         data: undefined,
-      } as PluginCommandResult<PluginToggleData>;
+      } as unknown as PluginCommandResult<PluginToggleData>;
     }
 
     this.loader!.setEnabled(resolvedName, enabled);

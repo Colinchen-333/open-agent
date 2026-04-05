@@ -16,6 +16,7 @@ export interface AgentSession {
   agentType: string;
   name?: string;
   state: AgentState;
+  cwd?: string;
   parentToolUseId?: string;
   parentSessionId?: string;
   startedAt: string;
@@ -37,6 +38,7 @@ export interface AgentSession {
 
 export interface ExecuteOptions {
   definition: AgentDefinition;
+  agentType?: string;
   provider: LLMProvider;
   tools: Map<string, ToolDefinition>;
   prompt: string;
@@ -104,12 +106,13 @@ export class AgentExecutor {
    */
   async execute(options: ExecuteOptions): Promise<{ agentId: string; result: string; session: AgentSession }> {
     const agentId = options.resume || `agent-${randomUUID()}`;
-    const agentType = options.definition.name ?? options.definition.description ?? 'unknown';
+    const agentType = options.agentType ?? options.definition.name ?? options.definition.description ?? 'unknown';
     const session: AgentSession = {
       agentId,
       agentType,
       name: options.name,
       state: 'spawning',
+      cwd: options.cwd,
       parentToolUseId: options.parentToolUseId,
       parentSessionId: options.parentSessionId,
       startedAt: new Date().toISOString(),
@@ -297,7 +300,7 @@ export class AgentExecutor {
    */
   async executeInBackground(options: ExecuteOptions): Promise<{ agentId: string; outputFile: string }> {
     const agentId = options.resume || `agent-${randomUUID()}`;
-    const agentType = options.definition.name ?? options.definition.description ?? 'unknown';
+    const agentType = options.agentType ?? options.definition.name ?? options.definition.description ?? 'unknown';
     const outputFile = join(this.outputDir, `${agentId}.output`);
 
     const session: AgentSession = {

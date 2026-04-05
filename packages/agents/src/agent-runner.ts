@@ -1,5 +1,5 @@
-import { ConversationLoop } from '@open-agent/core';
-import type { AgentDefinition } from '@open-agent/core';
+import { ConversationLoop, buildCoordinatorContext } from '@open-agent/core';
+import type { AgentDefinition, CoordinatorContext } from '@open-agent/core';
 import { createStore, createDefaultAppState } from '@open-agent/state';
 import type { AppState } from '@open-agent/state';
 import type { LLMProvider } from '@open-agent/providers';
@@ -111,6 +111,7 @@ Important operating rules:
 - Verification means proving the result works, not merely confirming that code exists.`;
 
 interface SubagentSystemPromptOptions {
+  coordinator?: CoordinatorContext;
   teamName?: string;
   scratchpadDir?: string;
   availableTools?: string[];
@@ -121,7 +122,12 @@ export function buildSubagentSystemPrompt(
   cwd: string,
   options: SubagentSystemPromptOptions = {},
 ): string {
-  const toolList = (options.availableTools ?? []).slice().sort();
+  const coordinator = options.coordinator ?? buildCoordinatorContext({
+    workerTools: options.availableTools,
+    activeTeam: options.teamName,
+    scratchpadDir: options.scratchpadDir,
+  });
+  const toolList = (coordinator?.workerTools ?? []).slice().sort();
   const coordinationLines: string[] = [];
 
   if (toolList.length > 0) {
@@ -129,12 +135,12 @@ export function buildSubagentSystemPrompt(
     coordinationLines.push('Different agent types may expose only a subset of the full tool pool. Do not assume unavailable tools exist.');
   }
 
-  if (options.teamName) {
-    coordinationLines.push(`Team context: ${options.teamName}`);
+  if (coordinator?.activeTeam) {
+    coordinationLines.push(`Team context: ${coordinator.activeTeam}`);
   }
 
-  if (options.scratchpadDir) {
-    coordinationLines.push(`Scratchpad directory: ${options.scratchpadDir}`);
+  if (coordinator?.scratchpadDir) {
+    coordinationLines.push(`Scratchpad directory: ${coordinator.scratchpadDir}`);
     coordinationLines.push('Use the scratchpad for durable notes, synthesized findings, and worker handoffs. Keep it concise and high-signal.');
   }
 
@@ -194,10 +200,13 @@ export class AgentRunner {
     const scratchpadDir = this.options.teamName
       ? (teamManager ?? new TeamManager()).getScratchpadDir(this.options.teamName)
       : join(effectiveCwd, '.open-agent', 'scratchpad');
-    const systemPrompt = buildSubagentSystemPrompt(def.prompt, effectiveCwd, {
-      teamName: this.options.teamName,
+    const coordinatorContext = buildCoordinatorContext({
+      workerTools: [...tools.keys()],
+      activeTeam: this.options.teamName,
       scratchpadDir,
-      availableTools: [...tools.keys()],
+    });
+    const systemPrompt = buildSubagentSystemPrompt(def.prompt, effectiveCwd, {
+      coordinator: coordinatorContext,
     });
 
     const resolvedModel = this.resolveModel(this.options.model ?? def.model);
