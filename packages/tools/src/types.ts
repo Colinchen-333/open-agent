@@ -136,6 +136,9 @@ export interface ToolDefinition {
   isConcurrencySafe?: boolean | ((input: any) => boolean);
   /** Optional capability metadata for plan, routing, and export layers. */
   capability?: ToolCapability;
+  /** When true, this tool is not surfaced in the initial tool list. It must be
+   *  explicitly discovered via ToolSearch. Defaults to false. */
+  shouldDefer?: boolean;
 }
 
 export interface ToolContext {

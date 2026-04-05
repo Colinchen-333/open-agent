@@ -75,6 +75,6 @@ export {
   type PersistedBackgroundTask,
   type PersistedBackgroundTaskStatus,
 } from './background-task-store.js';
-export { createToolSearchTool, type ToolSearchDeps } from './tool-search.js';
+export { createToolSearchTool, type ToolSearchDeps, type ToolSearchRegistry } from './tool-search.js';
 export { createSkillTool, type SkillDeps } from './skill-tool.js';
 export { getToolPromptDescriptions } from './tool-descriptions.js';

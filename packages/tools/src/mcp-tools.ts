@@ -12,6 +12,7 @@ export function createListMcpResourcesTool(deps: McpToolsDeps): ToolDefinition {
     name: 'ListMcpResourcesTool',
     description: 'List available resources from configured MCP servers.',
     isReadOnly: true,
+    shouldDefer: true, // MCP tools are discovered via ToolSearch
     inputSchema: {
       type: 'object',
       properties: {
@@ -31,6 +32,7 @@ export function createReadMcpResourceTool(deps: McpToolsDeps): ToolDefinition {
     name: 'ReadMcpResourceTool',
     description: 'Read a specific resource from an MCP server.',
     isReadOnly: true,
+    shouldDefer: true, // MCP tools are discovered via ToolSearch
     inputSchema: {
       type: 'object',
       properties: {
