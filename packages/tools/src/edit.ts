@@ -1,6 +1,7 @@
 import type { ToolDefinition, ToolContext, FileEditInput } from './types.js';
 import { fileExists, readText, writeText } from '@open-agent/core';
 import { summarizeFilePath } from './tool-summary.js';
+import { withToolDefaults } from './tool-defaults.js';
 
 /**
  * Generate a simple unified-style diff showing the changed lines and up to
@@ -64,7 +65,7 @@ function generateSimplePatch(filePath: string, oldContent: string, newContent: s
 }
 
 export function createEditTool(): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'Edit',
     description: 'Perform an exact string replacement in a file. By default ensures old_string appears exactly once (use replace_all to replace every occurrence).',
     isConcurrencySafe: false,
@@ -160,5 +161,5 @@ export function createEditTool(): ToolDefinition {
         patch,
       };
     },
-  };
+  });
 }

@@ -3,6 +3,7 @@ import { closeSync, existsSync, openSync, readFileSync } from 'fs';
 import { spawn } from 'child_process';
 import { resolve, sep } from 'path';
 import type { ToolDefinition, ToolContext, BashInput } from './types.js';
+import { withToolDefaults } from './tool-defaults.js';
 import { getOrCreateBashPty } from './bash-pty.js';
 import { getBackgroundTasks } from './task-management.js';
 import {
@@ -70,7 +71,7 @@ function pruneBackgroundTasks(tasks: Map<string, { status: string; startTime: nu
 }
 
 export function createBashTool(): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'Bash',
     isConcurrencySafe: false,
     description:
@@ -389,7 +390,18 @@ export function createBashTool(): ToolDefinition {
       appendSandboxExecutionDiagnostic(ctx, sandboxExecution);
       return output + exitInfo + interruptedNote;
     },
-  };
+    isSearchOrReadCommand: (input: unknown): { isSearch: boolean; isRead: boolean; isList: boolean } => {
+      const cmd = String((input as { command?: string }).command ?? '');
+      const READ_VERBS = /^\s*(cat|less|tail|head|ls|pwd|stat|file|wc|find|which)\b/;
+      const SEARCH_VERBS = /^\s*(grep|rg|ripgrep|ack|ag|awk|sed -n)\b/;
+      const LIST_VERBS = /^\s*(ls|find|tree|git ls-files)\b/;
+      return {
+        isRead: READ_VERBS.test(cmd),
+        isSearch: SEARCH_VERBS.test(cmd),
+        isList: LIST_VERBS.test(cmd),
+      };
+    },
+  });
 }
 
 function safeReadBackgroundOutput(path: string): string {

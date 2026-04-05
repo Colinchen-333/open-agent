@@ -1,6 +1,7 @@
 import type { ToolDefinition, ToolContext } from './types.js';
 import type { SkillCatalogEntry, ResolvedSkillInvocation } from '@open-agent/skills';
 import { truncateSummary } from './tool-summary.js';
+import { withToolDefaults } from './tool-defaults.js';
 
 export interface SkillDeps {
   resolveSkill?: (name: string, args?: string) => Promise<ResolvedSkillInvocation | null>;
@@ -9,7 +10,7 @@ export interface SkillDeps {
 }
 
 export function createSkillTool(deps: SkillDeps): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'Skill',
     description: 'Resolve and apply a named skill workflow within the conversation.',
     getToolUseSummary(input: { skill: string }, _result, isError) {
@@ -62,5 +63,5 @@ export function createSkillTool(deps: SkillDeps): ToolDefinition {
         return `Error executing skill "${skill}": ${err instanceof Error ? err.message : String(err)}`;
       }
     },
-  };
+  });
 }

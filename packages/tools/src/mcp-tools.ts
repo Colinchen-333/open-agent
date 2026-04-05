@@ -1,4 +1,5 @@
 import type { ToolDefinition, ToolContext } from './types.js';
+import { withToolDefaults } from './tool-defaults.js';
 
 export interface McpToolsDeps {
   listResources: (
@@ -8,7 +9,7 @@ export interface McpToolsDeps {
 }
 
 export function createListMcpResourcesTool(deps: McpToolsDeps): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'ListMcpResourcesTool',
     description: 'List available resources from configured MCP servers.',
     isReadOnly: true,
@@ -24,11 +25,11 @@ export function createListMcpResourcesTool(deps: McpToolsDeps): ToolDefinition {
       if (resources.length === 0) return 'No resources available.';
       return JSON.stringify(resources, null, 2);
     },
-  };
+  });
 }
 
 export function createReadMcpResourceTool(deps: McpToolsDeps): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'ReadMcpResourceTool',
     description: 'Read a specific resource from an MCP server.',
     isReadOnly: true,
@@ -44,5 +45,5 @@ export function createReadMcpResourceTool(deps: McpToolsDeps): ToolDefinition {
     async execute(input: any, _ctx: ToolContext) {
       return await deps.readResource(input.server, input.uri);
     },
-  };
+  });
 }

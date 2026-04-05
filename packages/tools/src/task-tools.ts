@@ -1,4 +1,5 @@
 import type { ToolDefinition, ToolContext } from './types.js';
+import { withToolDefaults } from './tool-defaults.js';
 
 export interface TaskToolsDeps {
   createTask: (params: {
@@ -25,7 +26,7 @@ export interface TaskToolsDeps {
 }
 
 export function createTaskCreateTool(deps: TaskToolsDeps): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'TaskCreate',
     description: 'Create a new task in the task list for tracking progress on complex work.',
     inputSchema: {
@@ -49,11 +50,11 @@ export function createTaskCreateTool(deps: TaskToolsDeps): ToolDefinition {
       const result = await deps.createTask(input);
       return `Task #${result.id} created successfully: ${result.subject}`;
     },
-  };
+  });
 }
 
 export function createTaskUpdateTool(deps: TaskToolsDeps): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'TaskUpdate',
     description: 'Update a task status, details, or dependencies.',
     inputSchema: {
@@ -76,11 +77,11 @@ export function createTaskUpdateTool(deps: TaskToolsDeps): ToolDefinition {
       await deps.updateTask(input);
       return `Updated task #${input.taskId}${input.status ? ' status' : ''}`;
     },
-  };
+  });
 }
 
 export function createTaskGetTool(deps: TaskToolsDeps): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'TaskGet',
     description: 'Retrieve a task by its ID with full details.',
     isReadOnly: true,
@@ -96,11 +97,11 @@ export function createTaskGetTool(deps: TaskToolsDeps): ToolDefinition {
       if (!task) return `Task #${input.taskId} not found`;
       return JSON.stringify(task, null, 2);
     },
-  };
+  });
 }
 
 export function createTaskListTool(deps: TaskToolsDeps): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'TaskList',
     description: 'List all tasks in the current task list.',
     isReadOnly: true,
@@ -118,5 +119,5 @@ export function createTaskListTool(deps: TaskToolsDeps): ToolDefinition {
         })
         .join('\n');
     },
-  };
+  });
 }

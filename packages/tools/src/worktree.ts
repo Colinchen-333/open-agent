@@ -2,6 +2,7 @@ import type { ToolDefinition, ToolContext } from './types.js';
 import { randomUUID } from 'crypto';
 import { mkdirSync } from 'fs';
 import { exec } from '@open-agent/core';
+import { withToolDefaults } from './tool-defaults.js';
 
 // ---------------------------------------------------------------------------
 // Reusable worktree utility functions
@@ -84,7 +85,7 @@ export async function hasWorktreeChanges(worktreePath: string): Promise<boolean>
 // ---------------------------------------------------------------------------
 
 export function createEnterWorktreeTool(): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'EnterWorktree',
     description:
       'Create an isolated git worktree to work on a separate branch without affecting the main working tree.',
@@ -108,5 +109,5 @@ export function createEnterWorktreeTool(): ToolDefinition {
         message: `Created worktree at ${worktreePath} on branch ${worktreeBranch}`,
       };
     },
-  };
+  });
 }

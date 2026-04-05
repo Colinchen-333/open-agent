@@ -1,5 +1,6 @@
 import * as readline from 'readline/promises';
 import type { ToolDefinition } from './types.js';
+import { withToolDefaults } from './tool-defaults.js';
 
 interface QuestionOptionInput {
   label: string;
@@ -37,7 +38,7 @@ function renderMarkdownBox(content: string): void {
 }
 
 export function createAskUserTool(): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'AskUserQuestion',
     description: 'Ask the user one or more questions with structured multiple-choice options',
     isReadOnly: true,
@@ -161,5 +162,5 @@ export function createAskUserTool(): ToolDefinition {
         ...(input.metadata ? { metadata: input.metadata } : {}),
       };
     },
-  };
+  });
 }

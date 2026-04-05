@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from 'fs';
 import type { ToolDefinition } from './types.js';
+import { withToolDefaults } from './tool-defaults.js';
 
 interface NotebookCell {
   id?: string;
@@ -22,7 +23,7 @@ interface Notebook {
 }
 
 export function createNotebookEditTool(): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'NotebookEdit',
     description: 'Edit a Jupyter notebook cell',
     isConcurrencySafe: false,
@@ -109,7 +110,7 @@ export function createNotebookEditTool(): ToolDefinition {
         language: notebook.metadata?.kernelspec?.language || 'python',
       };
     },
-  };
+  });
 }
 
 function randomId(): string {

@@ -3,9 +3,10 @@ import { dirname } from 'path';
 import type { ToolDefinition, ToolContext, FileWriteInput } from './types.js';
 import { fileExists, writeText } from '@open-agent/core';
 import { summarizeFilePath } from './tool-summary.js';
+import { withToolDefaults } from './tool-defaults.js';
 
 export function createWriteTool(): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'Write',
     description: 'Write content to a file, creating it or overwriting it entirely. Creates parent directories as needed.',
     isConcurrencySafe: false,
@@ -56,5 +57,5 @@ export function createWriteTool(): ToolDefinition {
         lineCount,
       };
     },
-  };
+  });
 }

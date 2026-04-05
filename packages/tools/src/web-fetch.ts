@@ -1,5 +1,6 @@
 import type { ToolDefinition } from './types.js';
 import { truncateSummary } from './tool-summary.js';
+import { withToolDefaults } from './tool-defaults.js';
 
 // Simple in-memory cache with 15-minute TTL for fetched URL content.
 const CACHE_TTL_MS = 15 * 60 * 1000;
@@ -106,7 +107,7 @@ export function htmlToMarkdown(html: string): string {
 }
 
 export function createWebFetchTool(): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'WebFetch',
     // The `prompt` field is included so the LLM can describe what it wants
     // from the page. The actual content processing is performed by the LLM
@@ -233,5 +234,5 @@ export function createWebFetchTool(): ToolDefinition {
         };
       }
     },
-  };
+  });
 }

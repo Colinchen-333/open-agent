@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'fs';
 import { buildTaskOrchestrationTemplates } from '@open-agent/core';
 import type { ToolDefinition, ToolContext } from './types.js';
+import { withToolDefaults } from './tool-defaults.js';
 import {
   getBackgroundTask,
   getBackgroundTaskRegistry,
@@ -90,7 +91,7 @@ function buildAgentTaskEvent(taskId: string, info: BackgroundAgentInfo): Record<
 }
 
 export function createTaskOutputTool(deps?: TaskManagementDeps): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'TaskOutput',
     description: 'Retrieves output from a running or completed task (background shell command or background agent).',
     isReadOnly: true,
@@ -235,11 +236,11 @@ export function createTaskOutputTool(deps?: TaskManagementDeps): ToolDefinition 
 
       return `Error: No task found with ID "${taskId}". The task may have expired or the ID is incorrect.`;
     },
-  };
+  });
 }
 
 export function createTaskStopTool(deps?: TaskManagementDeps): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'TaskStop',
     description: 'Stops a running background task (shell command or agent) by its ID.',
     inputSchema: {
@@ -289,5 +290,5 @@ export function createTaskStopTool(deps?: TaskManagementDeps): ToolDefinition {
 
       return `Error: No task found with ID "${taskId}". The task may have already completed or the ID is incorrect.`;
     },
-  };
+  });
 }

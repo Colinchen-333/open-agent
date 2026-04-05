@@ -1,4 +1,5 @@
 import type { ToolDefinition, ToolContext } from './types.js';
+import { withToolDefaults } from './tool-defaults.js';
 
 export interface PlanModeDeps {
   enterPlanMode: () => void;
@@ -25,7 +26,7 @@ export interface PlanModeEngineOpts {
 export function createEnterPlanModeTool(deps: PlanModeDeps | PlanModeEngineOpts): ToolDefinition {
   if ('engine' in deps) {
     const { engine } = deps;
-    return {
+    return withToolDefaults({
       name: 'EnterPlanMode',
       description:
         'Enter plan mode to design an implementation approach before writing code. In plan mode, you can explore the codebase but cannot edit files.',
@@ -38,11 +39,11 @@ export function createEnterPlanModeTool(deps: PlanModeDeps | PlanModeEngineOpts)
         engine.pushMode('plan');
         return 'Entered plan mode. You can now explore the codebase and design your approach. Use ExitPlanMode when your plan is ready for user approval.';
       },
-    };
+    });
   }
 
   // Legacy PlanModeDeps form
-  return {
+  return withToolDefaults({
     name: 'EnterPlanMode',
     description:
       'Enter plan mode to design an implementation approach before writing code. In plan mode, you can explore the codebase but cannot edit files.',
@@ -58,7 +59,7 @@ export function createEnterPlanModeTool(deps: PlanModeDeps | PlanModeEngineOpts)
       deps.enterPlanMode();
       return 'Entered plan mode. You can now explore the codebase and design your approach. Use ExitPlanMode when your plan is ready for user approval.';
     },
-  };
+  });
 }
 
 /**
@@ -71,7 +72,7 @@ export function createEnterPlanModeTool(deps: PlanModeDeps | PlanModeEngineOpts)
 export function createExitPlanModeTool(deps: PlanModeDeps | PlanModeEngineOpts): ToolDefinition {
   if ('engine' in deps) {
     const { engine } = deps;
-    return {
+    return withToolDefaults({
       name: 'ExitPlanMode',
       description:
         'Exit plan mode after finishing your plan. The user will review and approve your plan before implementation begins.',
@@ -100,11 +101,11 @@ export function createExitPlanModeTool(deps: PlanModeDeps | PlanModeEngineOpts):
         engine.popMode();
         return `Exited plan mode. The plan has been submitted for user approval.`;
       },
-    };
+    });
   }
 
   // Legacy PlanModeDeps form
-  return {
+  return withToolDefaults({
     name: 'ExitPlanMode',
     description:
       'Exit plan mode after finishing your plan. The user will review and approve your plan before implementation begins.',
@@ -136,5 +137,5 @@ export function createExitPlanModeTool(deps: PlanModeDeps | PlanModeEngineOpts):
       deps.exitPlanMode(input.allowedPrompts);
       return 'Exited plan mode. The plan has been submitted for user approval.';
     },
-  };
+  });
 }

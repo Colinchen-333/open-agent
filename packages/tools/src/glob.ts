@@ -3,6 +3,7 @@ import { statSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import type { ToolDefinition, ToolContext, GlobInput, GlobOutput } from './types.js';
 import { truncateSummary } from './tool-summary.js';
+import { withToolDefaults } from './tool-defaults.js';
 
 const MAX_FILES = 100;
 
@@ -27,7 +28,7 @@ function loadGitignorePatterns(cwd: string): string[] {
 }
 
 export function createGlobTool(): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'Glob',
     description: 'Find files matching a glob pattern, sorted by modification time (newest first). Returns up to 100 results.',
     isReadOnly: true,
@@ -82,5 +83,5 @@ export function createGlobTool(): ToolDefinition {
         truncated,
       };
     },
-  };
+  });
 }

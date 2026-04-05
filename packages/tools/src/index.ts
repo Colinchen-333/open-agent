@@ -78,3 +78,4 @@ export {
 export { createToolSearchTool, type ToolSearchDeps, type ToolSearchRegistry } from './tool-search.js';
 export { createSkillTool, type SkillDeps } from './skill-tool.js';
 export { getToolPromptDescriptions } from './tool-descriptions.js';
+export { withToolDefaults } from './tool-defaults.js';

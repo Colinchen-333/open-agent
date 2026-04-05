@@ -1,9 +1,10 @@
 import type { ToolDefinition, ToolContext, GrepInput, GrepOutput } from './types.js';
 import { exec } from '@open-agent/core';
 import { truncateSummary } from './tool-summary.js';
+import { withToolDefaults } from './tool-defaults.js';
 
 export function createGrepTool(): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'Grep',
     description: 'Search file contents using ripgrep (rg). Supports content, files_with_matches, and count output modes.',
     isReadOnly: true,
@@ -161,5 +162,9 @@ export function createGrepTool(): ToolDefinition {
         numLines: lines.length,
       };
     },
-  };
+    isResultTruncated: (output: unknown): boolean => {
+      const o = output as { matches?: unknown[]; truncated?: boolean; numLines?: number };
+      return o.truncated === true || (Array.isArray(o.matches) && o.matches.length >= 250);
+    },
+  });
 }

@@ -139,6 +139,34 @@ export interface ToolDefinition {
   /** When true, this tool is not surfaced in the initial tool list. It must be
    *  explicitly discovered via ToolSearch. Defaults to false. */
   shouldDefer?: boolean;
+
+  /** Maximum size of the tool's result in characters before truncation. Default: 100_000. */
+  maxResultSizeChars?: number;
+
+  /** How this tool reacts to user interrupt. 'cancel' = abort mid-execution,
+   *  'block' = run to completion. Default: 'cancel'. */
+  interruptBehavior?: 'cancel' | 'block';
+
+  /** Extract searchable text from the tool's output for transcript search. */
+  extractSearchText?: (output: unknown) => string;
+
+  /** Decide whether the result has been truncated (for UI indicators). */
+  isResultTruncated?: (output: unknown) => boolean;
+
+  /** For permission matcher pattern compilation. Returns a predicate that
+   *  tests whether a pattern (e.g., "git push*") matches this input. */
+  preparePermissionMatcher?: (input: unknown) => (pattern: string) => boolean;
+
+  /** For the permission classifier — categorize the action. */
+  isSearchOrReadCommand?: (input: unknown) => { isSearch: boolean; isRead: boolean; isList: boolean };
+
+  /** Mutates input in-place to add derived fields for observability (e.g., resolved paths). */
+  backfillObservableInput?: (input: unknown) => void;
+
+  /** Render helpers (string output for terminal renderer; ink renderer can overlay React). */
+  renderToolUseMessage?: (input: unknown) => string;
+  renderToolResultMessage?: (output: unknown) => string;
+  renderToolUseErrorMessage?: (error: unknown) => string;
 }
 
 export interface ToolContext {

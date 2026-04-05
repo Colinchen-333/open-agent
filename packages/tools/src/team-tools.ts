@@ -1,5 +1,6 @@
 import type { ToolDefinition, ToolContext } from './types.js';
 import { truncateSummary } from './tool-summary.js';
+import { withToolDefaults } from './tool-defaults.js';
 
 export interface TeamToolsDeps {
   createTeam: (name: string, description?: string) => Promise<{ teamName: string; configPath: string; scratchpadPath?: string }>;
@@ -16,7 +17,7 @@ export interface TeamToolsDeps {
 }
 
 export function createTeamCreateTool(deps: TeamToolsDeps): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'TeamCreate',
     description: 'Create a new team to coordinate multiple agents working on a project.',
     getToolUseSummary(input: { team_name?: string }, _result, isError) {
@@ -36,11 +37,11 @@ export function createTeamCreateTool(deps: TeamToolsDeps): ToolDefinition {
       const result = await deps.createTeam(input.team_name, input.description);
       return JSON.stringify(result);
     },
-  };
+  });
 }
 
 export function createTeamDeleteTool(deps: TeamToolsDeps): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'TeamDelete',
     description: 'Remove team and task directories when work is complete. The active team is automatically determined from the session context.',
     getToolUseSummary(_input: Record<string, never>, _result, isError) {
@@ -60,11 +61,11 @@ export function createTeamDeleteTool(deps: TeamToolsDeps): ToolDefinition {
       const result = await deps.deleteTeam(teamName);
       return JSON.stringify(result);
     },
-  };
+  });
 }
 
 export function createSendMessageTool(deps: TeamToolsDeps): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'SendMessage',
     description: `Send messages to agent teammates and handle protocol requests/responses in a team.
 
@@ -173,5 +174,5 @@ Message types:
 
       return JSON.stringify(result);
     },
-  };
+  });
 }

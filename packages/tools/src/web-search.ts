@@ -1,5 +1,6 @@
 import type { ToolDefinition, ToolContext } from './types.js';
 import { truncateSummary } from './tool-summary.js';
+import { withToolDefaults } from './tool-defaults.js';
 
 interface SearchResult {
   title: string;
@@ -160,7 +161,7 @@ async function duckDuckGoSearch(query: string, signal?: AbortSignal): Promise<Se
 }
 
 export function createWebSearchTool(): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'WebSearch',
     description:
       'Search the web and return results. Use this for current events and recent information.',
@@ -235,5 +236,5 @@ export function createWebSearchTool(): ToolDefinition {
         };
       }
     },
-  };
+  });
 }

@@ -2,9 +2,10 @@ import type { ToolDefinition, ToolContext } from './types.js';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
+import { withToolDefaults } from './tool-defaults.js';
 
 export function createConfigTool(): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'Config',
     description: 'Get or set configuration values.',
     inputSchema: {
@@ -57,5 +58,5 @@ export function createConfigTool(): ToolDefinition {
 
       return { success: false, error: 'Unknown operation' };
     },
-  };
+  });
 }

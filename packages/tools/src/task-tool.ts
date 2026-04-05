@@ -1,5 +1,6 @@
 import type { ToolDefinition, ToolContext } from './types.js';
 import { truncateSummary } from './tool-summary.js';
+import { withToolDefaults } from './tool-defaults.js';
 
 // Avoid circular dependency: runner factory is injected via deps
 export interface TaskToolDeps {
@@ -28,7 +29,7 @@ export interface TaskToolDeps {
 }
 
 export function createTaskTool(deps: TaskToolDeps): ToolDefinition {
-  return {
+  return withToolDefaults({
     name: 'Task',
     description: 'Launch a new agent to handle complex, multi-step tasks autonomously. Specify subagent_type to choose the agent type and prompt to describe the task.',
     timeout: 600_000, // 10 minutes — subagents may run complex multi-step tasks
@@ -127,5 +128,5 @@ export function createTaskTool(deps: TaskToolDeps): ToolDefinition {
         return `Error launching subagent (${description}): ${msg}`;
       }
     },
-  };
+  });
 }

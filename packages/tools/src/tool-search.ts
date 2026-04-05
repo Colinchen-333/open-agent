@@ -1,4 +1,5 @@
 import type { ToolDefinition, ToolContext } from './types.js';
+import { withToolDefaults } from './tool-defaults.js';
 
 export interface ToolSearchDeps {
   searchTools: (query: string) => Promise<{ name: string; description: string }[]>;
@@ -31,7 +32,7 @@ function isRegistryOpts(opts: ToolSearchDeps | ToolSearchRegistry): opts is Tool
 export function createToolSearchTool(opts: ToolSearchDeps | ToolSearchRegistry): ToolDefinition {
   if (isRegistryOpts(opts)) {
     // Registry-based mode: keyword-overlap ranking over deferred tools only
-    return {
+    return withToolDefaults({
       name: 'ToolSearch',
       description:
         'Search for deferred tools by natural-language query. Returns schemas of matching tools so they can be called in this turn.',
@@ -66,12 +67,12 @@ export function createToolSearchTool(opts: ToolSearchDeps | ToolSearchRegistry):
         scored.sort((a, b) => b.score - a.score);
         return { matches: scored.slice(0, max) };
       },
-    };
+    });
   }
 
   // Legacy callback-based mode: preserves the original ToolSearchDeps behaviour
   const deps = opts;
-  return {
+  return withToolDefaults({
     name: 'ToolSearch',
     description:
       'Search for available deferred tools. Use "select:<tool_name>" for direct selection, or keywords to search.',
@@ -127,5 +128,5 @@ export function createToolSearchTool(opts: ToolSearchDeps | ToolSearchRegistry):
 
       return limited.map((t) => `- ${t.name}: ${t.description}`).join('\n');
     },
-  };
+  });
 }
