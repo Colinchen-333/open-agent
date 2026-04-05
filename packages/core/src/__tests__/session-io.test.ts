@@ -1,7 +1,7 @@
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { projectHash, resolveSessionPath, SessionJsonlWriter } from '../session-io';
+import { projectHash, resolveSessionPath, SessionJsonlWriter, readJsonlSession } from '../session-io';
 
 describe('session-io path resolution', () => {
   test('projectHash is deterministic sha256 of cwd', () => {
@@ -49,5 +49,36 @@ describe('SessionJsonlWriter', () => {
     await w.append({ type: 'user', text: 'x' });
     await w.close();
     expect(existsSync(path)).toBe(true);
+  });
+});
+
+describe('readJsonlSession', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(`${tmpdir()}/oa-session-`);
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('reads back records in order', async () => {
+    const path = `${dir}/ok.jsonl`;
+    writeFileSync(path, '{"type":"user","text":"a"}\n{"type":"assistant","text":"b"}\n');
+    const records = await readJsonlSession(path);
+    expect(records).toEqual([
+      { type: 'user', text: 'a' },
+      { type: 'assistant', text: 'b' },
+    ]);
+  });
+
+  test('tolerates partial last line (crash recovery)', async () => {
+    const path = `${dir}/partial.jsonl`;
+    writeFileSync(path, '{"type":"user","text":"a"}\n{"type":"assista');
+    const records = await readJsonlSession(path);
+    expect(records).toEqual([{ type: 'user', text: 'a' }]);
+  });
+
+  test('returns empty array for missing file', async () => {
+    expect(await readJsonlSession(`${dir}/nope.jsonl`)).toEqual([]);
   });
 });
