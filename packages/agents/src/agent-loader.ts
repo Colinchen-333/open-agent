@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import type { AgentDefinition } from '@open-agent/core';
+import { loadMarkdownConfig } from '@open-agent/core';
 import { BUILTIN_AGENT_TYPES } from './types';
 
 export interface AgentLoaderDiagnostic {
@@ -192,4 +193,63 @@ export class AgentLoader {
   getDiagnostics(): AgentLoaderDiagnostic[] {
     return this.diagnostics.map((entry) => ({ ...entry }));
   }
+}
+
+/**
+ * Load user-defined agents from the two standard `.claude/agents/` directories
+ * using the shared markdown config loader infrastructure.
+ *
+ * - `<home>/.claude/agents/*.md`  (user layer)
+ * - `<cwd>/.claude/agents/*.md`   (project layer — wins on name collision)
+ *
+ * This is an additive alternative to `AgentLoader.loadDefaults()`. It returns
+ * plain `AgentDefinition` objects without the diagnostic machinery of the class.
+ */
+export async function loadUserAgents(
+  cwd: string,
+  home?: string,
+): Promise<AgentDefinition[]> {
+  const entries = await loadMarkdownConfig({ subdir: 'agents', cwd, home });
+
+  return entries.map(entry => {
+    const fm = entry.frontmatter;
+
+    const tools = Array.isArray(fm.tools)
+      ? (fm.tools as string[])
+      : undefined;
+
+    const disallowedTools = Array.isArray(fm.disallowedTools)
+      ? (fm.disallowedTools as string[])
+      : undefined;
+
+    const skills = Array.isArray(fm.skills)
+      ? (fm.skills as string[])
+      : undefined;
+
+    return {
+      name: typeof fm.name === 'string' ? fm.name : entry.name,
+      description: typeof fm.description === 'string' ? fm.description : '',
+      prompt: entry.body,
+      tools,
+      disallowedTools,
+      skills,
+      model: typeof fm.model === 'string'
+        ? (fm.model as AgentDefinition['model'])
+        : undefined,
+      maxTurns: typeof fm.maxTurns === 'number'
+        ? fm.maxTurns
+        : typeof fm.maxTurns === 'string'
+          ? parseInt(fm.maxTurns, 10)
+          : undefined,
+      mode: typeof fm.mode === 'string'
+        ? (fm.mode as AgentDefinition['mode'])
+        : undefined,
+      isolation: typeof fm.isolation === 'string'
+        ? (fm.isolation as AgentDefinition['isolation'])
+        : undefined,
+      allowBackgroundExecution: typeof fm.allowBackgroundExecution === 'boolean'
+        ? fm.allowBackgroundExecution
+        : undefined,
+    } satisfies AgentDefinition;
+  });
 }

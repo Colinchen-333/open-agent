@@ -1,4 +1,10 @@
 export * from './types.js';
+export { parseFrontmatter, type FrontmatterParseResult } from './frontmatter.js';
+export {
+  loadMarkdownConfig,
+  type MarkdownConfigEntry,
+  type LoadMarkdownConfigOptions,
+} from './markdown-config-loader.js';
 export {
   ConversationLoop,
   type ConversationLoopOptions,

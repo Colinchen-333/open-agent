@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { AgentLoader } from '../agent-loader.js';
+import { AgentLoader, loadUserAgents } from '../agent-loader.js';
 
 describe('AgentLoader', () => {
   let loader: AgentLoader;
@@ -228,6 +228,38 @@ describe('AgentLoader', () => {
     it('allows background execution', () => {
       const agent = loader.get('architecture-logic-reviewer')!;
       expect(agent.allowBackgroundExecution).toBe(true);
+    });
+  });
+
+  describe('loadUserAgents()', () => {
+    it('loads a .claude/agents/*.md file and returns an AgentDefinition', async () => {
+      const tmpHome = mkdtempSync(join(tmpdir(), 'oa-lua-home-'));
+      const agentDir = join(cwd, '.claude', 'agents');
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(
+        join(agentDir, 'test-agent.md'),
+        [
+          '---',
+          'description: A test user agent',
+          'tools: [Read, Bash]',
+          'maxTurns: 3',
+          '---',
+          'You are a helpful test agent.',
+        ].join('\n'),
+      );
+
+      try {
+        const agents = await loadUserAgents(cwd, tmpHome);
+        expect(agents.length).toBeGreaterThanOrEqual(1);
+        const agent = agents.find(a => a.name === 'test-agent');
+        expect(agent).toBeDefined();
+        expect(agent!.description).toBe('A test user agent');
+        expect(agent!.tools).toEqual(['Read', 'Bash']);
+        expect(agent!.maxTurns).toBe(3);
+        expect(agent!.prompt).toBe('You are a helpful test agent.');
+      } finally {
+        rmSync(tmpHome, { recursive: true, force: true });
+      }
     });
   });
 
