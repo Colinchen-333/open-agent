@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, test } from 'bun:test';
 import { HookExecutor } from '../executor.js';
 
 function makePreToolInput() {
@@ -63,4 +63,51 @@ describe('HookExecutor', () => {
     expect(after.additionalContext).toContain('project');
     expect(after.additionalContext).not.toContain('settings-v1');
   });
+});
+
+test('async hook does not block tool execution', async () => {
+  const startedAt = Date.now();
+  const executor = new HookExecutor();
+  executor.loadFromConfig({
+    PreToolUse: [{
+      command: "sleep 0.5 && echo '{\"continue\": true}'",
+      asyncTimeout: 30, // fire-and-forget mode
+    }],
+  });
+  const result = await executor.execute('PreToolUse', {
+    session_id: 'x',
+    transcript_path: '',
+    cwd: '/',
+    hook_event_name: 'PreToolUse',
+    tool_name: 'Bash',
+    tool_input: {},
+    tool_use_id: 't1',
+  });
+  const elapsed = Date.now() - startedAt;
+  expect(elapsed).toBeLessThan(200); // fire-and-forget: returns quickly
+  expect(result.continue).toBeTruthy();
+});
+
+test('shell hook receives stdin JSON with all HookInput fields', async () => {
+  const executor = new HookExecutor();
+  // This script reads stdin, saves it, then echoes a valid HookOutput.
+  const script = `cat > /tmp/hook-stdin-capture.json && echo '{"continue": true, "additionalContext": "ok"}'`;
+  executor.loadFromConfig({
+    PreToolUse: [{ command: script, timeout: 5 }],
+  });
+  await executor.execute('PreToolUse', {
+    session_id: 'sess-1',
+    transcript_path: '/tmp/t',
+    cwd: '/cwd',
+    hook_event_name: 'PreToolUse',
+    tool_name: 'Bash',
+    tool_input: { command: 'ls' },
+    tool_use_id: 'use-1',
+  });
+  const captured = JSON.parse(require('node:fs').readFileSync('/tmp/hook-stdin-capture.json', 'utf8'));
+  expect(captured.session_id).toBe('sess-1');
+  expect(captured.hook_event_name).toBe('PreToolUse');
+  expect(captured.tool_name).toBe('Bash');
+  expect(captured.tool_input).toEqual({ command: 'ls' });
+  expect(captured.tool_use_id).toBe('use-1');
 });

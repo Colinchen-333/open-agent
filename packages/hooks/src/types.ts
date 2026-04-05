@@ -196,6 +196,8 @@ export interface HookOutput {
   updatedInput?: Record<string, unknown>;
   /** Fine-grained permission decision. */
   permissionDecision?: 'allow' | 'deny' | 'ask';
+  /** Event-specific output overrides (e.g., MCP tool result rewriting). */
+  hookSpecificOutput?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +216,13 @@ export interface HookDefinition {
   command: string;
   /** Timeout in seconds (default: 30). */
   timeout?: number;
+  /**
+   * When set, the hook runs asynchronously in fire-and-forget mode; the caller
+   * returns `{ continue: true }` immediately without waiting for the process to
+   * finish. The hook still has up to `asyncTimeout` seconds to complete in the
+   * background, after which it receives SIGTERM.
+   */
+  asyncTimeout?: number;
   /**
    * Optional glob / regex pattern matched against tool_name for tool-related
    * events (PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest).

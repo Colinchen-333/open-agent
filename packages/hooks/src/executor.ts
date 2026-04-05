@@ -137,6 +137,15 @@ export class HookExecutor {
       const hook = shellHook.hook;
       if (!this.matchesHook(hook, input)) continue;
 
+      // Fire-and-forget path: spawn asynchronously, return immediately.
+      if (hook.asyncTimeout !== undefined) {
+        this.executeShellHookAsync(hook, input).catch((err) => {
+          console.error(`[HookExecutor] Async shell hook failed (${event}):`, err);
+        });
+        results.push({ continue: true });
+        continue;
+      }
+
       const timeoutMs = (hook.timeout ?? 30) * 1000;
       try {
         const result = await this.executeShellHook(hook, input, timeoutMs);
@@ -296,6 +305,46 @@ export class HookExecutor {
       // Non-JSON stdout is surfaced as additional context rather than ignored.
       return { continue: true, additionalContext: trimmed };
     }
+  }
+
+  /**
+   * Fire-and-forget variant: spawns the hook process and schedules a SIGTERM
+   * after `hook.asyncTimeout` seconds. The returned Promise resolves once the
+   * process has been started and stdin closed — the caller does NOT await the
+   * process exit.
+   */
+  private async executeShellHookAsync(hook: HookDefinition, input: HookInput): Promise<void> {
+    const inputJson = JSON.stringify(input);
+
+    const extraEnv: Record<string, string> = {
+      HOOK_INPUT: inputJson,
+      HOOK_EVENT: input.hook_event_name,
+    };
+    if ('tool_name' in input) {
+      extraEnv.HOOK_TOOL_NAME = (input as { tool_name: string }).tool_name;
+    }
+    if ('tool_input' in input) {
+      try {
+        extraEnv.HOOK_TOOL_INPUT = JSON.stringify((input as { tool_input: unknown }).tool_input);
+      } catch {
+        extraEnv.HOOK_TOOL_INPUT = '';
+      }
+    }
+
+    const proc = await spawnProcess(['bash', '-c', hook.command], { env: extraEnv });
+    proc.writeStdin(inputJson);
+    proc.closeStdin();
+
+    // Schedule SIGTERM after asyncTimeout seconds; unref so this timer does not
+    // prevent the Node/Bun process from exiting naturally.
+    const asyncTimeoutMs = (hook.asyncTimeout ?? 30) * 1000;
+    const timer = setTimeout(() => proc.kill('SIGTERM'), asyncTimeoutMs);
+    if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
+      (timer as NodeJS.Timeout).unref();
+    }
+
+    // When the process exits on its own, clear the timer.
+    proc.exited.finally(() => clearTimeout(timer)).catch(() => {/* ignore */});
   }
 
   /**
