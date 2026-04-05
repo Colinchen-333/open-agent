@@ -1,5 +1,5 @@
 import type { ToolDefinition, ToolContext, FileEditInput } from './types.js';
-import { fileExists, readText, writeText } from '@open-agent/core';
+import { fileExists, readText, writeText, fileHistory, feature } from '@open-agent/core';
 import { summarizeFilePath } from './tool-summary.js';
 import { withToolDefaults } from './tool-defaults.js';
 
@@ -139,6 +139,11 @@ export function createEditTool(): ToolDefinition {
       const newContent = input.replace_all
         ? content.replaceAll(input.old_string, input.new_string)
         : content.replace(input.old_string, input.new_string);
+
+      // Snapshot current file state for /rewind support before overwriting.
+      if (feature('FILE_HISTORY') && ctx.sessionId && ctx.toolUseId) {
+        await fileHistory.trackEdit(ctx.sessionId, ctx.toolUseId, input.file_path);
+      }
 
       await writeText(input.file_path, newContent);
 

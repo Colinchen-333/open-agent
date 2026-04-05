@@ -725,51 +725,30 @@ const SLASH_COMMANDS: Record<
     },
   },
   '/rewind': {
-    description: 'List checkpoints or restore a prior file state (/rewind <number>)',
+    description: 'Restore files to their state N turns ago (/rewind <n>, default 1)',
     handler: async (args, ctx) => {
-      const checkpoints = ctx.checkpoint?.list() ?? [];
-      if (checkpoints.length === 0) {
-        return { handled: true, output: 'No checkpoints available.' };
-      }
-
-      const n = args.trim() ? parseInt(args.trim(), 10) : NaN;
-
-      // No argument — list available checkpoints.
-      if (isNaN(n)) {
-        const lines = checkpoints.map((cp, i) =>
-          `  ${i + 1}. [${cp.toolUseId.slice(0, 8)}] ${cp.filePath} (${new Date(cp.timestamp).toLocaleTimeString()})`,
-        );
+      const turnsArg = args?.trim() ?? '1';
+      const turns = turnsArg === '' ? 1 : parseInt(turnsArg, 10);
+      if (isNaN(turns) || turns < 1) {
         return {
           handled: true,
-          output: `Checkpoints:\n${lines.join('\n')}\n\nUse /rewind <number> to restore.`,
+          output: 'Usage: /rewind <n> where n is the number of turns to rewind (default 1)',
         };
       }
-
-      // Argument provided — restore to the selected checkpoint.
-      if (n < 1 || n > checkpoints.length) {
+      const { fileHistory } = await import('@open-agent/core');
+      // sessionId is always present on SlashCommandContext (required field).
+      const sessionId = ctx.sessionId ?? 'default';
+      const restored = await fileHistory.rewind(sessionId, turns);
+      if (restored.length === 0) {
         return {
           handled: true,
-          output: `Invalid checkpoint number. Must be between 1 and ${checkpoints.length}.`,
+          output: `Nothing to rewind (no file history snapshots for session ${sessionId}).\n\nNote: file history tracking requires the FILE_HISTORY feature flag to be enabled.`,
         };
       }
-
-      const target = checkpoints[n - 1];
-      const { restored, errors } = ctx.checkpoint!.rewindTo(target.toolUseId);
-
-      const lines: string[] = [];
-      if (restored.length > 0) {
-        lines.push(`Restored ${restored.length} file(s):`);
-        for (const f of restored) lines.push(`  - ${f}`);
-      }
-      if (errors.length > 0) {
-        lines.push(`Errors (${errors.length}):`);
-        for (const e of errors) lines.push(`  - ${e}`);
-      }
-      if (lines.length === 0) {
-        lines.push('Nothing to restore.');
-      }
-
-      return { handled: true, output: lines.join('\n') };
+      return {
+        handled: true,
+        output: `Rewound ${turns} turn(s). Restored ${restored.length} file(s):\n${restored.map((f) => `  - ${f}`).join('\n')}`,
+      };
     },
   },
 };

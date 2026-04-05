@@ -98,3 +98,8 @@ export {
   FEATURE_FLAG_DEFAULTS,
   type FeatureFlagName,
 } from './feature-flags.js';
+export {
+  FileHistoryStore,
+  fileHistory,
+  type FileSnapshot,
+} from './file-history.js';

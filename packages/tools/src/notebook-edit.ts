@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from 'fs';
-import type { ToolDefinition } from './types.js';
+import type { ToolDefinition, ToolContext } from './types.js';
+import { fileHistory, feature } from '@open-agent/core';
 import { withToolDefaults } from './tool-defaults.js';
 
 interface NotebookCell {
@@ -47,8 +48,13 @@ export function createNotebookEditTool(): ToolDefinition {
         cell_type?: 'code' | 'markdown';
         edit_mode?: 'replace' | 'insert' | 'delete';
       },
-      _ctx,
+      ctx: ToolContext,
     ) {
+      // Snapshot current notebook state for /rewind support before overwriting.
+      if (feature('FILE_HISTORY') && ctx.sessionId && ctx.toolUseId) {
+        await fileHistory.trackEdit(ctx.sessionId, ctx.toolUseId, input.notebook_path);
+      }
+
       const originalFile = readFileSync(input.notebook_path, 'utf-8');
       const notebook: Notebook = JSON.parse(originalFile);
       const cells = notebook.cells || [];

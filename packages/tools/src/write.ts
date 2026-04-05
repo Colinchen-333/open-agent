@@ -1,7 +1,7 @@
 import { mkdir } from 'fs/promises';
 import { dirname } from 'path';
 import type { ToolDefinition, ToolContext, FileWriteInput } from './types.js';
-import { fileExists, writeText } from '@open-agent/core';
+import { fileExists, writeText, fileHistory, feature } from '@open-agent/core';
 import { summarizeFilePath } from './tool-summary.js';
 import { withToolDefaults } from './tool-defaults.js';
 
@@ -40,6 +40,11 @@ export function createWriteTool(): ToolDefinition {
           `You must use the Read tool to read ${input.file_path} before overwriting it. ` +
           `This ensures you have the current file contents. If this is a new file, it should not already exist.`
         );
+      }
+
+      // Snapshot current file state for /rewind support before overwriting.
+      if (feature('FILE_HISTORY') && ctx.sessionId && ctx.toolUseId) {
+        await fileHistory.trackEdit(ctx.sessionId, ctx.toolUseId, input.file_path);
       }
 
       // Ensure parent directory exists
