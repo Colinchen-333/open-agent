@@ -10,3 +10,10 @@ dist/
 
 # Compiled binary
 apps/cli/open-agent
+
+# Runtime state
+.open-agent/
+
+# Editor / tooling metadata
+.serena/
+.claude/worktrees/
