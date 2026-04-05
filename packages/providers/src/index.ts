@@ -9,6 +9,8 @@ export type {
   ChatOptions,
   ToolSpec,
   ServerToolSpec,
+  ProviderCapabilities,
+  ProviderSupportMode,
 } from './types.js';
 
 export { AnthropicProvider } from './anthropic.js';

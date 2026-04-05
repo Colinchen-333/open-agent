@@ -460,25 +460,52 @@ export class AnthropicProvider implements LLMProvider {
         value: 'claude-opus-4-6',
         displayName: 'Claude Opus 4.6',
         description: 'Most capable model for complex tasks',
+        supportsThinking: true,
         supportsAdaptiveThinking: true,
         supportsEffort: true,
         supportedEffortLevels: ['low', 'medium', 'high', 'max'],
+        supportsStructuredOutput: true,
+        supportsImages: true,
+        supportsServerTools: true,
       },
       {
         value: 'claude-sonnet-4-6',
         displayName: 'Claude Sonnet 4.6',
         description: 'Balanced performance and speed',
+        supportsThinking: true,
         supportsAdaptiveThinking: true,
         supportsEffort: true,
         supportedEffortLevels: ['low', 'medium', 'high'],
+        supportsStructuredOutput: true,
+        supportsImages: true,
+        supportsServerTools: true,
       },
       {
         value: 'claude-haiku-4-5-20251001',
         displayName: 'Claude Haiku 4.5',
         description: 'Fast and affordable for lightweight tasks',
+        supportsThinking: true,
         supportsEffort: true,
         supportedEffortLevels: ['low', 'medium', 'high'],
+        supportsStructuredOutput: true,
+        supportsImages: true,
+        supportsServerTools: true,
       },
     ];
+  }
+
+  async getCapabilities(model?: string) {
+    const models = await this.listModels();
+    const matched = model ? models.find((entry) => entry.value === model) : undefined;
+    return {
+      provider: this.name,
+      ...(model ? { model } : {}),
+      thinking: 'native' as const,
+      structuredOutput: 'best_effort' as const,
+      toolUse: 'native' as const,
+      serverTools: 'native' as const,
+      supportsAdaptiveThinking: matched?.supportsAdaptiveThinking ?? true,
+      supportedEffortLevels: matched?.supportedEffortLevels ?? ['low', 'medium', 'high', 'max'],
+    };
   }
 }

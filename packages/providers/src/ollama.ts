@@ -340,11 +340,28 @@ export class OllamaProvider implements LLMProvider {
         value: m.name,
         displayName: m.name,
         description: `Ollama local model (${formatBytes(m.size)})`,
+        supportsThinking: false,
         supportsEffort: false,
+        supportsStructuredOutput: false,
+        supportsImages: false,
+        supportsServerTools: false,
       }));
     } catch {
       return [];
     }
+  }
+
+  async getCapabilities(model?: string) {
+    return {
+      provider: this.name,
+      ...(model ? { model } : {}),
+      thinking: 'unsupported' as const,
+      structuredOutput: 'unsupported' as const,
+      toolUse: 'native' as const,
+      serverTools: 'unsupported' as const,
+      supportsAdaptiveThinking: false,
+      supportedEffortLevels: [],
+    };
   }
 }
 

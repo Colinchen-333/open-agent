@@ -382,28 +382,59 @@ export class OpenAIProvider implements LLMProvider {
         value: 'gpt-4o',
         displayName: 'GPT-4o',
         description: 'Most capable OpenAI model',
+        supportsThinking: false,
         supportsEffort: false,
+        supportsStructuredOutput: true,
+        supportsImages: true,
+        supportsServerTools: false,
       },
       {
         value: 'gpt-4o-mini',
         displayName: 'GPT-4o Mini',
         description: 'Fast and cost-effective',
+        supportsThinking: false,
         supportsEffort: false,
+        supportsStructuredOutput: true,
+        supportsImages: true,
+        supportsServerTools: false,
       },
       {
         value: 'o3',
         displayName: 'o3',
         description: 'Advanced reasoning model',
+        supportsThinking: false,
         supportsEffort: true,
         supportedEffortLevels: ['low', 'medium', 'high'],
+        supportsStructuredOutput: true,
+        supportsImages: true,
+        supportsServerTools: false,
       },
       {
         value: 'o4-mini',
         displayName: 'o4-mini',
         description: 'Fast reasoning model',
+        supportsThinking: false,
         supportsEffort: true,
         supportedEffortLevels: ['low', 'medium', 'high'],
+        supportsStructuredOutput: true,
+        supportsImages: true,
+        supportsServerTools: false,
       },
     ];
+  }
+
+  async getCapabilities(model?: string) {
+    const models = await this.listModels();
+    const matched = model ? models.find((entry) => entry.value === model) : undefined;
+    return {
+      provider: this.name,
+      ...(model ? { model } : {}),
+      thinking: 'unsupported' as const,
+      structuredOutput: 'native' as const,
+      toolUse: 'native' as const,
+      serverTools: 'unsupported' as const,
+      supportsAdaptiveThinking: matched?.supportsAdaptiveThinking ?? false,
+      supportedEffortLevels: matched?.supportedEffortLevels ?? [],
+    };
   }
 }

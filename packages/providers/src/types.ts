@@ -3,7 +3,21 @@ import type { ModelInfo, ThinkingConfig } from '@open-agent/core';
 export interface LLMProvider {
   chat(messages: Message[], options: ChatOptions): AsyncGenerator<StreamEvent>;
   listModels(): Promise<ModelInfo[]>;
+  getCapabilities?(model?: string): Promise<ProviderCapabilities>;
   readonly name: string;
+}
+
+export type ProviderSupportMode = 'native' | 'best_effort' | 'unsupported';
+
+export interface ProviderCapabilities {
+  provider: string;
+  model?: string;
+  thinking: ProviderSupportMode;
+  structuredOutput: ProviderSupportMode;
+  toolUse: ProviderSupportMode;
+  serverTools: ProviderSupportMode;
+  supportsAdaptiveThinking: boolean;
+  supportedEffortLevels: ('low' | 'medium' | 'high' | 'max')[];
 }
 
 export interface Message {

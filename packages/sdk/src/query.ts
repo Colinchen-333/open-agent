@@ -51,6 +51,7 @@ import {
   getToolPromptDescriptions,
   listPersistedBackgroundTasks,
 } from '@open-agent/tools';
+import type { ToolDefinition, ToolCapabilityExportEntry } from '@open-agent/tools';
 import { autoDetectProvider, createProvider, calculateCost } from '@open-agent/providers';
 import type { Message, LLMProvider } from '@open-agent/providers';
 import {
@@ -72,11 +73,16 @@ import type {
   RewindFilesResult,
   AgentInfo,
   BackgroundTaskInspection,
+  ProviderCapabilityRecord,
   RuntimeControlPlaneSnapshot,
   RuntimeDiagnosticListOptions,
   RuntimeDiagnosticRecord,
+  RuntimeToolMutationResult,
+  RuntimeToolRemovalResult,
   OrchestrationControlPlaneSnapshot,
   OrchestrationControlPlaneOptions,
+  SessionStateSnapshot,
+  SubagentRecord,
   TaskListOptions,
   TaskCreateInput,
   TaskUpdateInput,
@@ -254,6 +260,7 @@ export function query(
   function pushQueuedInput(msg: SDKUserMessage): void {
     if (inputClosed) return;
     queuedInputs.push(msg);
+    sessionLastActivityAt = new Date().toISOString();
     notifyQueue();
   }
 
@@ -264,6 +271,7 @@ export function query(
       });
     }
     if (queuedInputs.length > 0) {
+      sessionLastActivityAt = new Date().toISOString();
       return queuedInputs.shift()!;
     }
     if (sourcePumpError) {
@@ -285,6 +293,11 @@ export function query(
         }
       } catch (error) {
         sourcePumpError = error instanceof Error ? error : new Error(String(error));
+        touchSessionState({
+          status: 'failed',
+          activeTurn: false,
+          lastError: sourcePumpError.message,
+        });
       } finally {
         sourceExhausted = true;
         // When idleOnPromptExhaustion is enabled, keep accepting input via
@@ -1508,6 +1521,12 @@ export function query(
     promptContext.sections.some((section) => section.key === key);
 
   let activeModel = model;
+  let sessionLifecycleStatus: SessionStateSnapshot['status'] = 'idle';
+  let sessionLastActivityAt = new Date().toISOString();
+  let sessionLastResultAt: string | undefined;
+  let sessionIdleReason: string | undefined;
+  let sessionLastError: string | undefined;
+  let sessionActiveTurn = false;
   let coordinatorTaskNotificationsForPrompt: Array<Pick<
     SDKTaskNotificationMessage,
     'task_id' | 'status' | 'team_name' | 'description' | 'orchestration_templates'
@@ -1691,6 +1710,43 @@ export function query(
   };
 
   syncAppRuntimeControlPlane();
+
+  const touchSessionState = (patch: Partial<Pick<
+    SessionStateSnapshot,
+    'status' | 'lastResultAt' | 'idleReason' | 'lastError' | 'activeTurn'
+  >> = {}): void => {
+    sessionLifecycleStatus = patch.status ?? sessionLifecycleStatus;
+    if ('lastResultAt' in patch) {
+      sessionLastResultAt = patch.lastResultAt;
+    }
+    if ('idleReason' in patch) {
+      sessionIdleReason = patch.idleReason;
+    }
+    if ('lastError' in patch) {
+      sessionLastError = patch.lastError;
+    }
+    sessionActiveTurn = patch.activeTurn ?? sessionActiveTurn;
+    sessionLastActivityAt = new Date().toISOString();
+  };
+
+  const readSessionStateSnapshot = (): SessionStateSnapshot => ({
+    sessionId,
+    status: sessionLifecycleStatus,
+    activeTurn: sessionActiveTurn,
+    canAcceptInput: typeof prompt !== 'string'
+      && !inputClosed
+      && !internalAbortController.signal.aborted
+      && sessionLifecycleStatus !== 'running'
+      && sessionLifecycleStatus !== 'closed',
+    pendingInputCount: queuedInputs.length,
+    model: activeModel,
+    permissionMode: appStore.getState().permissionMode,
+    activeTeamName,
+    lastActivityAt: sessionLastActivityAt,
+    ...(sessionLastResultAt ? { lastResultAt: sessionLastResultAt } : {}),
+    ...(sessionIdleReason ? { idleReason: sessionIdleReason } : {}),
+    ...(sessionLastError ? { lastError: sessionLastError } : {}),
+  });
 
   const upsertDispatcherStoreRecord = (record: TaskDispatcherRecord) => {
     appStore.setState((prev) => upsertDispatcherControlPlane(prev, {
@@ -2027,6 +2083,12 @@ export function query(
           // deciding whether to yield it or retry with the fallback model.
           let resultMessage: SDKMessage | undefined;
           let modelError: Error | undefined;
+          touchSessionState({
+            status: 'running',
+            activeTurn: true,
+            idleReason: undefined,
+            lastError: undefined,
+          });
           try {
             for await (const msg of loop.run(prompt)) {
               yield* flushPendingSubagentMessages();
@@ -2086,6 +2148,11 @@ export function query(
           }
 
           if (modelError) {
+            touchSessionState({
+              status: 'failed',
+              activeTurn: false,
+              lastError: modelError.message,
+            });
             // Switch to fallbackModel and retry once if this looks like a model error.
             if (options.fallbackModel && !usedFallback && isModelError(modelError)) {
               usedFallback = true;
@@ -2113,6 +2180,13 @@ export function query(
               }
             }
           } else {
+            touchSessionState({
+              status: 'idle',
+              activeTurn: false,
+              lastResultAt: new Date().toISOString(),
+              idleReason: typeof prompt === 'string' ? 'turn_complete' : sessionIdleReason,
+              lastError: undefined,
+            });
             // Normal completion — yield the buffered result message.
             if (resultMessage && !resultEmittedForTurn) {
               yield* flushPendingSubagentMessages();
@@ -2143,6 +2217,12 @@ export function query(
 
           let modelError: Error | undefined;
           let resultMessage: SDKMessage | undefined;
+          touchSessionState({
+            status: 'running',
+            activeTurn: true,
+            idleReason: undefined,
+            lastError: undefined,
+          });
           try {
             for await (const msg of loop.run(userPrompt)) {
               yield* flushPendingSubagentMessages();
@@ -2198,6 +2278,11 @@ export function query(
           }
 
           if (modelError) {
+            touchSessionState({
+              status: 'failed',
+              activeTurn: false,
+              lastError: modelError.message,
+            });
             if (options.fallbackModel && !multiturnUsedFallback && isModelError(modelError)) {
               multiturnUsedFallback = true;
               activeModel = options.fallbackModel;
@@ -2242,6 +2327,15 @@ export function query(
           if (resultMessage && !resultEmittedForTurn) {
             yield* flushPendingSubagentMessages();
             yield resultMessage;
+          }
+          if (!modelError) {
+            touchSessionState({
+              status: 'idle',
+              activeTurn: false,
+              lastResultAt: new Date().toISOString(),
+              idleReason: sourceExhausted ? 'awaiting_input' : 'awaiting_input',
+              lastError: undefined,
+            });
           }
         }
       }
@@ -2969,10 +3063,17 @@ export function query(
   }
 
   queryObj.interrupt = async () => {
+    touchSessionState({
+      status: 'closed',
+      activeTurn: false,
+      idleReason: 'interrupted',
+    });
     abortQuery(true);
     cleanupQueryResources();
     finalizeGenerator();
   };
+
+  queryObj.getSessionState = async () => readSessionStateSnapshot();
 
   queryObj.setPermissionMode = async (mode) => {
     if (mode !== undefined) {
@@ -3069,6 +3170,47 @@ export function query(
   };
 
   queryObj.supportedModels = async () => provider.listModels();
+
+  queryObj.getProviderCapabilities = async (requestedModel?: string): Promise<ProviderCapabilityRecord> => {
+    const resolvedModel = normalizeOptionalString(requestedModel) ?? activeModel;
+    const modelInfo = (await queryObj.supportedModels()).find((entry) => entry.value === resolvedModel);
+    const providerCapabilities = provider.getCapabilities
+      ? await provider.getCapabilities(resolvedModel)
+      : null;
+    return {
+      provider: providerCapabilities?.provider ?? provider.name,
+      model: providerCapabilities?.model ?? resolvedModel,
+      thinkingMode: providerCapabilities?.thinking ?? ((modelInfo?.supportsThinking ?? provider.name === 'anthropic') ? 'native' : 'unsupported'),
+      structuredOutputMode: providerCapabilities?.structuredOutput ?? ((modelInfo?.supportsStructuredOutput ?? provider.name !== 'ollama') ? 'native' : 'unsupported'),
+      toolUseMode: providerCapabilities?.toolUse ?? 'native',
+      serverToolsMode: providerCapabilities?.serverTools ?? ((modelInfo?.supportsServerTools ?? provider.name === 'anthropic') ? 'native' : 'unsupported'),
+      supportsThinking: providerCapabilities
+        ? providerCapabilities.thinking === 'native'
+        : (modelInfo?.supportsThinking ?? provider.name === 'anthropic'),
+      supportsAdaptiveThinking: providerCapabilities?.supportsAdaptiveThinking
+        ?? modelInfo?.supportsAdaptiveThinking
+        ?? provider.name === 'anthropic',
+      supportsStructuredOutput: providerCapabilities
+        ? providerCapabilities.structuredOutput === 'native'
+        : (modelInfo?.supportsStructuredOutput ?? provider.name !== 'ollama'),
+      supportsImages: modelInfo?.supportsImages ?? provider.name !== 'ollama',
+      supportsServerTools: providerCapabilities
+        ? providerCapabilities.serverTools === 'native'
+        : (modelInfo?.supportsServerTools ?? provider.name === 'anthropic'),
+      supportsEffort: modelInfo?.supportsEffort ?? provider.name === 'anthropic',
+      supportedEffortLevels: [
+        ...(providerCapabilities?.supportedEffortLevels ?? modelInfo?.supportedEffortLevels ?? []),
+      ],
+    };
+  };
+
+  queryObj.supportsThinking = async (requestedModel?: string) => (
+    (await queryObj.getProviderCapabilities(requestedModel)).supportsThinking
+  );
+
+  queryObj.supportsStructuredOutput = async (requestedModel?: string) => (
+    (await queryObj.getProviderCapabilities(requestedModel)).supportsStructuredOutput
+  );
 
   queryObj.mcpServerStatus = async () => {
     return runtime.listMcpServerStatus().map((conn) => ({
@@ -3804,6 +3946,52 @@ export function query(
     throw new Error(`Unsupported follow-up action tool: ${String((action as { tool?: unknown }).tool)}`);
   };
 
+  queryObj.listRegisteredTools = async (): Promise<ToolCapabilityExportEntry[]> => (
+    toolRegistry.listCapabilities().map((entry) => ({
+      ...entry,
+      ...(entry.tags ? { tags: [...entry.tags] } : {}),
+    }))
+  );
+
+  queryObj.registerRuntimeTools = async (tools: ToolDefinition[]): Promise<RuntimeToolMutationResult> => {
+    await runtimeReadyPromise;
+    if (setupToolsReady) {
+      await setupToolsReady;
+    }
+    const added: string[] = [];
+    const replaced: string[] = [];
+    for (const tool of tools) {
+      if (!tool || typeof tool.name !== 'string' || tool.name.trim().length === 0) {
+        throw new Error('registerRuntimeTools() requires every tool to have a non-empty name.');
+      }
+      if (toolRegistry.get(tool.name)) {
+        replaced.push(tool.name);
+      } else {
+        added.push(tool.name);
+      }
+      toolRegistry.register(tool);
+    }
+    refreshManagedSystemPrompt();
+    syncLoopToolsFromRegistry();
+    return { added, replaced };
+  };
+
+  queryObj.unregisterRuntimeTools = async (names: string[]): Promise<RuntimeToolRemovalResult> => {
+    const removed: string[] = [];
+    for (const name of names) {
+      const normalizedName = normalizeOptionalString(name);
+      if (!normalizedName) continue;
+      if (toolRegistry.unregister(normalizedName)) {
+        removed.push(normalizedName);
+      }
+    }
+    if (removed.length > 0) {
+      refreshManagedSystemPrompt();
+      syncLoopToolsFromRegistry();
+    }
+    return { removed };
+  };
+
   const emitStandaloneOrchestrationEvent = (event: SubagentStreamEvent): void => {
     const orchestrationEvent = convertSubagentEventToOrchestrationEvent(undefined, sessionId, event);
     if (!orchestrationEvent) return;
@@ -4031,6 +4219,13 @@ export function query(
   queryObj.stopWorker = async (workerId: string) => ({
     success: sdkAgentExecutor?.stopAgent(workerId) ?? false,
   });
+
+  queryObj.listRunningSubagents = async (options?: WorkerListOptions): Promise<SubagentRecord[]> => (
+    (await queryObj.listWorkers(options))
+      .filter((record) => record.status === 'spawning' || record.status === 'running' || record.status === 'idle')
+  );
+
+  queryObj.cancelSubagent = async (workerId: string) => queryObj.stopWorker(workerId);
 
   queryObj.listTasks = async (options?: TaskListOptions) => {
     const teamName = resolveTaskTeamName(options?.teamName);
@@ -5240,6 +5435,11 @@ export function query(
 
     const raw = await taskStopTool.execute({ task_id: taskId }, { cwd, sessionId });
     if (typeof raw === 'string' && raw.startsWith('Error: No task found')) {
+      touchSessionState({
+        status: 'closed',
+        activeTurn: false,
+        idleReason: 'stopped',
+      });
       abortQuery(false);
       cleanupQueryResources();
       finalizeGenerator();
@@ -5248,6 +5448,11 @@ export function query(
   };
 
   queryObj.close = () => {
+    touchSessionState({
+      status: 'closed',
+      activeTurn: false,
+      idleReason: 'closed',
+    });
     abortQuery(false);
     cleanupQueryResources();
     finalizeGenerator();

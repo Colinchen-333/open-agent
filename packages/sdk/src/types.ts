@@ -23,6 +23,7 @@ import type { LLMProvider } from '@open-agent/providers';
 import type { CapabilitySnapshot } from '@open-agent/runtime';
 import type { PluginConfig } from '@open-agent/plugins';
 import type { SkillCatalogEntry } from '@open-agent/skills';
+import type { ToolCapabilityExportEntry, ToolDefinition } from '@open-agent/tools';
 
 export type PermissionRuleValue = {
   toolName: string;
@@ -342,6 +343,46 @@ export interface RuntimeControlPlaneCapabilitySummary {
   dynamicTools: number;
 }
 
+export interface SessionStateSnapshot {
+  sessionId: string;
+  status: 'idle' | 'running' | 'closed' | 'failed';
+  activeTurn: boolean;
+  canAcceptInput: boolean;
+  pendingInputCount: number;
+  model: string;
+  permissionMode: PermissionMode;
+  activeTeamName: string | null;
+  lastActivityAt: string;
+  lastResultAt?: string;
+  idleReason?: string;
+  lastError?: string;
+}
+
+export interface ProviderCapabilityRecord {
+  provider: string;
+  model: string;
+  thinkingMode: 'native' | 'best_effort' | 'unsupported';
+  structuredOutputMode: 'native' | 'best_effort' | 'unsupported';
+  toolUseMode: 'native' | 'best_effort' | 'unsupported';
+  serverToolsMode: 'native' | 'best_effort' | 'unsupported';
+  supportsThinking: boolean;
+  supportsAdaptiveThinking: boolean;
+  supportsStructuredOutput: boolean;
+  supportsImages: boolean;
+  supportsServerTools: boolean;
+  supportsEffort: boolean;
+  supportedEffortLevels: NonNullable<ModelInfo['supportedEffortLevels']>;
+}
+
+export interface RuntimeToolMutationResult {
+  added: string[];
+  replaced: string[];
+}
+
+export interface RuntimeToolRemovalResult {
+  removed: string[];
+}
+
 export interface RuntimeControlPlaneSnapshot {
   sessionId: string;
   cwd: string;
@@ -455,6 +496,8 @@ export interface WorkerRecord {
 export interface WorkerListOptions {
   teamName?: string;
 }
+
+export type SubagentRecord = WorkerRecord;
 
 export interface WorkerFollowUpSuggestion {
   suggestion: string;
@@ -917,6 +960,8 @@ export interface FollowUpExecutionResult {
 export interface Query extends AsyncGenerator<SDKMessage, void> {
   /** Abort the running conversation (fires the AbortController if provided). */
   interrupt(): Promise<void>;
+  /** Return whether this query is idle, running, failed, or closed. */
+  getSessionState(): Promise<SessionStateSnapshot>;
   /** Dynamically change the permission mode mid-run. */
   setPermissionMode(mode: PermissionMode): Promise<void>;
   /** Swap the model mid-run (takes effect on the next LLM call). */
@@ -927,6 +972,12 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   supportedCommands(): Promise<SlashCommand[]>;
   /** Return the provider's model list. */
   supportedModels(): Promise<ModelInfo[]>;
+  /** Return capability flags for the active provider/model pair. */
+  getProviderCapabilities(model?: string): Promise<ProviderCapabilityRecord>;
+  /** Return whether the active provider/model exposes native thinking blocks. */
+  supportsThinking(model?: string): Promise<boolean>;
+  /** Return whether the active provider/model supports structured output natively. */
+  supportsStructuredOutput(model?: string): Promise<boolean>;
   /** Return available built-in agent profiles. */
   supportedAgents(): Promise<AgentInfo[]>;
   /** Return the resolved skill catalog for this session. */
@@ -980,6 +1031,12 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   subscribeTimeline(options?: SubscribeTimelineOptions): AsyncIterable<SDKTimelineItem>;
   /** Execute a structured follow-up scaffold without manually decoding Task / SendMessage arguments. */
   executeFollowUp(followUp: FollowUpExecutable): Promise<FollowUpExecutionResult>;
+  /** Return the currently registered runtime tools as capability metadata. */
+  listRegisteredTools(): Promise<ToolCapabilityExportEntry[]>;
+  /** Register or replace runtime tools for subsequent turns. */
+  registerRuntimeTools(tools: ToolDefinition[]): Promise<RuntimeToolMutationResult>;
+  /** Unregister runtime tools by name for subsequent turns. */
+  unregisterRuntimeTools(names: string[]): Promise<RuntimeToolRemovalResult>;
   /** List known worker sessions visible to this SDK session. */
   listWorkers(options?: WorkerListOptions): Promise<WorkerRecord[]>;
   /** Return one worker session by ID, or null if it does not exist. */
@@ -994,6 +1051,10 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   resumeWorker(workerId: string, input: WorkerLaunchInput): Promise<WorkerRecord>;
   /** Stop a live worker in the current runtime and report whether it was found. */
   stopWorker(workerId: string): Promise<{ success: boolean }>;
+  /** List currently live subagents with non-terminal states. */
+  listRunningSubagents(options?: WorkerListOptions): Promise<SubagentRecord[]>;
+  /** Cancel a running subagent by worker/session ID. */
+  cancelSubagent(workerId: string): Promise<{ success: boolean }>;
   /** Return visible background bash/agent tasks for the current runtime. */
   listBackgroundTasks(): Promise<BackgroundTaskSummary[]>;
   /** Return task records from the shared task control plane for the current or specified team. */
@@ -1114,6 +1175,8 @@ export interface Session {
   stream(): AsyncGenerator<SDKMessage, void>;
   /** Abort the current in-flight turn for this session. */
   interrupt(): Promise<void>;
+  /** Return whether this session is idle, running, failed, or closed. */
+  getSessionState(): Promise<SessionStateSnapshot>;
   /** Dynamically change the permission mode before the next turn. */
   setPermissionMode(mode: PermissionMode): Promise<void>;
   /** Swap the model before the next turn. */
@@ -1124,6 +1187,12 @@ export interface Session {
   supportedCommands(): Promise<SlashCommand[]>;
   /** Return the provider's model list. */
   supportedModels(): Promise<ModelInfo[]>;
+  /** Return capability flags for the active provider/model pair. */
+  getProviderCapabilities(model?: string): Promise<ProviderCapabilityRecord>;
+  /** Return whether the active provider/model exposes native thinking blocks. */
+  supportsThinking(model?: string): Promise<boolean>;
+  /** Return whether the active provider/model supports structured output natively. */
+  supportsStructuredOutput(model?: string): Promise<boolean>;
   /** Return available built-in agent profiles. */
   supportedAgents(): Promise<AgentInfo[]>;
   /** Return the resolved skill catalog for this session. */
@@ -1174,6 +1243,12 @@ export interface Session {
   subscribeTimeline(options?: SubscribeTimelineOptions): AsyncIterable<SDKTimelineItem>;
   /** Execute a structured follow-up scaffold without manually decoding Task / SendMessage arguments. */
   executeFollowUp(followUp: FollowUpExecutable): Promise<FollowUpExecutionResult>;
+  /** Return the currently registered runtime tools as capability metadata. */
+  listRegisteredTools(): Promise<ToolCapabilityExportEntry[]>;
+  /** Register or replace runtime tools for subsequent turns. */
+  registerRuntimeTools(tools: ToolDefinition[]): Promise<RuntimeToolMutationResult>;
+  /** Unregister runtime tools by name for subsequent turns. */
+  unregisterRuntimeTools(names: string[]): Promise<RuntimeToolRemovalResult>;
   /** List known worker sessions visible to this SDK session. */
   listWorkers(options?: WorkerListOptions): Promise<WorkerRecord[]>;
   /** Return one worker session by ID, or null if it does not exist. */
@@ -1188,6 +1263,10 @@ export interface Session {
   resumeWorker(workerId: string, input: WorkerLaunchInput): Promise<WorkerRecord>;
   /** Stop a live worker in the current runtime and report whether it was found. */
   stopWorker(workerId: string): Promise<{ success: boolean }>;
+  /** List currently live subagents with non-terminal states. */
+  listRunningSubagents(options?: WorkerListOptions): Promise<SubagentRecord[]>;
+  /** Cancel a running subagent by worker/session ID. */
+  cancelSubagent(workerId: string): Promise<{ success: boolean }>;
   /** Return task records from the shared task control plane for the current or specified team. */
   listTasks(options?: TaskListOptions): Promise<TaskRecord[]>;
   /** Return a single task record, or null if it does not exist. */

@@ -89,11 +89,15 @@ export function forkSession(sessionId: string, options?: QueryOptions): SDKSessi
 type SessionControlMethods = Pick<
   Query,
   | 'interrupt'
+  | 'getSessionState'
   | 'setPermissionMode'
   | 'setModel'
   | 'setMaxThinkingTokens'
   | 'supportedCommands'
   | 'supportedModels'
+  | 'getProviderCapabilities'
+  | 'supportsThinking'
+  | 'supportsStructuredOutput'
   | 'supportedAgents'
   | 'supportedSkills'
   | 'readRuntimeControlPlane'
@@ -119,6 +123,9 @@ type SessionControlMethods = Pick<
   | 'subscribeOrchestrationEvents'
   | 'subscribeTimeline'
   | 'executeFollowUp'
+  | 'listRegisteredTools'
+  | 'registerRuntimeTools'
+  | 'unregisterRuntimeTools'
   | 'listWorkers'
   | 'getWorker'
   | 'getWorkerFollowUps'
@@ -126,6 +133,8 @@ type SessionControlMethods = Pick<
   | 'launchVerifier'
   | 'resumeWorker'
   | 'stopWorker'
+  | 'listRunningSubagents'
+  | 'cancelSubagent'
   | 'listTasks'
   | 'getTask'
   | 'createTask'
@@ -391,11 +400,15 @@ function _buildSession(
     },
 
     interrupt: (...args) => q.interrupt(...args),
+    getSessionState: (...args) => q.getSessionState(...args),
     setPermissionMode: (...args) => q.setPermissionMode(...args),
     setModel: (...args) => q.setModel(...args),
     setMaxThinkingTokens: (...args) => q.setMaxThinkingTokens(...args),
     supportedCommands: (...args) => q.supportedCommands(...args),
     supportedModels: (...args) => q.supportedModels(...args),
+    getProviderCapabilities: (...args) => q.getProviderCapabilities(...args),
+    supportsThinking: (...args) => q.supportsThinking(...args),
+    supportsStructuredOutput: (...args) => q.supportsStructuredOutput(...args),
     supportedAgents: (...args) => q.supportedAgents(...args),
     supportedSkills: (...args) => q.supportedSkills(...args),
     readRuntimeControlPlane: (...args) => q.readRuntimeControlPlane(...args),
@@ -421,6 +434,9 @@ function _buildSession(
     subscribeOrchestrationEvents: (...args) => q.subscribeOrchestrationEvents(...args),
     subscribeTimeline: (...args) => q.subscribeTimeline(...args),
     executeFollowUp: (...args) => q.executeFollowUp(...args),
+    listRegisteredTools: (...args) => q.listRegisteredTools(...args),
+    registerRuntimeTools: (...args) => q.registerRuntimeTools(...args),
+    unregisterRuntimeTools: (...args) => q.unregisterRuntimeTools(...args),
     listWorkers: (...args) => q.listWorkers(...args),
     getWorker: (...args) => q.getWorker(...args),
     getWorkerFollowUps: (...args) => q.getWorkerFollowUps(...args),
@@ -428,6 +444,8 @@ function _buildSession(
     launchVerifier: (...args) => q.launchVerifier(...args),
     resumeWorker: (...args) => q.resumeWorker(...args),
     stopWorker: (...args) => q.stopWorker(...args),
+    listRunningSubagents: (...args) => q.listRunningSubagents(...args),
+    cancelSubagent: (...args) => q.cancelSubagent(...args),
     listTasks: (...args) => q.listTasks(...args),
     getTask: (...args) => q.getTask(...args),
     createTask: (...args) => q.createTask(...args),
@@ -657,11 +675,15 @@ export function unstable_v2_createSession(
     },
 
     interrupt: (...args) => q.interrupt(...args),
+    getSessionState: (...args) => q.getSessionState(...args),
     setPermissionMode: (...args) => q.setPermissionMode(...args),
     setModel: (...args) => q.setModel(...args),
     setMaxThinkingTokens: (...args) => q.setMaxThinkingTokens(...args),
     supportedCommands: (...args) => q.supportedCommands(...args),
     supportedModels: (...args) => q.supportedModels(...args),
+    getProviderCapabilities: (...args) => q.getProviderCapabilities(...args),
+    supportsThinking: (...args) => q.supportsThinking(...args),
+    supportsStructuredOutput: (...args) => q.supportsStructuredOutput(...args),
     supportedAgents: (...args) => q.supportedAgents(...args),
     supportedSkills: (...args) => q.supportedSkills(...args),
     readRuntimeControlPlane: (...args) => q.readRuntimeControlPlane(...args),
@@ -687,6 +709,9 @@ export function unstable_v2_createSession(
     subscribeOrchestrationEvents: (...args) => q.subscribeOrchestrationEvents(...args),
     subscribeTimeline: (...args) => q.subscribeTimeline(...args),
     executeFollowUp: (...args) => q.executeFollowUp(...args),
+    listRegisteredTools: (...args) => q.listRegisteredTools(...args),
+    registerRuntimeTools: (...args) => q.registerRuntimeTools(...args),
+    unregisterRuntimeTools: (...args) => q.unregisterRuntimeTools(...args),
     listWorkers: (...args) => q.listWorkers(...args),
     getWorker: (...args) => q.getWorker(...args),
     getWorkerFollowUps: (...args) => q.getWorkerFollowUps(...args),
@@ -694,6 +719,8 @@ export function unstable_v2_createSession(
     launchVerifier: (...args) => q.launchVerifier(...args),
     resumeWorker: (...args) => q.resumeWorker(...args),
     stopWorker: (...args) => q.stopWorker(...args),
+    listRunningSubagents: (...args) => q.listRunningSubagents(...args),
+    cancelSubagent: (...args) => q.cancelSubagent(...args),
     listTasks: (...args) => q.listTasks(...args),
     getTask: (...args) => q.getTask(...args),
     createTask: (...args) => q.createTask(...args),
