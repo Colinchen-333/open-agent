@@ -1,3 +1,6 @@
+import type { ToolAnnotations } from '@open-agent/core';
+export type { ToolAnnotations };
+
 // Tool input types - precisely reproduced from sdk-tools.d.ts
 
 export interface FileReadInput {
@@ -76,21 +79,6 @@ export interface GrepOutput {
   content?: string;
   numLines?: number;
   numMatches?: number;
-}
-
-/**
- * Tool annotations aligned with the MCP spec (2024-11-05).
- * These are optional hints consumed by the permission engine and rendering layer.
- */
-export interface ToolAnnotations {
-  /** Tool only reads data; safe to auto-approve. */
-  readOnly?: boolean;
-  /** Tool performs destructive mutations (writes, deletes, exec). */
-  destructive?: boolean;
-  /** Tool interacts with the open web or external systems (network risk). */
-  openWorld?: boolean;
-  /** Tool is idempotent — calling it twice with the same input yields the same result. */
-  idempotent?: boolean;
 }
 
 export type ToolCapabilityCategory =
