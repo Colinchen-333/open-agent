@@ -474,13 +474,27 @@ export function query(
     }
   }
 
+  const projectOpenAgentDir = join(cwd, '.open-agent');
+  const teamStorageDir = join(projectOpenAgentDir, 'teams');
+  const taskStorageDir = join(projectOpenAgentDir, 'tasks');
+  const agentSessionStorageDir = join(projectOpenAgentDir, 'agent-sessions');
+  const agentOutputStorageDir = join(projectOpenAgentDir, 'agent-output');
   const defaultTeamName = 'default';
-  const sdkTeamManager = new TeamManager();
+  const sdkTeamManager = new TeamManager({
+    baseDir: teamStorageDir,
+    taskBaseDir: taskStorageDir,
+  });
   let activeTeamName: string | null = null;
   const resolveTaskTeamName = (teamName?: string) => teamName ?? activeTeamName ?? defaultTeamName;
   const resolveWorkerTeamName = (teamName?: string) => normalizeOptionalString(teamName) ?? activeTeamName ?? undefined;
   const getTaskManager = (teamName?: string) => new TaskManager(resolveTaskTeamName(teamName), {
-    rootDir: join(cwd, '.open-agent', 'tasks'),
+    rootDir: taskStorageDir,
+  });
+  const createSdkAgentExecutor = () => new AgentExecutor(effectiveHookExecutor as any, {
+    baseDir: agentSessionStorageDir,
+    outputDir: agentOutputStorageDir,
+    teamBaseDir: teamStorageDir,
+    taskBaseDir: taskStorageDir,
   });
   const resolveTeamName = (teamName?: string) => normalizeOptionalString(teamName) ?? activeTeamName ?? defaultTeamName;
   const toTeamMemberRecord = (member: TeamMember): TeamRecord['members'][number] => ({
@@ -1676,7 +1690,7 @@ export function query(
 
   // Initialize the SDK agent executor now that hooks are available.
   if (taskToolAutoWired) {
-    sdkAgentExecutor = new AgentExecutor(effectiveHookExecutor as any);
+    sdkAgentExecutor = createSdkAgentExecutor();
   }
 
   // ------------------------------------------------------------------
@@ -1777,7 +1791,7 @@ export function query(
   const transcriptCwd = sessionMgr?.getSession(cwd, sessionId)?.cwd ?? cwd;
   if (sessionMgr) {
     try {
-      const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
+      const persistedAgentExecutor = sdkAgentExecutor ?? createSdkAgentExecutor();
       const pendingTaskNotifications = __internal_collectPendingTaskNotifications({
         sessionId,
         transcriptEntries: sessionMgr.readTranscript(transcriptCwd, sessionId),
@@ -2702,7 +2716,7 @@ export function query(
     if (event.kind !== 'worker_lifecycle' || !event.workerId) {
       return;
     }
-    const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
+    const persistedAgentExecutor = sdkAgentExecutor ?? createSdkAgentExecutor();
     const session = persistedAgentExecutor.getAgent(event.workerId);
     if (session) {
       upsertWorkerStoreRecord(toWorkerRecord(session));
@@ -3918,6 +3932,7 @@ export function query(
       if (releaseActiveTasks) {
         for (const assignment of state.activeAssignments.values()) {
           taskDispatcherByWorkerId.delete(assignment.workerId);
+          sdkAgentExecutor?.stopAgent(assignment.workerId);
           releaseDispatcherWorkerSlot((slot) =>
             slot.dispatcherId === state.record.dispatcherId && slot.workerId === assignment.workerId);
           try {
@@ -3938,12 +3953,30 @@ export function query(
     }
   }
 
+  function cleanupLiveBackgroundWorkers(): void {
+    if (!sdkAgentExecutor) {
+      return;
+    }
+
+    for (const session of sdkAgentExecutor.listAgents()) {
+      if (session.state !== 'running' && session.state !== 'spawning') {
+        continue;
+      }
+      try {
+        sdkAgentExecutor.stopAgent(session.agentId);
+      } catch {
+        // Non-fatal during cleanup.
+      }
+    }
+  }
+
   queryObj.interrupt = async () => {
     touchSessionState({
       status: 'closed',
       activeTurn: false,
       idleReason: 'interrupted',
     });
+    cleanupLiveBackgroundWorkers();
     abortQuery(true);
     cleanupQueryResources();
     finalizeGenerator();
@@ -4691,7 +4724,7 @@ export function query(
     teamName?: string,
     transcriptEntriesOverride?: unknown[],
   ): SDKTaskNotificationMessage[] => {
-    const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
+    const persistedAgentExecutor = sdkAgentExecutor ?? createSdkAgentExecutor();
     let transcriptEntries: unknown[] = transcriptEntriesOverride ?? [];
     if (!transcriptEntriesOverride && sessionMgr) {
       try {
@@ -5003,7 +5036,7 @@ export function query(
     }
 
     if (!sdkAgentExecutor) {
-      sdkAgentExecutor = new AgentExecutor(effectiveHookExecutor as any);
+      sdkAgentExecutor = createSdkAgentExecutor();
     }
 
     const resumedSession = resume ? sdkAgentExecutor.getAgent(resume) : null;
@@ -5076,7 +5109,7 @@ export function query(
 
   queryObj.listWorkers = async (options?: WorkerListOptions) => {
     const teamName = normalizeOptionalString(options?.teamName);
-    const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
+    const persistedAgentExecutor = sdkAgentExecutor ?? createSdkAgentExecutor();
     const merged = new Map<string, WorkerRecord>();
     for (const record of readPersistedWorkerLedgerRecords()) {
       merged.set(record.workerId, JSON.parse(JSON.stringify(record)) as WorkerRecord);
@@ -5103,7 +5136,7 @@ export function query(
   };
 
   queryObj.getWorkerFollowUps = async (workerId: string) => {
-    const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
+    const persistedAgentExecutor = sdkAgentExecutor ?? createSdkAgentExecutor();
     const session = persistedAgentExecutor.getAgent(workerId);
     if (!session) {
       return [];
@@ -5170,7 +5203,7 @@ export function query(
     if (!normalizedWorkerId) {
       throw new Error('workerId is required to resume a worker.');
     }
-    const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
+    const persistedAgentExecutor = sdkAgentExecutor ?? createSdkAgentExecutor();
     const session = persistedAgentExecutor.getAgent(normalizedWorkerId);
     if (!session) {
       throw new Error(`Worker not found: ${normalizedWorkerId}`);
@@ -6543,7 +6576,7 @@ export function query(
       started_at: task.startTime,
     }));
 
-    const persistedAgentExecutor = sdkAgentExecutor ?? new AgentExecutor();
+    const persistedAgentExecutor = sdkAgentExecutor ?? createSdkAgentExecutor();
     const agentTasks = persistedAgentExecutor.listPersistedAgents().map((session) => ({
       task_id: session.agentId,
       type: 'agent' as const,
@@ -6645,6 +6678,7 @@ export function query(
         activeTurn: false,
         idleReason: 'stopped',
       });
+      cleanupLiveBackgroundWorkers();
       abortQuery(false);
       cleanupQueryResources();
       finalizeGenerator();
@@ -6658,6 +6692,7 @@ export function query(
       activeTurn: false,
       idleReason: 'closed',
     });
+    cleanupLiveBackgroundWorkers();
     abortQuery(false);
     cleanupQueryResources();
     finalizeGenerator();

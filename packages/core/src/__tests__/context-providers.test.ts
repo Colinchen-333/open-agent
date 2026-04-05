@@ -1,29 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { execFileSync } from 'child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'fs';
-import { tmpdir } from 'os';
 import { join } from 'path';
 import { AutoMemory } from '../auto-memory.js';
 import { loadPromptContext, type PromptContextProvider } from '../context-providers.js';
+import { makeLockedTempHome } from '../../../sdk/src/__tests__/temp-home.js';
 
 describe('loadPromptContext', () => {
-  const originalHome = process.env.HOME;
   let testRoot: string;
+  let tempHome: { cwd: string; cleanup(): void };
 
   beforeEach(() => {
-    testRoot = join(tmpdir(), `open-agent-context-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-    mkdirSync(testRoot, { recursive: true });
-    process.env.HOME = join(testRoot, 'home');
-    mkdirSync(process.env.HOME!, { recursive: true });
+    tempHome = makeLockedTempHome('open-agent-context-');
+    testRoot = tempHome.cwd;
   });
 
   afterEach(() => {
-    if (originalHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = originalHome;
-    }
-    rmSync(testRoot, { recursive: true, force: true });
+    tempHome.cleanup();
   });
 
   it('loads git/memory/additional-directory sections and compatibility fields', () => {

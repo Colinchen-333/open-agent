@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
-import { tmpdir } from 'os';
 import { TeamManager } from '@open-agent/agents';
 import { query } from '../query.js';
+import { makeLockedTempHome } from './temp-home.js';
 
 describe('query() team inbox control plane', () => {
   it('supports acknowledge, unread filtering, and after cursors', async () => {
-    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-sdk-team-inbox-control-'));
+    const temp = makeLockedTempHome('open-agent-sdk-team-inbox-control-');
+    const cwd = temp.cwd;
 
     try {
       const q = query('team inbox control', { cwd, model: 'claude-sonnet-4-6' });
@@ -74,19 +74,23 @@ describe('query() team inbox control plane', () => {
       expect(await q.getTeamInboxCount('alice', { teamName })).toBe(0);
       q.close();
     } finally {
-      rmSync(cwd, { recursive: true, force: true });
+      temp.cleanup();
     }
   });
 
   it('refreshes store-first inbox and approval reads when external inbox writes arrive', async () => {
-    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-sdk-team-inbox-external-refresh-'));
+    const temp = makeLockedTempHome('open-agent-sdk-team-inbox-external-refresh-');
+    const cwd = temp.cwd;
 
     try {
       const q = query('team inbox external refresh', { cwd, model: 'claude-sonnet-4-6' });
       const teamName = `gamma-${Date.now()}`;
       await q.createTeam({ name: teamName });
 
-      const teamManager = new TeamManager();
+      const teamManager = new TeamManager({
+        baseDir: join(cwd, '.open-agent', 'teams'),
+        taskBaseDir: join(cwd, '.open-agent', 'tasks'),
+      });
       teamManager.sendMessage(teamName, {
         type: 'plan_approval_request',
         from: 'worker-1',
@@ -125,7 +129,7 @@ describe('query() team inbox control plane', () => {
       expect(await q.listPendingTeamApprovals({ teamName, memberName: 'lead' })).toHaveLength(2);
       q.close();
     } finally {
-      rmSync(cwd, { recursive: true, force: true });
+      temp.cleanup();
     }
   });
 });

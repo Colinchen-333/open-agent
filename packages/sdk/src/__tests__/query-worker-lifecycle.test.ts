@@ -1,51 +1,14 @@
-import { describe, it, expect, mock } from 'bun:test';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
-import { homedir, tmpdir } from 'os';
+import { describe, it, expect } from 'bun:test';
+import { mkdirSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import type { ChatOptions, LLMProvider, Message, StreamEvent } from '@open-agent/providers';
 import type { Query, WorkerRecord } from '../types.js';
-
-let providerFactory: (() => LLMProvider) | null = null;
-
-mock.module('@open-agent/providers', () => ({
-  autoDetectProvider: () => {
-    if (!providerFactory) {
-      throw new Error('No mock provider configured for worker lifecycle test.');
-    }
-    return providerFactory();
-  },
-  createProvider: () => {
-    if (!providerFactory) {
-      throw new Error('No mock provider configured for worker lifecycle test.');
-    }
-    return providerFactory();
-  },
-  calculateCost: () => 0,
-}));
+import { makeLockedTempHome as makeTempHome } from './temp-home.js';
 
 const { query } = await import('../query.js');
 
-function makeTempHome(prefix: string): { cwd: string; cleanup(): void } {
-  const cwd = mkdtempSync(join(tmpdir(), prefix));
-  const home = join(cwd, 'home');
-  mkdirSync(home, { recursive: true });
-  const originalHome = process.env.HOME;
-  process.env.HOME = home;
-
-  return {
-    cwd,
-    cleanup() {
-      if (originalHome === undefined) {
-        delete process.env.HOME;
-      } else {
-        process.env.HOME = originalHome;
-      }
-      rmSync(cwd, { recursive: true, force: true });
-    },
-  };
-}
-
 function writeWorkerSession(
+  cwd: string,
   session: {
     agentId: string;
     agentType: string;
@@ -66,7 +29,7 @@ function writeWorkerSession(
     error?: string;
   },
 ): string {
-  const dir = join(homedir(), '.open-agent', 'agent-sessions', session.agentId);
+  const dir = join(cwd, '.open-agent', 'agent-sessions', session.agentId);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'state.json'), JSON.stringify(session, null, 2));
   return dir;
@@ -215,7 +178,6 @@ async function readEventOfType(
 describe('query() worker lifecycle control plane', () => {
   it('lists and retrieves persisted worker sessions', async () => {
     const temp = makeTempHome('open-agent-sdk-worker-list-');
-    providerFactory = () => makeStaticProvider([textResponse('unused')]);
     const alphaWorkerId = `worker-alpha-${Date.now()}`;
     const betaWorkerId = `worker-beta-${Date.now()}`;
     const alphaTeamName = `alpha-team-${Date.now()}`;
@@ -223,7 +185,7 @@ describe('query() worker lifecycle control plane', () => {
     const cleanupDirs: string[] = [];
 
     try {
-      cleanupDirs.push(writeWorkerSession({
+      cleanupDirs.push(writeWorkerSession(temp.cwd, {
         agentId: alphaWorkerId,
         agentType: 'worker',
         name: 'alpha',
@@ -240,7 +202,7 @@ describe('query() worker lifecycle control plane', () => {
         totalTokens: 120,
         result: 'completed alpha worker',
       }));
-      cleanupDirs.push(writeWorkerSession({
+      cleanupDirs.push(writeWorkerSession(temp.cwd, {
         agentId: betaWorkerId,
         agentType: 'verifier',
         name: 'beta',
@@ -259,7 +221,7 @@ describe('query() worker lifecycle control plane', () => {
       const q = query('inspect workers', {
         cwd: temp.cwd,
         model: 'mock-model',
-        provider: 'anthropic',
+        provider: makeStaticProvider([textResponse('unused')]),
       });
 
       const workers = await q.listWorkers();
@@ -282,7 +244,6 @@ describe('query() worker lifecycle control plane', () => {
       for (const dir of cleanupDirs) {
         rmSync(dir, { recursive: true, force: true });
       }
-      providerFactory = null;
       temp.cleanup();
     }
   });
@@ -290,23 +251,25 @@ describe('query() worker lifecycle control plane', () => {
   it('stops a live background worker in the current runtime', async () => {
     const temp = makeTempHome('open-agent-sdk-worker-stop-');
     const teamName = `alpha-team-${Date.now()}`;
-    providerFactory = () => makeBackgroundWorkerProvider(teamName);
 
     try {
-      const q = query('launch background worker', {
+      const q = query('launch background worker directly', {
         cwd: temp.cwd,
         model: 'mock-model',
-        provider: 'anthropic',
+        provider: makeDirectLaunchProvider(),
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
       });
-
-      const messages = await collectMessages(q);
-      const result = messages.find((message) => message.type === 'result') as { result?: string } | undefined;
-      expect(result?.result).toBe('parent complete');
+      await q.createTeam({ name: teamName, setActive: true });
+      const launched = await q.launchWorker({
+        prompt: 'Wait until stopped.',
+        name: 'alice',
+        teamName,
+      });
 
       const workers = await q.listWorkers({ teamName });
       expect(workers).toHaveLength(1);
+      expect(workers[0]!.workerId).toBe(launched.workerId);
       expect(['spawning', 'running']).toContain(workers[0]!.status);
 
       const stopped = await q.stopWorker(workers[0]!.workerId);
@@ -319,14 +282,12 @@ describe('query() worker lifecycle control plane', () => {
       await expect(q.stopWorker('missing-worker')).resolves.toEqual({ success: false });
       q.close();
     } finally {
-      providerFactory = null;
       temp.cleanup();
     }
   });
 
   it('builds Claude Code style follow-up suggestions for finished workers', async () => {
     const temp = makeTempHome('open-agent-sdk-worker-followups-');
-    providerFactory = () => makeStaticProvider([textResponse('unused')]);
     const completedWorkerId = `worker-completed-${Date.now()}`;
     const failedWorkerId = `worker-failed-${Date.now()}`;
     const stoppedWorkerId = `worker-stopped-${Date.now()}`;
@@ -334,7 +295,7 @@ describe('query() worker lifecycle control plane', () => {
     const cleanupDirs: string[] = [];
 
     try {
-      cleanupDirs.push(writeWorkerSession({
+      cleanupDirs.push(writeWorkerSession(temp.cwd, {
         agentId: completedWorkerId,
         agentType: 'worker',
         state: 'completed',
@@ -345,7 +306,7 @@ describe('query() worker lifecycle control plane', () => {
         durationMs: 300_000,
         result: 'implemented the requested change',
       }));
-      cleanupDirs.push(writeWorkerSession({
+      cleanupDirs.push(writeWorkerSession(temp.cwd, {
         agentId: failedWorkerId,
         agentType: 'worker',
         state: 'failed',
@@ -356,7 +317,7 @@ describe('query() worker lifecycle control plane', () => {
         durationMs: 120_000,
         error: 'tests failed on the narrowed fix',
       }));
-      cleanupDirs.push(writeWorkerSession({
+      cleanupDirs.push(writeWorkerSession(temp.cwd, {
         agentId: stoppedWorkerId,
         agentType: 'worker',
         state: 'shutdown',
@@ -367,7 +328,7 @@ describe('query() worker lifecycle control plane', () => {
         durationMs: 60_000,
         result: 'interrupted after partial progress',
       }));
-      cleanupDirs.push(writeWorkerSession({
+      cleanupDirs.push(writeWorkerSession(temp.cwd, {
         agentId: runningWorkerId,
         agentType: 'worker',
         state: 'running',
@@ -380,7 +341,7 @@ describe('query() worker lifecycle control plane', () => {
       const q = query('worker followups', {
         cwd: temp.cwd,
         model: 'mock-model',
-        provider: 'anthropic',
+        provider: makeStaticProvider([textResponse('unused')]),
       });
 
       const completed = await q.getWorkerFollowUps(completedWorkerId);
@@ -413,7 +374,6 @@ describe('query() worker lifecycle control plane', () => {
       for (const dir of cleanupDirs) {
         rmSync(dir, { recursive: true, force: true });
       }
-      providerFactory = null;
       temp.cleanup();
     }
   });

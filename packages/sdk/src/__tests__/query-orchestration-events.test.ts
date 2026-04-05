@@ -1,49 +1,9 @@
-import { describe, expect, it, mock } from 'bun:test';
-import { mkdtempSync, mkdirSync, rmSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
+import { describe, expect, it } from 'bun:test';
 import type { SDKMessage } from '@open-agent/core';
 import type { LLMProvider, Message, StreamEvent, ChatOptions } from '@open-agent/providers';
-
-let providerFactory: (() => LLMProvider) | null = null;
-
-mock.module('@open-agent/providers', () => ({
-  autoDetectProvider: () => {
-    if (!providerFactory) {
-      throw new Error('No mock provider configured for orchestration event test.');
-    }
-    return providerFactory();
-  },
-  createProvider: () => {
-    if (!providerFactory) {
-      throw new Error('No mock provider configured for orchestration event test.');
-    }
-    return providerFactory();
-  },
-  calculateCost: () => 0,
-}));
+import { makeLockedTempHome as makeTempCwd } from './temp-home.js';
 
 const { query } = await import('../query.js');
-
-function makeTempCwd(prefix: string): { cwd: string; cleanup(): void } {
-  const cwd = mkdtempSync(join(tmpdir(), prefix));
-  const home = join(cwd, 'home');
-  mkdirSync(home, { recursive: true });
-  const originalHome = process.env.HOME;
-  process.env.HOME = home;
-
-  return {
-    cwd,
-    cleanup() {
-      if (originalHome === undefined) {
-        delete process.env.HOME;
-      } else {
-        process.env.HOME = originalHome;
-      }
-      rmSync(cwd, { recursive: true, force: true });
-    },
-  };
-}
 
 function makeScriptedProvider(scripts: StreamEvent[][]): LLMProvider {
   let callIndex = 0;
@@ -101,7 +61,7 @@ async function drainQuery(gen: AsyncGenerator<SDKMessage>): Promise<SDKMessage[]
 describe('query().subscribeOrchestrationEvents()', () => {
   it('streams live worker lifecycle events with type and team filtering', async () => {
     const temp = makeTempCwd('open-agent-sdk-orchestration-lifecycle-');
-    providerFactory = () => makeScriptedProvider([
+    const provider = makeScriptedProvider([
       toolUseScript('Task', {
         description: 'Launch worker',
         prompt: 'Finish the task and report back.',
@@ -116,6 +76,7 @@ describe('query().subscribeOrchestrationEvents()', () => {
       const q = query('launch a worker', {
         cwd: temp.cwd,
         model: 'claude-sonnet-4-6',
+        provider,
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
       });
@@ -147,14 +108,13 @@ describe('query().subscribeOrchestrationEvents()', () => {
       expect((await iterator.next()).done).toBe(true);
       q.close();
     } finally {
-      providerFactory = null;
       temp.cleanup();
     }
   });
 
   it('streams live worker tool events and closes on AbortSignal', async () => {
     const temp = makeTempCwd('open-agent-sdk-orchestration-tools-');
-    providerFactory = () => makeScriptedProvider([
+    const provider = makeScriptedProvider([
       toolUseScript('Task', {
         description: 'Launch tool-using worker',
         prompt: 'Use EchoTool once and then finish.',
@@ -170,6 +130,7 @@ describe('query().subscribeOrchestrationEvents()', () => {
       const q = query('launch a worker that uses a tool', {
         cwd: temp.cwd,
         model: 'claude-sonnet-4-6',
+        provider,
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         setupTools: (registry) => {
@@ -213,18 +174,17 @@ describe('query().subscribeOrchestrationEvents()', () => {
       await runPromise;
       q.close();
     } finally {
-      providerFactory = null;
       temp.cleanup();
     }
   });
 
   it('closes the event stream when query.close() is called', async () => {
-    providerFactory = () => makeScriptedProvider([textScript('unused')]);
     const source = (async function* () {})();
     const q = query({
       prompt: source,
       options: {
         model: 'claude-sonnet-4-6',
+        provider: makeScriptedProvider([textScript('unused')]),
         idleOnPromptExhaustion: true,
       },
     });
@@ -236,7 +196,7 @@ describe('query().subscribeOrchestrationEvents()', () => {
 
   it('streams task dispatcher events through the same orchestration channel', async () => {
     const temp = makeTempCwd('open-agent-sdk-orchestration-dispatcher-');
-    providerFactory = () => makeScriptedProvider([
+    const provider = makeScriptedProvider([
       textScript('dispatcher worker complete'),
     ]);
 
@@ -245,6 +205,7 @@ describe('query().subscribeOrchestrationEvents()', () => {
       const q = query('dispatcher orchestration', {
         cwd: temp.cwd,
         model: 'claude-sonnet-4-6',
+        provider,
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
       });
@@ -321,7 +282,6 @@ describe('query().subscribeOrchestrationEvents()', () => {
       await iterator.return?.();
       q.close();
     } finally {
-      providerFactory = null;
       temp.cleanup();
     }
   });

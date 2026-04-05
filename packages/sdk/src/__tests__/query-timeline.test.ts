@@ -1,32 +1,12 @@
 import { describe, expect, it } from 'bun:test';
 import { randomUUID } from 'crypto';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
-import { homedir, tmpdir } from 'os';
+import { mkdirSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { SessionManager } from '@open-agent/core';
 import type { ChatOptions, LLMProvider, Message, StreamEvent } from '@open-agent/providers';
 import type { Query, WorkerRecord, SDKTimelineItem, TaskDispatcherRecord } from '../types.js';
 import { query } from '../query.js';
-
-function makeTempHome(prefix: string): { cwd: string; cleanup(): void } {
-  const cwd = mkdtempSync(join(tmpdir(), prefix));
-  const home = join(cwd, 'home');
-  mkdirSync(home, { recursive: true });
-  const originalHome = process.env.HOME;
-  process.env.HOME = home;
-
-  return {
-    cwd,
-    cleanup() {
-      if (originalHome === undefined) {
-        delete process.env.HOME;
-      } else {
-        process.env.HOME = originalHome;
-      }
-      rmSync(cwd, { recursive: true, force: true });
-    },
-  };
-}
+import { makeLockedTempHome as makeTempHome } from './temp-home.js';
 
 function makeStaticProvider(): LLMProvider {
   return {
@@ -62,6 +42,7 @@ function makeBackgroundProvider(): LLMProvider {
 }
 
 function writeWorkerSession(
+  cwd: string,
   session: {
     agentId: string;
     agentType: string;
@@ -78,7 +59,7 @@ function writeWorkerSession(
     error?: string;
   },
 ): string {
-  const dir = join(homedir(), '.open-agent', 'agent-sessions', session.agentId);
+  const dir = join(cwd, '.open-agent', 'agent-sessions', session.agentId);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'state.json'), JSON.stringify(session, null, 2));
   return dir;
@@ -168,7 +149,7 @@ describe('query() timeline control plane', () => {
       });
 
       const sessionInfo = await q.sessionInfo();
-      workerDir = writeWorkerSession({
+      workerDir = writeWorkerSession(temp.cwd, {
         agentId: workerId,
         agentType: 'worker',
         state: 'completed',
@@ -593,7 +574,7 @@ describe('query() timeline control plane', () => {
       await waitForWorkerStatus(writer, worker.workerId, 'shutdown');
       writer.close();
 
-      rmSync(join(process.env.HOME!, '.open-agent', 'agent-sessions'), { recursive: true, force: true });
+      rmSync(join(temp.cwd, '.open-agent', 'agent-sessions'), { recursive: true, force: true });
       const transcriptDir = dirname(sessionMgr.getTranscriptPath(temp.cwd, sessionId));
       rmSync(join(transcriptDir, `${sessionId}.jsonl`), { force: true });
       rmSync(join(transcriptDir, `${sessionId}.workers.json`), { force: true });

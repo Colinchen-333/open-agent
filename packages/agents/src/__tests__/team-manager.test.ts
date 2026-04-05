@@ -1,28 +1,9 @@
 import { describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync } from 'fs';
-import { tmpdir } from 'os';
+import { readdirSync, renameSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { TeamManager } from '../team-manager.js';
-
-function makeTempHome(prefix: string): { root: string; cleanup(): void } {
-  const root = mkdtempSync(join(tmpdir(), prefix));
-  const home = join(root, 'home');
-  mkdirSync(home, { recursive: true });
-  const originalHome = process.env.HOME;
-  process.env.HOME = home;
-  return {
-    root,
-    cleanup() {
-      if (originalHome === undefined) {
-        delete process.env.HOME;
-      } else {
-        process.env.HOME = originalHome;
-      }
-      rmSync(root, { recursive: true, force: true });
-    },
-  };
-}
+import { makeLockedTempHome as makeTempHome } from '../../../sdk/src/__tests__/temp-home.js';
 
 describe('TeamManager inbox consumption', () => {
   it('skips inbox files that were already claimed by another consumer', () => {

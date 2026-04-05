@@ -6,10 +6,13 @@ import type { TeamConfig, TeamInboxEntry, TeamMember, TeamMessage } from './type
 
 export class TeamManager {
   private baseDir: string;
+  private taskBaseDir: string;
   private messageSequence = 0;
 
-  constructor() {
-    this.baseDir = join(homedir(), '.open-agent', 'teams');
+  constructor(options: { baseDir?: string; taskBaseDir?: string } = {}) {
+    const homeDir = process.env.HOME || homedir();
+    this.baseDir = options.baseDir ?? join(homeDir, '.open-agent', 'teams');
+    this.taskBaseDir = options.taskBaseDir ?? join(homeDir, '.open-agent', 'tasks');
   }
 
   // ---------------------------------------------------------------------------
@@ -44,7 +47,7 @@ export class TeamManager {
     writeFileSync(join(teamDir, 'config.json'), JSON.stringify(config, null, 2));
 
     // Create task directory for this team.
-    const taskDir = join(homedir(), '.open-agent', 'tasks', name);
+    const taskDir = join(this.taskBaseDir, name);
     mkdirSync(taskDir, { recursive: true });
 
     return config;
@@ -56,7 +59,7 @@ export class TeamManager {
     if (existsSync(teamDir)) {
       rmSync(teamDir, { recursive: true, force: true });
     }
-    const taskDir = join(homedir(), '.open-agent', 'tasks', name);
+    const taskDir = join(this.taskBaseDir, name);
     if (existsSync(taskDir)) {
       rmSync(taskDir, { recursive: true, force: true });
     }

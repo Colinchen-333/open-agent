@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
+import { join } from 'path';
 import type { ToolDefinition } from '@open-agent/tools';
 import type { ChatOptions, LLMProvider, Message, StreamEvent } from '@open-agent/providers';
 import type { ModelInfo } from '@open-agent/core';
@@ -9,26 +9,7 @@ import { BASH_SANDBOX_POLICY_FIELD } from '@open-agent/permissions';
 import { createSdkMcpServer, tool } from '../mcp-helpers.js';
 import { createSession } from '../session.js';
 import { query } from '../query.js';
-
-function makeTempHome(prefix: string): { cwd: string; cleanup(): void } {
-  const cwd = mkdtempSync(join(tmpdir(), prefix));
-  const home = join(cwd, 'home');
-  mkdirSync(home, { recursive: true });
-  const originalHome = process.env.HOME;
-  process.env.HOME = home;
-
-  return {
-    cwd,
-    cleanup() {
-      if (originalHome === undefined) {
-        delete process.env.HOME;
-      } else {
-        process.env.HOME = originalHome;
-      }
-      rmSync(cwd, { recursive: true, force: true });
-    },
-  };
-}
+import { makeLockedTempHome as makeTempHome } from './temp-home.js';
 
 function writeJson(filePath: string, value: unknown): void {
   writeFileSync(filePath, JSON.stringify(value), 'utf-8');

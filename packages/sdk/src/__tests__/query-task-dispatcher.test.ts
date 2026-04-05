@@ -1,32 +1,12 @@
 import { describe, expect, it } from 'bun:test';
 import { randomUUID } from 'crypto';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
-import { tmpdir } from 'os';
+import { readFileSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { SessionManager } from '@open-agent/core';
 import type { ChatOptions, LLMProvider, Message, StreamEvent } from '@open-agent/providers';
 import type { Query, TaskDispatcherRecord, TaskRecord } from '../types.js';
 import { query } from '../query.js';
-
-function makeTempHome(prefix: string): { cwd: string; cleanup(): void } {
-  const cwd = mkdtempSync(join(tmpdir(), prefix));
-  const home = join(cwd, 'home');
-  mkdirSync(home, { recursive: true });
-  const originalHome = process.env.HOME;
-  process.env.HOME = home;
-
-  return {
-    cwd,
-    cleanup() {
-      if (originalHome === undefined) {
-        delete process.env.HOME;
-      } else {
-        process.env.HOME = originalHome;
-      }
-      rmSync(cwd, { recursive: true, force: true });
-    },
-  };
-}
+import { makeLockedTempHome as makeTempHome } from './temp-home.js';
 
 function makeCompletingWorkerProvider(): LLMProvider {
   return {
@@ -916,8 +896,8 @@ describe('query() task dispatcher control plane', () => {
 
       writer.close();
 
-      rmSync(join(process.env.HOME!, '.open-agent', 'tasks', teamName), { recursive: true, force: true });
-      rmSync(join(process.env.HOME!, '.open-agent', 'agent-sessions'), { recursive: true, force: true });
+      rmSync(join(temp.cwd, '.open-agent', 'tasks', teamName), { recursive: true, force: true });
+      rmSync(join(temp.cwd, '.open-agent', 'agent-sessions'), { recursive: true, force: true });
 
       const transcriptDir = dirname(sessionMgr.getTranscriptPath(temp.cwd, sessionId));
       expect(() => rmSync(join(transcriptDir, `${sessionId}.jsonl`), { force: true })).not.toThrow();

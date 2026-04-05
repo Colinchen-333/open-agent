@@ -8,6 +8,7 @@ import type { LLMProvider } from '@open-agent/providers';
 import type { ToolDefinition } from '@open-agent/tools';
 import type { SubagentStreamEvent } from './agent-runner.js';
 import { TeamManager } from './team-manager.js';
+import type { AgentRunner } from './agent-runner.js';
 
 export type AgentState = 'spawning' | 'running' | 'idle' | 'completed' | 'failed' | 'shutdown';
 
@@ -81,6 +82,18 @@ export interface AgentHookExecutor {
   }>;
 }
 
+export interface AgentExecutorOptions {
+  baseDir?: string;
+  outputDir?: string;
+  teamBaseDir?: string;
+  taskBaseDir?: string;
+  runnerFactory?: AgentRunnerConstructor;
+}
+
+type AgentRunnerInstance = Pick<AgentRunner, 'run' | 'getAgentId'>;
+
+type AgentRunnerConstructor = new (options: ConstructorParameters<typeof AgentRunner>[0]) => AgentRunnerInstance;
+
 export class AgentExecutor {
   static readonly MAX_CONCURRENT_BACKGROUND = 10;
   private agents = new Map<string, AgentSession>();
@@ -90,14 +103,34 @@ export class AgentExecutor {
   private backgroundEventCallbacks = new Map<string, (event: SubagentStreamEvent) => void>();
   private baseDir: string;
   private outputDir: string;
+  private teamBaseDir?: string;
+  private taskBaseDir?: string;
   private hookExecutor?: AgentHookExecutor;
+  private teamManager: TeamManager;
+  private runnerFactory?: AgentRunnerConstructor;
 
-  constructor(hookExecutor?: AgentHookExecutor) {
-    this.baseDir = join(homedir(), '.open-agent', 'agent-sessions');
-    this.outputDir = join(tmpdir(), 'open-agent', 'agents');
+  constructor(hookExecutor?: AgentHookExecutor, options: AgentExecutorOptions = {}) {
+    const homeDir = process.env.HOME || homedir();
+    this.baseDir = options.baseDir ?? join(homeDir, '.open-agent', 'agent-sessions');
+    this.outputDir = options.outputDir ?? join(tmpdir(), 'open-agent', 'agents');
+    this.teamBaseDir = options.teamBaseDir;
+    this.taskBaseDir = options.taskBaseDir;
+    this.runnerFactory = options.runnerFactory;
     if (!existsSync(this.baseDir)) mkdirSync(this.baseDir, { recursive: true });
     if (!existsSync(this.outputDir)) mkdirSync(this.outputDir, { recursive: true });
     this.hookExecutor = hookExecutor;
+    this.teamManager = new TeamManager({
+      baseDir: options.teamBaseDir,
+      taskBaseDir: options.taskBaseDir,
+    });
+  }
+
+  private async loadAgentRunnerFactory(): Promise<AgentRunnerConstructor> {
+    if (this.runnerFactory) {
+      return this.runnerFactory;
+    }
+    const { AgentRunner } = await import('./agent-runner.js');
+    return AgentRunner;
   }
 
   /**
@@ -145,7 +178,7 @@ export class AgentExecutor {
 
     try {
       // Import AgentRunner dynamically to avoid circular deps
-      const { AgentRunner } = await import('./agent-runner.js');
+      const AgentRunner = await this.loadAgentRunnerFactory();
 
       // Load previous messages if resuming
       let initialMessages: import('@open-agent/providers').Message[] | undefined;
@@ -174,6 +207,8 @@ export class AgentExecutor {
           try { appendFileSync(transcriptPath, JSON.stringify(msg) + '\n'); } catch { /* non-fatal */ }
         },
         onEvent: options.onEvent,
+        teamBaseDir: this.teamBaseDir,
+        taskBaseDir: this.taskBaseDir,
         abortSignal: options.abortSignal,
       });
 
@@ -249,8 +284,7 @@ export class AgentExecutor {
       // Notify team lead that this agent is now idle (if running in a team).
       if (options.teamName && options.name) {
         try {
-          const tm = new TeamManager();
-          tm.notifyIdle(options.teamName, options.name);
+          this.teamManager.notifyIdle(options.teamName, options.name);
         } catch { /* non-fatal */ }
       }
 
@@ -359,7 +393,7 @@ export class AgentExecutor {
       session.state = 'running';
       const startTime = Date.now();
       try {
-        const { AgentRunner } = await import('./agent-runner.js');
+        const AgentRunner = await this.loadAgentRunnerFactory();
 
         let initialMessages: import('@open-agent/providers').Message[] | undefined;
         if (options.resume) {
@@ -386,6 +420,8 @@ export class AgentExecutor {
             try { appendFileSync(bgTranscriptPath, JSON.stringify(msg) + '\n'); } catch { /* non-fatal */ }
           },
           onEvent: options.onEvent,
+          teamBaseDir: this.teamBaseDir,
+          taskBaseDir: this.taskBaseDir,
           abortSignal: abortController.signal,
         });
 
@@ -466,8 +502,7 @@ export class AgentExecutor {
           // Notify team lead that this background agent is now idle.
           if (options.teamName && options.name) {
             try {
-              const tm = new TeamManager();
-              tm.notifyIdle(options.teamName, options.name);
+              this.teamManager.notifyIdle(options.teamName, options.name);
             } catch { /* non-fatal */ }
           }
         }

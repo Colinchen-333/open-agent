@@ -1,30 +1,10 @@
 import { describe, expect, it } from 'bun:test';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
-import { homedir, tmpdir } from 'os';
+import { mkdirSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import type { ChatOptions, LLMProvider, Message, StreamEvent } from '@open-agent/providers';
 import type { Query, WorkerRecord, TaskDispatcherRecord } from '../types.js';
 import { query } from '../query.js';
-
-function makeTempHome(prefix: string): { cwd: string; cleanup(): void } {
-  const cwd = mkdtempSync(join(tmpdir(), prefix));
-  const home = join(cwd, 'home');
-  mkdirSync(home, { recursive: true });
-  const originalHome = process.env.HOME;
-  process.env.HOME = home;
-
-  return {
-    cwd,
-    cleanup() {
-      if (originalHome === undefined) {
-        delete process.env.HOME;
-      } else {
-        process.env.HOME = originalHome;
-      }
-      rmSync(cwd, { recursive: true, force: true });
-    },
-  };
-}
+import { makeLockedTempHome as makeTempHome } from './temp-home.js';
 
 function makeBackgroundProvider(): LLMProvider {
   return {
@@ -60,6 +40,7 @@ function makeStaticProvider(): LLMProvider {
 }
 
 function writeWorkerSession(
+  cwd: string,
   session: {
     agentId: string;
     agentType: string;
@@ -75,7 +56,7 @@ function writeWorkerSession(
     error?: string;
   },
 ): string {
-  const dir = join(homedir(), '.open-agent', 'agent-sessions', session.agentId);
+  const dir = join(cwd, '.open-agent', 'agent-sessions', session.agentId);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'state.json'), JSON.stringify(session, null, 2));
   return dir;
@@ -120,7 +101,7 @@ describe('query() follow-up dispatcher', () => {
     let workerDir = '';
 
     try {
-      workerDir = writeWorkerSession({
+      workerDir = writeWorkerSession(temp.cwd, {
         agentId: workerId,
         agentType: 'worker',
         state: 'shutdown',

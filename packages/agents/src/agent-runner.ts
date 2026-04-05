@@ -69,6 +69,10 @@ export interface AgentRunnerOptions {
   teamName?: string;
   /** Agent name for inbox polling — identifies which inbox to read */
   agentName?: string;
+  /** Optional project-scoped team storage override. */
+  teamBaseDir?: string;
+  /** Optional project-scoped task storage override. */
+  taskBaseDir?: string;
   /** Abort signal used to interrupt the conversation loop. */
   abortSignal?: AbortSignal;
 }
@@ -195,10 +199,16 @@ export class AgentRunner {
     const effectiveCwd = this.options.worktreePath ?? this.options.cwd;
 
     const teamManager = (this.options.teamName && this.options.agentName)
-      ? new TeamManager()
+      ? new TeamManager({
+        baseDir: this.options.teamBaseDir,
+        taskBaseDir: this.options.taskBaseDir,
+      })
       : null;
     const scratchpadDir = this.options.teamName
-      ? (teamManager ?? new TeamManager()).getScratchpadDir(this.options.teamName)
+      ? (teamManager ?? new TeamManager({
+        baseDir: this.options.teamBaseDir,
+        taskBaseDir: this.options.taskBaseDir,
+      })).getScratchpadDir(this.options.teamName)
       : join(effectiveCwd, '.open-agent', 'scratchpad');
     const coordinatorContext = buildCoordinatorContext({
       workerTools: [...tools.keys()],

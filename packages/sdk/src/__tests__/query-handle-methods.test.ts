@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'fs';
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { SessionManager } from '@open-agent/core';
@@ -9,27 +9,7 @@ import { query } from '../query.js';
 import { createSdkMcpServer, tool } from '../mcp-helpers.js';
 import { savePersistedBackgroundTask } from '@open-agent/tools';
 import type { SDKOrchestrationEvent } from '../types.js';
-
-function createTempHome(prefix: string): { cwd: string; originalHome: string | undefined; restore(): void } {
-  const cwd = mkdtempSync(join(tmpdir(), prefix));
-  const home = join(cwd, 'home');
-  mkdirSync(home, { recursive: true });
-  const originalHome = process.env.HOME;
-  process.env.HOME = home;
-
-  return {
-    cwd,
-    originalHome,
-    restore() {
-      if (originalHome === undefined) {
-        delete process.env.HOME;
-      } else {
-        process.env.HOME = originalHome;
-      }
-      rmSync(cwd, { recursive: true, force: true });
-    },
-  };
-}
+import { makeLockedTempHome } from './temp-home.js';
 
 function makeMockProvider(responses: StreamEvent[][]): LLMProvider {
   let callIndex = 0;
@@ -247,7 +227,7 @@ describe('query().sessionInfo()', () => {
 
 describe('query() team control plane', () => {
   it('creates, lists, retrieves, activates, and deletes teams', async () => {
-    const temp = createTempHome('open-agent-sdk-team-plane-');
+    const temp = makeLockedTempHome('open-agent-sdk-team-plane-');
 
     try {
       const q = query('manage teams', { cwd: temp.cwd, model: 'claude-sonnet-4-6' });
@@ -290,12 +270,12 @@ describe('query() team control plane', () => {
       expect(await q.getActiveTeam()).toBeNull();
       q.close();
     } finally {
-      temp.restore();
+      temp.cleanup();
     }
   });
 
   it('sends and reads team inbox messages', async () => {
-    const temp = createTempHome('open-agent-sdk-team-inbox-');
+    const temp = makeLockedTempHome('open-agent-sdk-team-inbox-');
 
     try {
       const q = query('team inbox', { cwd: temp.cwd, model: 'claude-sonnet-4-6' });
@@ -325,12 +305,12 @@ describe('query() team control plane', () => {
       expect(await q.getTeamInboxCount('alice', { teamName })).toBe(0);
       q.close();
     } finally {
-      temp.restore();
+      temp.cleanup();
     }
   });
 
   it('lists and responds to pending team approvals', async () => {
-    const temp = createTempHome('open-agent-sdk-team-approvals-');
+    const temp = makeLockedTempHome('open-agent-sdk-team-approvals-');
 
     try {
       const q = query('team approvals', { cwd: temp.cwd, model: 'claude-sonnet-4-6' });
@@ -386,14 +366,14 @@ describe('query() team control plane', () => {
       ).toHaveLength(0);
       q.close();
     } finally {
-      temp.restore();
+      temp.cleanup();
     }
   });
 });
 
 describe('query() orchestration event subscriptions', () => {
   it('streams live worker lifecycle and tool events through the SDK control plane', async () => {
-    const temp = createTempHome('open-agent-sdk-orchestration-');
+    const temp = makeLockedTempHome('open-agent-sdk-orchestration-');
 
     try {
       const provider = makeMockProvider([
@@ -454,12 +434,12 @@ describe('query() orchestration event subscriptions', () => {
         && event.raw.toolName === 'DummyTool')).toBe(true);
       expect(events.some((event) => event.kind === 'worker_lifecycle' && event.raw.type === 'completed')).toBe(true);
     } finally {
-      temp.restore();
+      temp.cleanup();
     }
   });
 
   it('supports type filters and abort-driven shutdown', async () => {
-    const temp = createTempHome('open-agent-sdk-orchestration-abort-');
+    const temp = makeLockedTempHome('open-agent-sdk-orchestration-abort-');
 
     try {
       const provider = makeMockProvider([
@@ -516,14 +496,14 @@ describe('query() orchestration event subscriptions', () => {
 
       await expect(lifecycleOnly.next()).resolves.toEqual({ done: true, value: undefined });
     } finally {
-      temp.restore();
+      temp.cleanup();
     }
   });
 });
 
 describe('query() worker lifecycle control plane', () => {
   it('lists, retrieves, and stops live background workers', async () => {
-    const temp = createTempHome('open-agent-sdk-workers-');
+    const temp = makeLockedTempHome('open-agent-sdk-workers-');
 
     try {
       const workerName = `alice-${Date.now()}`;
@@ -563,22 +543,18 @@ describe('query() worker lifecycle control plane', () => {
       expect((await q.getWorker(worker!.workerId))?.status).toBe('shutdown');
       q.close();
     } finally {
-      temp.restore();
+      temp.cleanup();
     }
   });
 });
 
 describe('query() shared task control plane', () => {
   it('creates, updates, lists, and retrieves shared tasks', async () => {
-    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-sdk-task-plane-'));
-    const home = join(cwd, 'home');
-    mkdirSync(home, { recursive: true });
-    const originalHome = process.env.HOME;
-    process.env.HOME = home;
+    const temp = makeLockedTempHome('open-agent-sdk-task-plane-');
 
     try {
       const q = query('安排一下任务', {
-        cwd,
+        cwd: temp.cwd,
         model: 'claude-sonnet-4-6',
       });
 
@@ -619,45 +595,27 @@ describe('query() shared task control plane', () => {
       expect(tasks.some((entry) => entry.id === created.id && entry.priority === 9)).toBe(true);
       q.close();
     } finally {
-      if (originalHome === undefined) {
-        delete process.env.HOME;
-      } else {
-        process.env.HOME = originalHome;
-      }
-      rmSync(cwd, { recursive: true, force: true });
+      temp.cleanup();
     }
   });
 
   it('returns null for unknown shared tasks', async () => {
-    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-sdk-task-missing-'));
-    const home = join(cwd, 'home');
-    mkdirSync(home, { recursive: true });
-    const originalHome = process.env.HOME;
-    process.env.HOME = home;
+    const temp = makeLockedTempHome('open-agent-sdk-task-missing-');
 
     try {
-      const q = query('empty tasks', { cwd, model: 'claude-sonnet-4-6' });
+      const q = query('empty tasks', { cwd: temp.cwd, model: 'claude-sonnet-4-6' });
       await expect(q.getTask('missing-task')).resolves.toBeNull();
       q.close();
     } finally {
-      if (originalHome === undefined) {
-        delete process.env.HOME;
-      } else {
-        process.env.HOME = originalHome;
-      }
-      rmSync(cwd, { recursive: true, force: true });
+      temp.cleanup();
     }
   });
 
   it('claims, heartbeats, and releases leased tasks per team', async () => {
-    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-sdk-task-lease-'));
-    const home = join(cwd, 'home');
-    mkdirSync(home, { recursive: true });
-    const originalHome = process.env.HOME;
-    process.env.HOME = home;
+    const temp = makeLockedTempHome('open-agent-sdk-task-lease-');
 
     try {
-      const q = query('lease tasks', { cwd, model: 'claude-sonnet-4-6' });
+      const q = query('lease tasks', { cwd: temp.cwd, model: 'claude-sonnet-4-6' });
       await q.createTask({
         subject: 'low',
         description: 'lower priority task',
@@ -703,17 +661,12 @@ describe('query() shared task control plane', () => {
       expect(released.lease).toBeUndefined();
       q.close();
     } finally {
-      if (originalHome === undefined) {
-        delete process.env.HOME;
-      } else {
-        process.env.HOME = originalHome;
-      }
-      rmSync(cwd, { recursive: true, force: true });
+      temp.cleanup();
     }
   });
 
   it('dispatches the next available task into a background worker', async () => {
-    const temp = createTempHome('open-agent-sdk-task-dispatch-');
+    const temp = makeLockedTempHome('open-agent-sdk-task-dispatch-');
 
     try {
       const teamName = `dispatch-team-${Date.now()}`;
@@ -752,7 +705,7 @@ describe('query() shared task control plane', () => {
       expect((await q.getWorker(dispatched!.worker.workerId))?.status).toBe('shutdown');
       q.close();
     } finally {
-      temp.restore();
+      temp.cleanup();
     }
   });
 });

@@ -15,6 +15,7 @@ interface CheckpointEntry {
   filePath: string;
   originalContent: string | null; // null means file didn't exist
   timestamp: number;
+  sequence?: number;
 }
 
 interface StoredCheckpointEntry extends CheckpointEntry {
@@ -38,6 +39,7 @@ export interface RewindTarget {
 export class FileCheckpoint {
   private entries: StoredCheckpointEntry[] = [];
   private sessionDir: string;
+  private nextSequence = 0;
 
   constructor(sessionDir: string) {
     this.sessionDir = join(sessionDir, 'checkpoints');
@@ -56,6 +58,7 @@ export class FileCheckpoint {
         if (entry?.toolUseId && entry?.filePath && typeof entry.timestamp === 'number') {
           loaded.push({
             ...entry,
+            sequence: typeof entry.sequence === 'number' ? entry.sequence : 0,
             checkpointFile,
           });
         }
@@ -63,8 +66,19 @@ export class FileCheckpoint {
         // Ignore malformed checkpoint files.
       }
     }
-    loaded.sort((a, b) => a.timestamp - b.timestamp);
+    loaded.sort((a, b) => {
+      if (a.timestamp !== b.timestamp) {
+        return a.timestamp - b.timestamp;
+      }
+      const aSequence = typeof a.sequence === 'number' ? a.sequence : 0;
+      const bSequence = typeof b.sequence === 'number' ? b.sequence : 0;
+      if (aSequence !== bSequence) {
+        return aSequence - bSequence;
+      }
+      return a.checkpointFile.localeCompare(b.checkpointFile);
+    });
     this.entries = loaded;
+    this.nextSequence = loaded.reduce((max, entry) => Math.max(max, entry.sequence ?? 0), -1) + 1;
   }
 
   /** Record the current state of a file before modification. */
@@ -84,6 +98,7 @@ export class FileCheckpoint {
       filePath,
       originalContent,
       timestamp,
+      sequence: this.nextSequence++,
       checkpointFile,
     };
 

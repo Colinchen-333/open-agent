@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, mock } from 'bun:test';
+import { beforeEach, describe, expect, it } from 'bun:test';
 import { AgentExecutor } from '../agent-executor.js';
 import type { AgentDefinition } from '@open-agent/core';
 
@@ -41,26 +41,37 @@ const mockRunResult = {
 // Capture constructor options for assertions (A2 test)
 let lastRunnerOptions: any = null;
 
-// Mock the agent-runner module
-mock.module('../agent-runner.js', () => ({
-  AgentRunner: class MockAgentRunner {
-    constructor(opts: any) {
-      lastRunnerOptions = opts;
-    }
-    async run(_prompt: string) {
-      return mockRunResult;
-    }
-    getAgentId() {
-      return 'mock-agent-id';
-    }
-  },
-}));
+class MockAgentRunner {
+  constructor(opts: any) {
+    lastRunnerOptions = opts;
+  }
+
+  async run(_prompt: string) {
+    return mockRunResult;
+  }
+
+  getAgentId() {
+    return 'mock-agent-id';
+  }
+}
+
+class FailingRunner {
+  constructor(_opts: any) {}
+
+  async run(_prompt: string): Promise<never> {
+    throw new Error('Runner failed');
+  }
+
+  getAgentId() {
+    return 'mock-agent-id';
+  }
+}
 
 describe('AgentExecutor', () => {
   let executor: AgentExecutor;
 
   beforeEach(() => {
-    executor = new AgentExecutor();
+    executor = new AgentExecutor(undefined, { runnerFactory: MockAgentRunner as never });
     lastRunnerOptions = null;
   });
 
@@ -129,16 +140,7 @@ describe('AgentExecutor', () => {
     });
 
     it('throws and marks session as failed when runner throws', async () => {
-      mock.module('../agent-runner.js', () => ({
-        AgentRunner: class FailingRunner {
-          constructor(_opts: any) {}
-          async run(_prompt: string): Promise<never> {
-            throw new Error('Runner failed');
-          }
-        },
-      }));
-
-      const failExecutor = new AgentExecutor();
+      const failExecutor = new AgentExecutor(undefined, { runnerFactory: FailingRunner as never });
 
       await expect(
         failExecutor.execute({
@@ -149,18 +151,6 @@ describe('AgentExecutor', () => {
           cwd: '/tmp',
         })
       ).rejects.toThrow('Runner failed');
-
-      // Restore mock (must capture options for A2 tests)
-      mock.module('../agent-runner.js', () => ({
-        AgentRunner: class MockAgentRunner {
-          constructor(opts: any) {
-            lastRunnerOptions = opts;
-          }
-          async run(_prompt: string) {
-            return mockRunResult;
-          }
-        },
-      }));
     });
   });
 
