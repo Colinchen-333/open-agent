@@ -104,3 +104,9 @@ export {
   type FileSnapshot,
   type FileHistoryPersistence,
 } from './file-history.js';
+export {
+  searchSessions,
+  buildCrossProjectResumeHint,
+  type SessionSearchQuery,
+  type SessionSearchResult,
+} from './session-search.js';
