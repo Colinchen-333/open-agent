@@ -239,7 +239,10 @@ describe('createCliPermissionRuntime', () => {
       },
     });
 
-    listener?.('watch');
+    const refreshListener = listener as any;
+    if (typeof refreshListener === 'function') {
+      refreshListener('watch');
+    }
 
     expect(observed).toEqual([{
       permissions: {

@@ -35,6 +35,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
 import { createCliPermissionRuntime, wrapCliPermissionPrompter } from './permission-runtime.js';
+import { applyCliRuntimeSettingsRefresh } from './runtime-settings-refresh.js';
 
 const VERSION = '0.1.0';
 
@@ -617,39 +618,6 @@ async function main(): Promise<void> {
     },
   };
 
-  const settingsWatcher = cliPermissionRuntime.watchSettings(['user', 'project', 'local'], {
-    onRefresh(nextSettings, source) {
-      try {
-        const nextHooks = nextSettings.hooks && typeof nextSettings.hooks === 'object'
-          ? nextSettings.hooks as any
-          : {};
-        _hookExecutor.replaceShellHooksFromConfig(nextHooks, 'settings_json');
-      } catch {
-        _hookExecutor.replaceShellHooksFromConfig({}, 'settings_json');
-      }
-
-      void hookExecutor.execute('ConfigChange', {
-        hook_event_name: 'ConfigChange',
-        session_id: sessionId,
-        transcript_path: join(sessionMgr.getSessionDir(cwd, sessionId), `${sessionId}.jsonl`),
-        cwd,
-        permission_mode: permissionEngine.getSummary().mode,
-        source,
-      }).catch(() => {
-        // ConfigChange hooks are best-effort.
-      });
-    },
-  });
-  let settingsWatcherClosed = false;
-  const closeSettingsWatcher = () => {
-    if (settingsWatcherClosed) return;
-    settingsWatcherClosed = true;
-    settingsWatcher.close();
-  };
-  process.once('exit', closeSettingsWatcher);
-  process.once('SIGINT', closeSettingsWatcher);
-  process.once('SIGTERM', closeSettingsWatcher);
-
   // Now that hookExecutor is ready, initialise AgentExecutor so subagent
   // lifecycle hooks (SubagentStart / SubagentStop) are wired in.
   agentExecutor = new AgentExecutor(hookExecutor);
@@ -723,10 +691,8 @@ async function main(): Promise<void> {
   }
 
   const isPrintMode = Boolean(args.print && args.prompt);
-  const availableTools = isPrintMode ? [] : toolRegistry.list();
-  const toolNames = availableTools.map(t => t.name);
-  const runtimeSnapshot = runtime.buildSnapshot();
-  const promptCapabilitySnapshot = filterCapabilitySnapshot(runtimeSnapshot.capabilitySnapshot, toolNames);
+  const getAvailableTools = () => (isPrintMode ? [] : toolRegistry.list());
+  let toolNames = getAvailableTools().map((tool) => tool.name);
   const isGitRepo = isGitRepository(cwd);
   const promptContext = loadPromptContext({
     cwd,
@@ -735,35 +701,22 @@ async function main(): Promise<void> {
     includeAgentInstructions: true,
     additionalDirectories,
   });
-  const connectedMcpServers = runtimeSnapshot.mcpServers.filter((server) => server.status === 'connected');
-  const configuredActiveTeam = activeTeamName ?? (settings.activeTeam as string | undefined) ?? defaultTeamName;
-  const coordinatorScratchpadDir = teamManager.getTeam(configuredActiveTeam)
-    ? teamManager.getScratchpadDir(configuredActiveTeam)
-    : join(cwd, '.open-agent', 'scratchpad');
+  const buildCliSystemPrompt = (): string => {
+    const currentTools = getAvailableTools();
+    const currentToolNames = currentTools.map((tool) => tool.name);
+    const runtimeSnapshot = runtime.buildSnapshot();
+    const promptCapabilitySnapshot = filterCapabilitySnapshot(runtimeSnapshot.capabilitySnapshot, currentToolNames);
+    const connectedMcpServers = runtimeSnapshot.mcpServers.filter((server) => server.status === 'connected');
+    const configuredActiveTeam = activeTeamName ?? (settings.activeTeam as string | undefined) ?? defaultTeamName;
+    const coordinatorScratchpadDir = teamManager.getTeam(configuredActiveTeam)
+      ? teamManager.getScratchpadDir(configuredActiveTeam)
+      : join(cwd, '.open-agent', 'scratchpad');
 
-  // ------------------------------------------------------------------
-  // Conversation loop
-  // ------------------------------------------------------------------
-  const appStore = createStore<AppState>(createDefaultAppState({
-    sessionId,
-    cwd,
-    model,
-    permissionMode: effectivePermissionMode,
-    tools: new Map(availableTools.map((t) => [t.name, t])),
-    thinkingConfig: effectiveThinking,
-    verbose: args.verbose ?? false,
-  }));
-
-  const loop = new ConversationLoop({
-    provider,
-    // Pass the full tool map; ConversationLoop expects Map<name, ToolDefinition>.
-    tools: new Map(availableTools.map((t) => [t.name, t])),
-    model,
-    systemPrompt: buildSystemPrompt({
+    return buildSystemPrompt({
       cwd,
       model,
-      tools: toolNames,
-      permissionMode: effectivePermissionMode,
+      tools: currentToolNames,
+      permissionMode: permissionEngine.getSummary().mode as PermissionMode,
       agentInstructions: [
         ...promptContext.agentInstructions,
         ...customInstructionsList,
@@ -780,16 +733,37 @@ async function main(): Promise<void> {
         mcpServers: runtimeSnapshot.mcpServers,
         capabilitySnapshot: promptCapabilitySnapshot,
         coordinator: {
-          workerTools: toolNames.filter((name) => name !== 'Task').sort(),
+          workerTools: currentToolNames.filter((name) => name !== 'Task').sort(),
           activeTeam: teamManager.getTeam(configuredActiveTeam) ? configuredActiveTeam : undefined,
           scratchpadDir: coordinatorScratchpadDir,
-          canUseSkills: toolNames.includes('Skill') && runtimeSnapshot.skills.length > 0,
+          canUseSkills: currentToolNames.includes('Skill') && runtimeSnapshot.skills.length > 0,
           canUseMcpTools: connectedMcpServers.length > 0,
         },
       },
       outputStyle: cliOutputStyle,
       knowledgeCutoff: 'August 2025',
-    }),
+    });
+  };
+
+  // ------------------------------------------------------------------
+  // Conversation loop
+  // ------------------------------------------------------------------
+  const appStore = createStore<AppState>(createDefaultAppState({
+    sessionId,
+    cwd,
+    model,
+    permissionMode: effectivePermissionMode,
+    tools: new Map(getAvailableTools().map((t) => [t.name, t])),
+    thinkingConfig: effectiveThinking,
+    verbose: args.verbose ?? false,
+  }));
+
+  const loop = new ConversationLoop({
+    provider,
+    // Pass the full tool map; ConversationLoop expects Map<name, ToolDefinition>.
+    tools: new Map(getAvailableTools().map((t) => [t.name, t])),
+    model,
+    systemPrompt: buildCliSystemPrompt(),
     maxTurns: effectiveMaxTurns,
     thinking: effectiveThinking,
     effort: effectiveEffort,
@@ -807,6 +781,70 @@ async function main(): Promise<void> {
 
   // Expose loop for plan mode tool access
   (globalThis as any).__openAgentLoop = loop;
+
+  const syncCliLoopTools = (availableTools: import('@open-agent/tools').ToolDefinition[]): void => {
+    const allTools = new Map(availableTools.map((tool) => [tool.name, tool]));
+    toolNames = [...allTools.keys()];
+    if (_planMode) {
+      const readOnlyMap = new Map<string, import('@open-agent/tools').ToolDefinition>();
+      for (const [name, tool] of allTools) {
+        const isReadOnly = typeof tool.isReadOnly === 'function'
+          ? tool.isReadOnly({})
+          : tool.isReadOnly === true;
+        if (isReadOnly || READ_ONLY_TOOLS.has(name) || name.startsWith('mcp__')) {
+          readOnlyMap.set(name, tool);
+        }
+      }
+      loop.setTools(readOnlyMap);
+    } else {
+      loop.setTools(allTools);
+    }
+  };
+
+  const settingsWatcher = cliPermissionRuntime.watchSettings(['user', 'project', 'local'], {
+    onRefresh(nextSettings, source) {
+      void (async () => {
+        await applyCliRuntimeSettingsRefresh({
+          runtime,
+          toolRegistry,
+          loop,
+          appStore,
+          buildSystemPrompt: buildCliSystemPrompt,
+          syncLoopTools: syncCliLoopTools,
+          isPrintMode: false,
+        }, nextSettings);
+
+        try {
+          const nextHooks = nextSettings.hooks && typeof nextSettings.hooks === 'object'
+            ? nextSettings.hooks as any
+            : {};
+          _hookExecutor.replaceShellHooksFromConfig(nextHooks, 'settings_json');
+        } catch {
+          _hookExecutor.replaceShellHooksFromConfig({}, 'settings_json');
+        }
+
+        await hookExecutor.execute('ConfigChange', {
+          hook_event_name: 'ConfigChange',
+          session_id: sessionId,
+          transcript_path: join(sessionMgr.getSessionDir(cwd, sessionId), `${sessionId}.jsonl`),
+          cwd,
+          permission_mode: permissionEngine.getSummary().mode,
+          source,
+        });
+      })().catch(() => {
+        // Settings refresh is best-effort.
+      });
+    },
+  });
+  let settingsWatcherClosed = false;
+  const closeSettingsWatcher = () => {
+    if (settingsWatcherClosed) return;
+    settingsWatcherClosed = true;
+    settingsWatcher.close();
+  };
+  process.once('exit', closeSettingsWatcher);
+  process.once('SIGINT', closeSettingsWatcher);
+  process.once('SIGTERM', closeSettingsWatcher);
 
   const renderer = new TerminalRenderer({ noMarkdown: args.noMarkdown });
   const isStreamJson = args.outputFormat === 'stream-json' || args.json === true;
