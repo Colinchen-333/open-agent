@@ -1,10 +1,9 @@
-import { describe, it, expect } from 'bun:test';
+import { describe, it, expect, spyOn } from 'bun:test';
 import {
   buildAnthropicSystemParam,
   convertMessages,
   extractSystemPrompt,
   convertTools,
-  effortToBudget,
 } from '../anthropic.js';
 import { buildAnthropicThinkingParam } from '../thinking.js';
 import type { Message, ContentBlock, ChatOptions, ToolSpec } from '../types.js';
@@ -346,28 +345,69 @@ describe('ChatOptions responseFormat', () => {
 });
 
 // ---------------------------------------------------------------------------
-// effortToBudget
+// convertMessages — dropped thinking block warning
 // ---------------------------------------------------------------------------
+// Note: effort → budget mapping is tested in thinking.test.ts (thinkingBudgetFromEffort).
+// The legacy effortToBudget helper has been removed; use thinkingBudgetFromEffort instead.
 
-describe('effortToBudget', () => {
-  it('maps "low" to 2000 tokens', () => {
-    expect(effortToBudget('low')).toBe(2000);
+describe('convertMessages — thinking block with empty signature', () => {
+  it('logs a warning when dropping a thinking block with empty signature', () => {
+    const spy = spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      convertMessages([
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'internal reasoning', signature: '' } as any,
+            { type: 'text', text: 'hello' } as any,
+          ],
+        },
+      ]);
+      expect(spy).toHaveBeenCalled();
+      expect(spy.mock.calls[0]?.[0]).toContain('thinking block');
+    } finally {
+      spy.mockRestore();
+    }
   });
 
-  it('maps "medium" to 8000 tokens', () => {
-    expect(effortToBudget('medium')).toBe(8000);
+  it('does NOT warn when thinking block has a valid signature', () => {
+    const spy = spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      convertMessages([
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'reasoning', signature: 'valid-sig-abc' } as any,
+            { type: 'text', text: 'answer' } as any,
+          ],
+        },
+      ]);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
-  it('maps "high" to 16000 tokens', () => {
-    expect(effortToBudget('high')).toBe(16000);
-  });
-
-  it('maps "max" to 32000 tokens', () => {
-    expect(effortToBudget('max')).toBe(32000);
-  });
-
-  it('returns 8000 for undefined (default)', () => {
-    expect(effortToBudget(undefined)).toBe(8000);
+  it('drops the unsigned thinking block from the output (no behavior change)', () => {
+    const spy = spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const result = convertMessages([
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'secret', signature: '' } as any,
+            { type: 'text', text: 'visible' } as any,
+          ],
+        },
+      ]);
+      // Only the text block survives; the unsigned thinking block is dropped.
+      const blocks = result[0]?.content as any[];
+      expect(blocks).toHaveLength(1);
+      expect(blocks[0].type).toBe('text');
+      expect(blocks[0].text).toBe('visible');
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

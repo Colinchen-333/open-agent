@@ -73,13 +73,17 @@ export function convertMessages(
         case 'thinking': {
           // Anthropic thinking blocks require a valid cryptographic signature.
           // Skip blocks with missing/empty signature to avoid API 400 errors.
-          const sig = block.signature as string;
+          const sig = typeof block.signature === 'string' ? block.signature : '';
           if (sig) {
             converted.push({
               type: 'thinking',
               thinking: block.thinking as string,
               signature: sig,
             } as Anthropic.Messages.ThinkingBlockParam);
+          } else {
+            console.warn(
+              '[anthropic] dropping thinking block with empty signature; this will break thinking continuity if the model expects it',
+            );
           }
           break;
         }
@@ -217,23 +221,6 @@ export function convertTools(tools: ToolSpec[]): Anthropic.Messages.Tool[] {
     description: t.description,
     input_schema: t.input_schema as Anthropic.Messages.Tool['input_schema'],
   }));
-}
-
-// Map effort level to thinking budget tokens.
-// @internal
-export function effortToBudget(effort: ChatOptions['effort']): number {
-  switch (effort) {
-    case 'low':
-      return 2000;
-    case 'medium':
-      return 8000;
-    case 'high':
-      return 16000;
-    case 'max':
-      return 32000;
-    default:
-      return 8000;
-  }
 }
 
 export class AnthropicProvider implements LLMProvider {
