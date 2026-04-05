@@ -6,6 +6,7 @@ import type { ToolDefinition } from '@open-agent/tools';
 import type { ChatOptions, LLMProvider, Message, StreamEvent } from '@open-agent/providers';
 import type { ModelInfo } from '@open-agent/core';
 import { BASH_SANDBOX_POLICY_FIELD } from '@open-agent/permissions';
+import { createSdkMcpServer, tool } from '../mcp-helpers.js';
 import { createSession } from '../session.js';
 import { query } from '../query.js';
 
@@ -556,6 +557,61 @@ describe('SDK runtime control surface', () => {
         expect(observedPolicies[0]).toEqual(expect.arrayContaining([initialAllowedDir]));
         expect(observedPolicies[1]).toEqual(expect.arrayContaining([refreshedAllowedDir]));
         expect(observedPolicies[1]).not.toEqual(expect.arrayContaining([initialAllowedDir]));
+      } finally {
+        session.close();
+      }
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('refreshes loop tools at turn boundaries after MCP hot reload', async () => {
+    const { cwd, cleanup } = makeTempHome('open-agent-turn-boundary-tools-');
+    const server = createSdkMcpServer({
+      name: 'turn-boundary-server',
+      tools: [
+        tool(
+          'echo_live',
+          'Echoes text from a hot-reloaded MCP server',
+          { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+          async ({ text }: { text: string }) => `echo:${text}`,
+        ) as any,
+      ],
+    });
+
+    try {
+      const session = createSession({
+        cwd,
+        model: 'mock-model',
+        provider: makeMockProvider([
+          textResponse('first turn complete'),
+          toolUseResponse('mcp-live-1', 'echo_live', { text: 'second turn' }),
+          textResponse('second turn complete'),
+        ]),
+      });
+
+      try {
+        for await (const _message of session.send('first turn')) {
+          // drain
+        }
+
+        const before = await session.mcpServerStatus();
+        expect(before).toEqual([]);
+
+        await session.setMcpServers({
+          turn_boundary: server as any,
+        });
+
+        const secondTurnMessages: Array<{ type?: string; result?: string; is_error?: boolean }> = [];
+        for await (const message of session.send('second turn')) {
+          secondTurnMessages.push(message as any);
+        }
+
+        expect(secondTurnMessages.some((message) => message.type === 'result' && message.result === 'second turn complete')).toBe(true);
+        expect(secondTurnMessages.some((message) => message.type === 'result' && message.is_error === true)).toBe(false);
+
+        const after = await session.mcpServerStatus();
+        expect(after[0]?.tools?.map((entry) => entry.name)).toContain('echo_live');
       } finally {
         session.close();
       }

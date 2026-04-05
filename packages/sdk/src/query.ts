@@ -2715,6 +2715,14 @@ export function query(
     };
   }
 
+  const refreshLoopSurfaceBeforeTurn = async (): Promise<void> => {
+    if (mcpReadyPromise) {
+      await mcpReadyPromise;
+    }
+    refreshManagedSystemPrompt();
+    syncLoopToolsFromRegistry();
+  };
+
   // ------------------------------------------------------------------
   // Core generator – iterates over all SDKMessages
   // ------------------------------------------------------------------
@@ -2747,12 +2755,6 @@ export function query(
         syncLoopToolsFromRegistry();
       }
       // Wait for MCP servers to connect and register their tools into the loop
-      // before the first LLM call. This runs once when iteration starts.
-      if (mcpReadyPromise) {
-        await mcpReadyPromise;
-        refreshManagedSystemPrompt();
-        syncLoopToolsFromRegistry();
-      }
       if (typeof prompt === 'string') {
         let usedFallback = false;
         // Retry loop — runs once normally; a second time with fallbackModel on model errors.
@@ -2769,6 +2771,7 @@ export function query(
             lastError: undefined,
           });
           try {
+            await refreshLoopSurfaceBeforeTurn();
             for await (const msg of loop.run(prompt)) {
               yield* flushPendingSubagentMessages();
               // Default behavior matches official SDK: partials are off unless explicitly enabled.
@@ -2903,6 +2906,7 @@ export function query(
             lastError: undefined,
           });
           try {
+            await refreshLoopSurfaceBeforeTurn();
             for await (const msg of loop.run(userPrompt)) {
               yield* flushPendingSubagentMessages();
               if (options.includePartialMessages !== true && msg.type === 'stream_event') {
@@ -2972,6 +2976,7 @@ export function query(
               loop.resetMessages(preTurnMessages.length > 0 ? preTurnMessages : undefined);
               resultMessage = undefined;
               try {
+                await refreshLoopSurfaceBeforeTurn();
                 for await (const msg of loop.run(userPrompt)) {
                   yield* flushPendingSubagentMessages();
                   if (options.includePartialMessages !== true && msg.type === 'stream_event') continue;
