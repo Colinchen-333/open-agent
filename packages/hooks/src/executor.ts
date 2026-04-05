@@ -29,7 +29,7 @@ const regexpCache = new Map<string, RegExp>();
  * the merged result is returned immediately.
  */
 export class HookExecutor {
-  private shellHooks: Map<HookEvent, HookDefinition[]> = new Map();
+  private shellHooks: Map<HookEvent, Array<{ hook: HookDefinition; sourceId?: string }>> = new Map();
   private callbackHooks: Map<HookEvent, HookCallbackMatcher[]> = new Map();
 
   // -------------------------------------------------------------------------
@@ -37,9 +37,9 @@ export class HookExecutor {
   // -------------------------------------------------------------------------
 
   /** Register a shell-command hook for the given event. */
-  registerShellHook(event: HookEvent, hook: HookDefinition): void {
+  registerShellHook(event: HookEvent, hook: HookDefinition, sourceId?: string): void {
     const existing = this.shellHooks.get(event) ?? [];
-    existing.push(hook);
+    existing.push({ hook, sourceId });
     this.shellHooks.set(event, existing);
   }
 
@@ -54,12 +54,34 @@ export class HookExecutor {
    * Load shell hooks from a plain config object of the shape:
    *   { [event: HookEvent]: HookDefinition[] }
    */
-  loadFromConfig(config: Partial<Record<HookEvent, HookDefinition[]>>): void {
+  loadFromConfig(config: Partial<Record<HookEvent, HookDefinition[]>>, sourceId?: string): void {
     for (const [event, hooks] of Object.entries(config) as [HookEvent, HookDefinition[]][]) {
       for (const hook of hooks) {
-        this.registerShellHook(event, hook);
+        this.registerShellHook(event, hook, sourceId);
       }
     }
+  }
+
+  replaceShellHooksFromConfig(
+    config: Partial<Record<HookEvent, HookDefinition[]>>,
+    sourceId?: string,
+  ): void {
+    if (sourceId === undefined) {
+      this.shellHooks.clear();
+      this.loadFromConfig(config);
+      return;
+    }
+
+    for (const [event, hooks] of this.shellHooks.entries()) {
+      const kept = hooks.filter((entry) => entry.sourceId !== sourceId);
+      if (kept.length === 0) {
+        this.shellHooks.delete(event);
+      } else {
+        this.shellHooks.set(event, kept);
+      }
+    }
+
+    this.loadFromConfig(config, sourceId);
   }
 
   // -------------------------------------------------------------------------
@@ -82,7 +104,8 @@ export class HookExecutor {
 
     // -- Shell hooks ----------------------------------------------------------
     const shellHooks = this.shellHooks.get(event) ?? [];
-    for (const hook of shellHooks) {
+    for (const shellHook of shellHooks) {
+      const hook = shellHook.hook;
       if (!this.matchesHook(hook, input)) continue;
 
       const timeoutMs = (hook.timeout ?? 30) * 1000;

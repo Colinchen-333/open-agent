@@ -5,6 +5,7 @@ import {
   BASH_SANDBOX_POLICY_FIELD,
   buildBashSandboxPolicy,
   PermissionEngine,
+  type SettingsChangeSource,
   SettingsChangeDetector,
   SettingsLoader,
   type BashSandboxExecutionPolicy,
@@ -50,7 +51,12 @@ export interface CliPermissionRuntime {
   };
   rawPermissionEngine: PermissionEngine;
   refreshFromSettings(): SettingsFile;
-  watchSettings(sources?: SettingSource[]): { close(): void };
+  watchSettings(
+    sources?: SettingSource[],
+    options?: {
+      onRefresh?(settings: SettingsFile, source: SettingsChangeSource): void;
+    },
+  ): { close(): void };
 }
 
 export interface CreateCliPermissionRuntimeInput {
@@ -230,9 +236,15 @@ export function createCliPermissionRuntime({
       return rawPermissionEngine;
     },
     refreshFromSettings,
-    watchSettings(sources: SettingSource[] = ['user', 'project', 'local']): { close(): void } {
-      const unsubscribe = settingsChangeDetector.subscribe(() => {
-        refreshFromSettings();
+    watchSettings(
+      sources: SettingSource[] = ['user', 'project', 'local'],
+      options?: {
+        onRefresh?(settings: SettingsFile, source: SettingsChangeSource): void;
+      },
+    ): { close(): void } {
+      const unsubscribe = settingsChangeDetector.subscribe((source) => {
+        const nextSettings = refreshFromSettings();
+        options?.onRefresh?.(nextSettings, source);
       });
       const watcher = settingsChangeDetector.watch(cwd, sources);
       return {

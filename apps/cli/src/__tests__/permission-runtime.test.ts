@@ -5,6 +5,7 @@ import { join } from 'path';
 import {
   BASH_SANDBOX_POLICY_FIELD,
   type PermissionRequest,
+  type SettingsFile,
 } from '@open-agent/permissions';
 import { createCliPermissionRuntime } from '../permission-runtime.js';
 
@@ -187,5 +188,65 @@ describe('createCliPermissionRuntime', () => {
     } finally {
       temp.cleanup();
     }
+  });
+
+  it('invokes watch refresh callbacks with reloaded settings payload', () => {
+    const settingsQueue: SettingsFile[] = [
+      {
+        permissions: {
+          allow: [{ toolName: 'Read' }],
+        },
+      },
+      {
+        permissions: {
+          deny: [{ toolName: 'Write' }],
+        },
+      },
+    ];
+    let listener: ((source: 'watch' | 'manual' | 'policy' | 'user' | 'project' | 'local') => void) | null = null;
+    const fakeLoader = {
+      load() {
+        return settingsQueue.shift() ?? {};
+      },
+      getCandidatePaths() {
+        return [];
+      },
+    };
+    const fakeDetector = {
+      subscribe(next: typeof listener) {
+        listener = next;
+        return () => {
+          listener = null;
+        };
+      },
+      watch() {
+        return {
+          close() {},
+        };
+      },
+    };
+
+    const runtime = createCliPermissionRuntime({
+      cwd: '/tmp',
+      mode: 'default',
+      settingsLoader: fakeLoader as any,
+      settingsChangeDetector: fakeDetector as any,
+    });
+    const observed: SettingsFile[] = [];
+    const subscription = runtime.watchSettings(['project'], {
+      onRefresh(settings) {
+        observed.push(settings);
+      },
+    });
+
+    listener?.('watch');
+
+    expect(observed).toEqual([{
+      permissions: {
+        deny: [{ toolName: 'Write' }],
+      },
+    }]);
+    expect(runtime.permissionEngine.getSummary().denyRules).toEqual([{ toolName: 'Write' }]);
+    subscription.close();
   });
 });

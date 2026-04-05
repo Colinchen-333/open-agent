@@ -550,16 +550,6 @@ async function main(): Promise<void> {
     permissionPromptToolName: args.permissionPromptTool,
   });
   const permissionEngine = cliPermissionRuntime.permissionEngine;
-  const settingsWatcher = cliPermissionRuntime.watchSettings();
-  let settingsWatcherClosed = false;
-  const closeSettingsWatcher = () => {
-    if (settingsWatcherClosed) return;
-    settingsWatcherClosed = true;
-    settingsWatcher.close();
-  };
-  process.once('exit', closeSettingsWatcher);
-  process.once('SIGINT', closeSettingsWatcher);
-  process.once('SIGTERM', closeSettingsWatcher);
   const permissionPrompter = wrapCliPermissionPrompter(new TerminalPermissionPrompter());
 
   // ------------------------------------------------------------------
@@ -581,7 +571,7 @@ async function main(): Promise<void> {
   if (existsSync(globalHooksPath)) {
     try {
       const config = JSON.parse(readFileSync(globalHooksPath, 'utf-8'));
-      _hookExecutor.loadFromConfig(config);
+      _hookExecutor.loadFromConfig(config, 'global_hooks_json');
     } catch {
       // Malformed global hooks.json — skip silently.
     }
@@ -591,7 +581,7 @@ async function main(): Promise<void> {
   if (existsSync(projectHooksPath)) {
     try {
       const config = JSON.parse(readFileSync(projectHooksPath, 'utf-8'));
-      _hookExecutor.loadFromConfig(config);
+      _hookExecutor.loadFromConfig(config, 'project_hooks_json');
     } catch {
       // Malformed project hooks.json — skip silently.
     }
@@ -601,7 +591,7 @@ async function main(): Promise<void> {
   // settings.hooks shape: { [HookEvent]: HookDefinition[] } — same as loadFromConfig expects.
   if (settings.hooks && typeof settings.hooks === 'object') {
     try {
-      _hookExecutor.loadFromConfig(settings.hooks as any);
+      _hookExecutor.loadFromConfig(settings.hooks as any, 'settings_json');
     } catch {
       // Malformed hooks in settings — skip silently.
     }
@@ -626,6 +616,39 @@ async function main(): Promise<void> {
       return _hookExecutor.execute(event as any, input as any, toolUseId);
     },
   };
+
+  const settingsWatcher = cliPermissionRuntime.watchSettings(['user', 'project', 'local'], {
+    onRefresh(nextSettings, source) {
+      try {
+        const nextHooks = nextSettings.hooks && typeof nextSettings.hooks === 'object'
+          ? nextSettings.hooks as any
+          : {};
+        _hookExecutor.replaceShellHooksFromConfig(nextHooks, 'settings_json');
+      } catch {
+        _hookExecutor.replaceShellHooksFromConfig({}, 'settings_json');
+      }
+
+      void hookExecutor.execute('ConfigChange', {
+        hook_event_name: 'ConfigChange',
+        session_id: sessionId,
+        transcript_path: join(sessionMgr.getSessionDir(cwd, sessionId), `${sessionId}.jsonl`),
+        cwd,
+        permission_mode: permissionEngine.getSummary().mode,
+        source,
+      }).catch(() => {
+        // ConfigChange hooks are best-effort.
+      });
+    },
+  });
+  let settingsWatcherClosed = false;
+  const closeSettingsWatcher = () => {
+    if (settingsWatcherClosed) return;
+    settingsWatcherClosed = true;
+    settingsWatcher.close();
+  };
+  process.once('exit', closeSettingsWatcher);
+  process.once('SIGINT', closeSettingsWatcher);
+  process.once('SIGTERM', closeSettingsWatcher);
 
   // Now that hookExecutor is ready, initialise AgentExecutor so subagent
   // lifecycle hooks (SubagentStart / SubagentStop) are wired in.
