@@ -689,7 +689,13 @@ export function query(
   const globalDispatcherWorkerBudget = options.globalDispatcherWorkerBudget !== undefined
     ? Math.max(1, Math.trunc(options.globalDispatcherWorkerBudget))
     : null;
+  const teamDispatcherWorkerBudgets = Object.fromEntries(
+    Object.entries(options.teamDispatcherWorkerBudgets ?? {})
+      .map(([teamName, budget]) => [normalizeOptionalString(teamName), Math.max(1, Math.trunc(budget))] as const)
+      .filter((entry): entry is [string, number] => Boolean(entry[0]) && Number.isFinite(entry[1])),
+  );
   let reservedDispatcherWorkerSlots = 0;
+  const reservedDispatcherWorkerSlotsByTeam = new Map<string, number>();
   let dispatcherFairnessCursor: string | null = null;
 
   interface TaskDispatcherAssignment {
@@ -737,26 +743,64 @@ export function query(
     }
     return total;
   };
+  const countActiveDispatcherAssignmentsForTeam = (teamName: string): number => {
+    let total = 0;
+    for (const state of taskDispatchers.values()) {
+      if (state.disposed || state.record.status === 'stopped' || state.record.teamName !== teamName) continue;
+      total += state.activeAssignments.size;
+    }
+    return total;
+  };
+  const getConfiguredTeamDispatcherWorkerBudget = (teamName: string): number | null => (
+    teamDispatcherWorkerBudgets[teamName] ?? null
+  );
   const getAvailableDispatcherWorkerBudget = (): number | null => {
     if (globalDispatcherWorkerBudget === null) {
       return null;
     }
     return Math.max(0, globalDispatcherWorkerBudget - countActiveDispatcherAssignments() - reservedDispatcherWorkerSlots);
   };
-  const tryReserveDispatcherWorkerSlot = (): boolean => {
-    if (globalDispatcherWorkerBudget === null) {
-      return true;
+  const getAvailableDispatcherWorkerBudgetForTeam = (teamName: string): number | null => {
+    const teamBudget = getConfiguredTeamDispatcherWorkerBudget(teamName);
+    if (teamBudget === null) {
+      return null;
     }
-    const available = getAvailableDispatcherWorkerBudget();
-    if (available === null || available <= 0) {
+    return Math.max(
+      0,
+      teamBudget
+      - countActiveDispatcherAssignmentsForTeam(teamName)
+      - (reservedDispatcherWorkerSlotsByTeam.get(teamName) ?? 0),
+    );
+  };
+  const tryReserveDispatcherWorkerSlot = (teamName: string): boolean => {
+    if (globalDispatcherWorkerBudget === null) {
+      const teamAvailable = getAvailableDispatcherWorkerBudgetForTeam(teamName);
+      if (teamAvailable !== null && teamAvailable <= 0) {
+        return false;
+      }
+    } else {
+      const available = getAvailableDispatcherWorkerBudget();
+      if (available === null || available <= 0) {
+        return false;
+      }
+    }
+    const teamAvailable = getAvailableDispatcherWorkerBudgetForTeam(teamName);
+    if (teamAvailable !== null && teamAvailable <= 0) {
       return false;
     }
     reservedDispatcherWorkerSlots += 1;
+    reservedDispatcherWorkerSlotsByTeam.set(teamName, (reservedDispatcherWorkerSlotsByTeam.get(teamName) ?? 0) + 1);
     return true;
   };
-  const releaseReservedDispatcherWorkerSlot = (): void => {
+  const releaseReservedDispatcherWorkerSlot = (teamName: string): void => {
     if (reservedDispatcherWorkerSlots > 0) {
       reservedDispatcherWorkerSlots -= 1;
+    }
+    const reservedForTeam = reservedDispatcherWorkerSlotsByTeam.get(teamName) ?? 0;
+    if (reservedForTeam <= 1) {
+      reservedDispatcherWorkerSlotsByTeam.delete(teamName);
+    } else {
+      reservedDispatcherWorkerSlotsByTeam.set(teamName, reservedForTeam - 1);
     }
   };
   const countSchedulableDispatchers = (): number => {
@@ -771,6 +815,7 @@ export function query(
     !state.disposed
     && state.record.status === 'running'
     && state.activeAssignments.size < state.record.maxConcurrentWorkers
+    && (getAvailableDispatcherWorkerBudgetForTeam(state.record.teamName) ?? 1) > 0
   );
   const listFairDispatchers = (): TaskDispatcherState[] => (
     [...taskDispatchers.values()]
@@ -2007,6 +2052,12 @@ export function query(
       terminalWorkerCount: workers.filter((entry) => entry.status === 'completed' || entry.status === 'failed' || entry.status === 'shutdown').length,
       globalDispatcherWorkerBudget,
       availableDispatcherWorkerBudget: getAvailableDispatcherWorkerBudget(),
+      teamDispatcherWorkerBudgets: { ...teamDispatcherWorkerBudgets },
+      availableTeamDispatcherWorkerBudgets: Object.fromEntries(
+        Object.keys(teamDispatcherWorkerBudgets)
+          .sort((left, right) => left.localeCompare(right))
+          .map((teamKey) => [teamKey, getAvailableDispatcherWorkerBudgetForTeam(teamKey) ?? 0] as const),
+      ),
       dispatcherCount: dispatchers.length,
       liveDispatcherCount: dispatchers.filter((entry) => entry.source === 'live').length,
       ledgerDispatcherCount: dispatchers.filter((entry) => entry.source === 'ledger').length,
@@ -3038,12 +3089,16 @@ export function query(
 
       const dispatcherCapacity = state.record.maxConcurrentWorkers - state.activeAssignments.size;
       const availableWorkerBudget = getAvailableDispatcherWorkerBudget();
+      const availableTeamWorkerBudget = getAvailableDispatcherWorkerBudgetForTeam(state.record.teamName);
       const sharedCapacity = availableWorkerBudget === null
         ? dispatcherCapacity
         : Math.min(dispatcherCapacity, availableWorkerBudget);
+      const boundedCapacity = availableTeamWorkerBudget === null
+        ? sharedCapacity
+        : Math.min(sharedCapacity, availableTeamWorkerBudget);
       const dispatchLimit = countSchedulableDispatchers() > 1
-        ? Math.min(sharedCapacity, 1)
-        : sharedCapacity;
+        ? Math.min(boundedCapacity, 1)
+        : boundedCapacity;
 
       for (
         let dispatchedCount = 0;
@@ -3055,7 +3110,7 @@ export function query(
         if (!isDispatcherFairnessTurn(state)) {
           break;
         }
-        if (!tryReserveDispatcherWorkerSlot()) {
+        if (!tryReserveDispatcherWorkerSlot(state.record.teamName)) {
           break;
         }
         let dispatched: Awaited<ReturnType<typeof queryObj.dispatchNextTask>> = null;
@@ -3074,7 +3129,7 @@ export function query(
             ...(state.isolation ? { isolation: state.isolation } : {}),
           });
         } finally {
-          releaseReservedDispatcherWorkerSlot();
+          releaseReservedDispatcherWorkerSlot(state.record.teamName);
         }
         if (!dispatched) {
           break;
@@ -3103,8 +3158,10 @@ export function query(
         noteDispatcherFairnessDispatch(state);
         const remainingDispatcherCapacity = state.record.maxConcurrentWorkers - state.activeAssignments.size;
         const remainingWorkerBudget = getAvailableDispatcherWorkerBudget();
+        const remainingTeamWorkerBudget = getAvailableDispatcherWorkerBudgetForTeam(state.record.teamName);
         shouldContinueImmediately = remainingDispatcherCapacity > 0
-          && (remainingWorkerBudget === null || remainingWorkerBudget > 0);
+          && (remainingWorkerBudget === null || remainingWorkerBudget > 0)
+          && (remainingTeamWorkerBudget === null || remainingTeamWorkerBudget > 0);
         if (shouldContinueImmediately) {
           wakeFairDispatchers();
         }

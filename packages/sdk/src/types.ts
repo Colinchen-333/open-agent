@@ -233,6 +233,11 @@ export interface QueryOptions {
    * worker count reaches this budget.
    */
   globalDispatcherWorkerBudget?: number;
+  /**
+   * Optional per-team worker budgets layered on top of the global dispatcher budget.
+   * A team cannot consume more active dispatcher workers than its configured budget.
+   */
+  teamDispatcherWorkerBudgets?: Record<string, number>;
 }
 
 // --------------------------------------------------------------------------
@@ -428,6 +433,8 @@ export interface OrchestrationControlPlaneSummary {
   terminalWorkerCount: number;
   globalDispatcherWorkerBudget: number | null;
   availableDispatcherWorkerBudget: number | null;
+  teamDispatcherWorkerBudgets: Record<string, number>;
+  availableTeamDispatcherWorkerBudgets: Record<string, number>;
   dispatcherCount: number;
   liveDispatcherCount: number;
   ledgerDispatcherCount: number;
