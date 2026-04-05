@@ -172,6 +172,15 @@ async function waitForOrchestrationSnapshot(
   throw new Error(`Timed out waiting for orchestration snapshot for team ${teamName}`);
 }
 
+async function waitForSchedulerSnapshot(
+  q: Query,
+  teamName: string,
+  predicate: (scheduler: Awaited<ReturnType<Query['readOrchestrationControlPlane']>>['scheduler']) => boolean,
+): Promise<Awaited<ReturnType<Query['readOrchestrationControlPlane']>>['scheduler']> {
+  const snapshot = await waitForOrchestrationSnapshot(q, teamName, (candidate) => predicate(candidate.scheduler));
+  return snapshot.scheduler;
+}
+
 describe('query() task dispatcher control plane', () => {
   it('continuously dispatches queued tasks and releases them on worker completion', async () => {
     const temp = makeTempHome('open-agent-sdk-task-dispatcher-');
@@ -1191,6 +1200,12 @@ describe('query() task dispatcher control plane', () => {
         (item) => item.source === 'live' && item.status === 'running',
       );
       expect(recoveredDispatcher.prompt).toBe('Process recovered queued tasks.');
+      const scheduler = await waitForSchedulerSnapshot(
+        reader,
+        teamName,
+        (item) => item.ownerSessionId === sessionId && typeof item.ownerQueryInstanceId === 'string' && item.ownerQueryInstanceId.length > 0,
+      );
+      expect(scheduler.ownerQueryInstanceId).toBeTruthy();
 
       await waitForTask(
         reader,
@@ -1273,6 +1288,11 @@ describe('query() task dispatcher control plane', () => {
         (item) => item.source === 'live' && item.status === 'running',
       );
       expect(primaryRecovered.prompt).toBe('Only one query should own this dispatcher at a time.');
+      const primaryScheduler = await waitForSchedulerSnapshot(
+        primary,
+        teamName,
+        (item) => item.ownerSessionId === sessionId && typeof item.ownerQueryInstanceId === 'string' && item.ownerQueryInstanceId.length > 0,
+      );
 
       const secondary = query('dispatcher ownership secondary', {
         cwd: temp.cwd,
@@ -1291,6 +1311,12 @@ describe('query() task dispatcher control plane', () => {
         source: 'ledger',
         status: 'running',
       });
+      const secondaryBeforeHandoff = await waitForSchedulerSnapshot(
+        secondary,
+        teamName,
+        (item) => item.ownerSessionId === sessionId && item.ownerQueryInstanceId === primaryScheduler.ownerQueryInstanceId,
+      );
+      expect(secondaryBeforeHandoff.ownerQueryInstanceId).toBe(primaryScheduler.ownerQueryInstanceId);
 
       primary.close();
 
@@ -1300,6 +1326,16 @@ describe('query() task dispatcher control plane', () => {
         source: 'live',
         status: 'running',
       });
+      const secondaryAfterHandoff = await waitForSchedulerSnapshot(
+        secondary,
+        teamName,
+        (item) =>
+          item.ownerSessionId === sessionId
+          && typeof item.ownerQueryInstanceId === 'string'
+          && item.ownerQueryInstanceId.length > 0
+          && item.ownerQueryInstanceId !== primaryScheduler.ownerQueryInstanceId,
+      );
+      expect(secondaryAfterHandoff.ownerQueryInstanceId).not.toBe(primaryScheduler.ownerQueryInstanceId);
 
       await secondary.stopTaskDispatcher(dispatcher.dispatcherId);
       secondary.close();

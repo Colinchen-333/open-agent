@@ -736,6 +736,13 @@ export function query(
     heartbeatAt: string;
   }
 
+  interface TaskSchedulerOwnershipRecord {
+    queryInstanceId: string;
+    sessionId: string;
+    claimedAt: string;
+    heartbeatAt: string;
+  }
+
   const cloneTaskDispatcherRecord = (record: TaskDispatcherRecord): TaskDispatcherRecord => {
     const cloned = JSON.parse(JSON.stringify(record)) as TaskDispatcherRecord;
     if (!cloned.schedulerState) {
@@ -857,9 +864,14 @@ export function query(
     dispatcherFairnessCursor = state.record.dispatcherId;
   };
   const wakeFairDispatchers = (): void => {
+    if (!refreshTaskSchedulerOwnership()) {
+      syncAppSchedulerControlPlane();
+      return;
+    }
     for (const dispatcher of listFairDispatchers()) {
       scheduleTaskDispatcherRun(dispatcher, 0);
     }
+    syncAppSchedulerControlPlane();
   };
   const clearDispatcherFairnessCursorIfNeeded = (dispatcherId: string): void => {
     if (dispatcherFairnessCursor === dispatcherId) {
@@ -883,11 +895,23 @@ export function query(
       nextTurn: nextTurnDispatcherId === state.record.dispatcherId,
     }));
   };
-  const buildSchedulerControlPlaneSnapshot = (): SchedulerControlPlaneSnapshot => ({
-    fairnessCursor: dispatcherFairnessCursor,
-    updatedAt: new Date().toISOString(),
-    queue: buildSchedulerQueueEntries(),
-  });
+  const buildSchedulerControlPlaneSnapshot = (): SchedulerControlPlaneSnapshot => {
+    const ownership = readTaskSchedulerOwnershipRecord();
+    return {
+      ownerQueryInstanceId: ownership?.queryInstanceId ?? null,
+      ownerSessionId: sessionId,
+      ownerScope: ownership
+        ? ownership.queryInstanceId === queryInstanceId
+          ? 'local'
+          : 'remote'
+        : 'unowned',
+      ...(ownership?.claimedAt ? { claimedAt: ownership.claimedAt } : {}),
+      ...(ownership?.heartbeatAt ? { heartbeatAt: ownership.heartbeatAt } : {}),
+      fairnessCursor: dispatcherFairnessCursor,
+      updatedAt: new Date().toISOString(),
+      queue: buildSchedulerQueueEntries(),
+    };
+  };
   const touchTaskDispatcherRecord = (state: TaskDispatcherState, timestamp = new Date().toISOString()): void => {
     state.record.updatedAt = timestamp;
   };
@@ -1853,6 +1877,7 @@ export function query(
     if (cleanedUp) return;
     cleanedUp = true;
     cleanupTaskDispatchers(true);
+    releaseTaskSchedulerOwnership();
     if (mcpManager) {
       runtime.disconnectMcpServers().catch(() => {});
     }
@@ -2109,6 +2134,10 @@ export function query(
       .filter((entry) => !teamName || entry.dispatcher.teamName === teamName)
       .sort((left, right) => left.observedAt.localeCompare(right.observedAt));
     const scheduler = {
+      ownerQueryInstanceId: state.scheduler.ownerQueryInstanceId,
+      ownerSessionId: state.scheduler.ownerSessionId,
+      ...(state.scheduler.claimedAt ? { claimedAt: state.scheduler.claimedAt } : {}),
+      ...(state.scheduler.heartbeatAt ? { heartbeatAt: state.scheduler.heartbeatAt } : {}),
       fairnessCursor: state.scheduler.fairnessCursor,
       updatedAt: state.scheduler.updatedAt,
       queue: state.scheduler.queue
@@ -2142,6 +2171,7 @@ export function query(
       drainingDispatcherCount: dispatchers.filter((entry) => entry.status === 'draining').length,
       stoppedDispatcherCount: dispatchers.filter((entry) => entry.status === 'stopped').length,
       idleDispatcherCount: dispatchers.filter((entry) => entry.schedulerState === 'idle').length,
+      ownershipBlockedDispatcherCount: dispatchers.filter((entry) => entry.schedulerState === 'waiting_for_scheduler_owner').length,
       globalBudgetBlockedDispatcherCount: dispatchers.filter((entry) => entry.schedulerState === 'waiting_for_global_worker_budget').length,
       teamBudgetBlockedDispatcherCount: dispatchers.filter((entry) => entry.schedulerState === 'waiting_for_team_worker_budget').length,
       fairnessBlockedDispatcherCount: dispatchers.filter((entry) => entry.schedulerState === 'waiting_for_fair_turn').length,
@@ -3038,6 +3068,10 @@ export function query(
   const ensureTaskDispatcherRecovery = async (): Promise<void> => {
     if (!taskDispatcherRecoveryPromise) {
       taskDispatcherRecoveryPromise = (async () => {
+        if (!claimTaskSchedulerOwnership()) {
+          syncAppSchedulerControlPlane();
+          return;
+        }
         const persisted = readPersistedTaskDispatcherRecords()
           .filter((record) => record.status === 'running' || record.status === 'draining');
         for (const record of persisted) {
@@ -3054,6 +3088,7 @@ export function query(
           });
           scheduleTaskDispatcherRun(state, 0);
         }
+        syncAppSchedulerControlPlane();
       })();
     }
     await taskDispatcherRecoveryPromise;
@@ -3147,6 +3182,11 @@ export function query(
     if (state.disposed || state.record.status === 'stopped' || state.running) {
       return;
     }
+    if (readTaskSchedulerOwnershipRecord()?.queryInstanceId === queryInstanceId) {
+      if (refreshTaskSchedulerOwnership()) {
+        syncAppSchedulerControlPlane();
+      }
+    }
     if (!refreshTaskDispatcherOwnership(state)) {
       disposeTaskDispatcherState(state);
       return;
@@ -3182,6 +3222,14 @@ export function query(
         if (state.activeAssignments.size === 0) {
           markTaskDispatcherStopped(state);
         }
+        return;
+      }
+
+      if (!refreshTaskSchedulerOwnership()) {
+        if (setTaskDispatcherSchedulerState(state, 'waiting_for_scheduler_owner', 'scheduler_owner')) {
+          syncTaskDispatcherRecord(state);
+        }
+        syncAppSchedulerControlPlane();
         return;
       }
 
@@ -4757,6 +4805,7 @@ export function query(
       activeAssignments: new Map(),
     };
     taskDispatchers.set(dispatcherId, state);
+    claimTaskSchedulerOwnership();
     syncTaskDispatcherRecord(state);
     emitTaskDispatcherOrchestrationEvent(state, 'started', { timestamp: startedAt });
     scheduleTaskDispatcherRun(state, 0);
@@ -4798,6 +4847,7 @@ export function query(
       ...(persisted.stoppedAt ? { stoppedAt: undefined } : {}),
       updatedAt: new Date().toISOString(),
     });
+    claimTaskSchedulerOwnership();
     emitTaskDispatcherOrchestrationEvent(state, 'started', { timestamp: state.record.updatedAt });
     scheduleTaskDispatcherRun(state, 0);
     return cloneTaskDispatcherRecord(state.record);
@@ -4809,6 +4859,9 @@ export function query(
   const getTaskDispatcherOwnershipPath = (dispatcherId: string) => sessionMgr
     ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.dispatcher-ownership.${dispatcherId}.json`)
     : join(cwd, '.open-agent', 'dispatcher-ledgers', `${sessionId}.${dispatcherId}.ownership.json`);
+  const getTaskSchedulerOwnershipPath = () => sessionMgr
+    ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.scheduler-ownership.json`)
+    : join(cwd, '.open-agent', 'dispatcher-ledgers', `${sessionId}.scheduler-ownership.json`);
   const getTaskDispatcherDiagnosisLedgerPath = () => sessionMgr
     ? join(dirname(sessionMgr.getTranscriptPath(transcriptCwd, sessionId)), `${sessionId}.dispatcher-diagnoses.json`)
     : join(cwd, '.open-agent', 'dispatcher-ledgers', `${sessionId}.diagnoses.json`);
@@ -4850,6 +4903,22 @@ export function query(
           : [],
         scheduler: parsed.scheduler && typeof parsed.scheduler === 'object'
           ? {
+            ownerQueryInstanceId:
+              typeof parsed.scheduler.ownerQueryInstanceId === 'string'
+                ? parsed.scheduler.ownerQueryInstanceId
+                : null,
+            ownerSessionId:
+              typeof parsed.scheduler.ownerSessionId === 'string'
+                ? parsed.scheduler.ownerSessionId
+                : sessionId,
+            ownerScope:
+              parsed.scheduler.ownerQueryInstanceId === queryInstanceId
+                ? 'local'
+                : typeof parsed.scheduler.ownerQueryInstanceId === 'string'
+                  ? 'remote'
+                  : 'unowned',
+            ...(typeof parsed.scheduler.claimedAt === 'string' ? { claimedAt: parsed.scheduler.claimedAt } : {}),
+            ...(typeof parsed.scheduler.heartbeatAt === 'string' ? { heartbeatAt: parsed.scheduler.heartbeatAt } : {}),
             fairnessCursor:
               typeof parsed.scheduler.fairnessCursor === 'string'
                 ? parsed.scheduler.fairnessCursor
@@ -4865,6 +4934,9 @@ export function query(
               : [],
           }
           : {
+            ownerQueryInstanceId: null,
+            ownerSessionId: sessionId,
+            ownerScope: 'unowned',
             fairnessCursor: null,
             updatedAt: '',
             queue: [],
@@ -4881,11 +4953,39 @@ export function query(
       return null;
     }
     return {
+      ownerQueryInstanceId: unified.scheduler.ownerQueryInstanceId,
+      ownerSessionId: unified.scheduler.ownerSessionId,
+      ownerScope: unified.scheduler.ownerScope,
+      ...(unified.scheduler.claimedAt ? { claimedAt: unified.scheduler.claimedAt } : {}),
+      ...(unified.scheduler.heartbeatAt ? { heartbeatAt: unified.scheduler.heartbeatAt } : {}),
       fairnessCursor: unified.scheduler.fairnessCursor,
       updatedAt: unified.scheduler.updatedAt,
       queue: unified.scheduler.queue.map((entry) => ({ ...entry })),
     };
   }
+
+  const readTaskSchedulerOwnershipRecord = (): TaskSchedulerOwnershipRecord | null => {
+    const ownershipPath = getTaskSchedulerOwnershipPath();
+    if (!existsSync(ownershipPath)) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(readFileSync(ownershipPath, 'utf-8')) as TaskSchedulerOwnershipRecord;
+      if (
+        !parsed
+        || typeof parsed !== 'object'
+        || typeof parsed.queryInstanceId !== 'string'
+        || typeof parsed.sessionId !== 'string'
+        || typeof parsed.claimedAt !== 'string'
+        || typeof parsed.heartbeatAt !== 'string'
+      ) {
+        return null;
+      }
+      return parsed;
+    } catch {
+      return null;
+    }
+  };
 
   const readTaskDispatcherOwnershipRecord = (dispatcherId: string): TaskDispatcherOwnershipRecord | null => {
     const ownershipPath = getTaskDispatcherOwnershipPath(dispatcherId);
@@ -4927,6 +5027,24 @@ export function query(
     return now.getTime() - heartbeatMs > getTaskDispatcherOwnershipTtlMs(record);
   };
 
+  const getTaskSchedulerOwnershipTtlMs = (): number => {
+    const pollIntervals = [...taskDispatchers.values()]
+      .filter((state) => !state.disposed && state.record.status !== 'stopped')
+      .map((state) => Math.max(state.record.leaseMs, state.record.pollIntervalMs * 4));
+    return Math.max(1_000, ...pollIntervals);
+  };
+
+  const hasTaskSchedulerOwnershipExpired = (
+    ownership: TaskSchedulerOwnershipRecord,
+    now = new Date(),
+  ): boolean => {
+    const heartbeatMs = Date.parse(ownership.heartbeatAt);
+    if (!Number.isFinite(heartbeatMs)) {
+      return true;
+    }
+    return now.getTime() - heartbeatMs > getTaskSchedulerOwnershipTtlMs();
+  };
+
   const writeTaskDispatcherOwnershipRecord = (
     dispatcherId: string,
     ownership: TaskDispatcherOwnershipRecord,
@@ -4934,6 +5052,20 @@ export function query(
   ): boolean => {
     try {
       const ownershipPath = getTaskDispatcherOwnershipPath(dispatcherId);
+      mkdirSync(dirname(ownershipPath), { recursive: true });
+      writeFileSync(ownershipPath, JSON.stringify(ownership, null, 2), exclusive ? { flag: 'wx' } : undefined);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const writeTaskSchedulerOwnershipRecord = (
+    ownership: TaskSchedulerOwnershipRecord,
+    exclusive: boolean,
+  ): boolean => {
+    try {
+      const ownershipPath = getTaskSchedulerOwnershipPath();
       mkdirSync(dirname(ownershipPath), { recursive: true });
       writeFileSync(ownershipPath, JSON.stringify(ownership, null, 2), exclusive ? { flag: 'wx' } : undefined);
       return true;
@@ -4996,6 +5128,52 @@ export function query(
     }
   };
 
+  const claimTaskSchedulerOwnership = (now = new Date()): boolean => {
+    const existing = readTaskSchedulerOwnershipRecord();
+    const claimedAt = existing?.queryInstanceId === queryInstanceId ? existing.claimedAt : now.toISOString();
+    const nextOwnership: TaskSchedulerOwnershipRecord = {
+      queryInstanceId,
+      sessionId,
+      claimedAt,
+      heartbeatAt: now.toISOString(),
+    };
+
+    if (existing?.queryInstanceId === queryInstanceId) {
+      return writeTaskSchedulerOwnershipRecord(nextOwnership, false);
+    }
+
+    if (!existing) {
+      return writeTaskSchedulerOwnershipRecord(nextOwnership, true)
+        || readTaskSchedulerOwnershipRecord()?.queryInstanceId === queryInstanceId;
+    }
+
+    if (!hasTaskSchedulerOwnershipExpired(existing, now)) {
+      return false;
+    }
+
+    try {
+      unlinkSync(getTaskSchedulerOwnershipPath());
+    } catch {
+      // Best-effort: another query may replace the scheduler ownership file concurrently.
+    }
+    return writeTaskSchedulerOwnershipRecord(nextOwnership, true)
+      || readTaskSchedulerOwnershipRecord()?.queryInstanceId === queryInstanceId;
+  };
+
+  const refreshTaskSchedulerOwnership = (now = new Date()): boolean => claimTaskSchedulerOwnership(now);
+
+  const releaseTaskSchedulerOwnership = (): void => {
+    const existing = readTaskSchedulerOwnershipRecord();
+    if (existing && existing.queryInstanceId !== queryInstanceId) {
+      return;
+    }
+    try {
+      unlinkSync(getTaskSchedulerOwnershipPath());
+    } catch {
+      // Best-effort: another query may already have cleaned up the scheduler ownership file.
+    }
+  };
+
   const writeUnifiedOrchestrationLedger = (
     updater: (current: PersistedOrchestrationLedgerFile) => PersistedOrchestrationLedgerFile,
   ): void => {
@@ -5010,6 +5188,9 @@ export function query(
         timelineItems: [],
         dispatcherDiagnoses: [],
         scheduler: {
+          ownerQueryInstanceId: null,
+          ownerSessionId: sessionId,
+          ownerScope: 'unowned',
           fairnessCursor: null,
           updatedAt: '',
           queue: [],
@@ -5026,6 +5207,11 @@ export function query(
     writeUnifiedOrchestrationLedger((current) => ({
       ...current,
       scheduler: {
+        ownerQueryInstanceId: snapshot.ownerQueryInstanceId,
+        ownerSessionId: snapshot.ownerSessionId,
+        ownerScope: snapshot.ownerScope,
+        ...(snapshot.claimedAt ? { claimedAt: snapshot.claimedAt } : {}),
+        ...(snapshot.heartbeatAt ? { heartbeatAt: snapshot.heartbeatAt } : {}),
         fairnessCursor: snapshot.fairnessCursor,
         updatedAt: snapshot.updatedAt,
         queue: snapshot.queue.map((entry) => ({ ...entry })),

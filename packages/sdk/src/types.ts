@@ -443,6 +443,7 @@ export interface OrchestrationControlPlaneSummary {
   drainingDispatcherCount: number;
   stoppedDispatcherCount: number;
   idleDispatcherCount: number;
+  ownershipBlockedDispatcherCount: number;
   globalBudgetBlockedDispatcherCount: number;
   teamBudgetBlockedDispatcherCount: number;
   fairnessBlockedDispatcherCount: number;
@@ -467,6 +468,11 @@ export interface SchedulerQueueEntry {
 }
 
 export interface SchedulerControlPlaneSnapshot {
+  ownerQueryInstanceId: string | null;
+  ownerSessionId: string;
+  ownerScope: 'local' | 'remote' | 'unowned';
+  claimedAt?: string;
+  heartbeatAt?: string;
   fairnessCursor: string | null;
   updatedAt: string;
   queue: SchedulerQueueEntry[];
@@ -654,6 +660,7 @@ export interface TaskDispatcherAssignmentRecord {
 export type TaskDispatcherSchedulingState =
   | 'idle'
   | 'dispatching'
+  | 'waiting_for_scheduler_owner'
   | 'waiting_for_global_worker_budget'
   | 'waiting_for_team_worker_budget'
   | 'waiting_for_fair_turn'
@@ -661,6 +668,7 @@ export type TaskDispatcherSchedulingState =
   | 'stopped';
 
 export type TaskDispatcherBlockReason =
+  | 'scheduler_owner'
   | 'global_worker_budget'
   | 'team_worker_budget'
   | 'fairness_turn';

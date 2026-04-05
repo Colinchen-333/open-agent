@@ -225,6 +225,11 @@ export function syncSchedulerControlPlane(
   return {
     ...state,
     scheduler: {
+      ownerQueryInstanceId: scheduler.ownerQueryInstanceId,
+      ownerSessionId: scheduler.ownerSessionId,
+      ownerScope: scheduler.ownerScope,
+      ...(scheduler.claimedAt ? { claimedAt: scheduler.claimedAt } : {}),
+      ...(scheduler.heartbeatAt ? { heartbeatAt: scheduler.heartbeatAt } : {}),
       fairnessCursor: scheduler.fairnessCursor,
       updatedAt: scheduler.updatedAt,
       queue: scheduler.queue.map((entry) => ({ ...entry })),

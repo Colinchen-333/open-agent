@@ -141,6 +141,11 @@ export interface SchedulerQueueControlPlaneEntryState {
 }
 
 export interface SchedulerControlPlaneState {
+  ownerQueryInstanceId: string | null;
+  ownerSessionId: string;
+  ownerScope: 'local' | 'remote' | 'unowned';
+  claimedAt?: string;
+  heartbeatAt?: string;
   fairnessCursor: string | null;
   updatedAt: string;
   queue: SchedulerQueueControlPlaneEntryState[];
@@ -281,6 +286,9 @@ export function createDefaultAppState(overrides: Partial<AppState> = {}): AppSta
     dispatchers: {},
     dispatcherDiagnoses: {},
     scheduler: {
+      ownerQueryInstanceId: null,
+      ownerSessionId: '',
+      ownerScope: 'unowned',
       fairnessCursor: null,
       updatedAt: '',
       queue: [],
