@@ -1206,6 +1206,7 @@ describe('query() task dispatcher control plane', () => {
         (item) => item.ownerSessionId === sessionId && typeof item.ownerQueryInstanceId === 'string' && item.ownerQueryInstanceId.length > 0,
       );
       expect(scheduler.ownerQueryInstanceId).toBeTruthy();
+      expect(scheduler.ownerScope).toBe('local');
 
       await waitForTask(
         reader,
@@ -1216,6 +1217,103 @@ describe('query() task dispatcher control plane', () => {
 
       await reader.stopTaskDispatcher(dispatcher.dispatcherId);
       reader.close();
+    } finally {
+      temp.cleanup();
+    }
+  });
+
+  it('blocks a secondary live dispatcher until scheduler ownership is handed off', async () => {
+    const temp = makeTempHome('open-agent-sdk-task-scheduler-handoff-');
+    const primaryTeamName = `dispatcher-team-primary-${Date.now()}`;
+    const blockedTeamName = `dispatcher-team-blocked-${Date.now()}`;
+    const sessionId = randomUUID();
+
+    try {
+      const primary = query('scheduler handoff primary', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeCompletingWorkerProvider(),
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        sessionId,
+      } as any);
+
+      await primary.createTeam({ name: primaryTeamName, setActive: true });
+      const primaryDispatcher = await primary.startTaskDispatcher({
+        dispatcherId: `dispatcher-primary-${Date.now()}`,
+        owner: 'dispatcher-owner',
+        teamName: primaryTeamName,
+        pollIntervalMs: 25,
+        leaseMs: 500,
+      });
+
+      await waitForDispatcher(
+        primary,
+        primaryDispatcher.dispatcherId,
+        (item) => item.status === 'running' && item.schedulerState === 'idle',
+      );
+      const primaryScheduler = await waitForSchedulerSnapshot(
+        primary,
+        primaryTeamName,
+        (item) => item.ownerScope === 'local' && typeof item.ownerQueryInstanceId === 'string',
+      );
+      expect(primaryScheduler.ownerScope).toBe('local');
+
+      const secondary = query('scheduler handoff secondary', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeCompletingWorkerProvider(),
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        sessionId,
+      } as any);
+
+      await secondary.createTeam({ name: blockedTeamName, setActive: true });
+      const blockedTask = await secondary.createTask({
+        teamName: blockedTeamName,
+        subject: 'Blocked by scheduler owner',
+        description: 'Should wait until the primary query releases ownership.',
+        priority: 11,
+      });
+      const secondaryDispatcher = await secondary.startTaskDispatcher({
+        dispatcherId: `dispatcher-secondary-${Date.now()}`,
+        owner: 'dispatcher-owner',
+        teamName: blockedTeamName,
+        pollIntervalMs: 25,
+        leaseMs: 500,
+      });
+
+      const blockedSecondary = await waitForDispatcher(
+        secondary,
+        secondaryDispatcher.dispatcherId,
+        (item) => item.status === 'running' && item.schedulerState === 'waiting_for_scheduler_owner',
+      );
+      expect(blockedSecondary.lastBlockedReason).toBe('scheduler_owner');
+      const blockedSnapshot = await waitForOrchestrationSnapshot(
+        secondary,
+        blockedTeamName,
+        (snapshot) => snapshot.summary.ownershipBlockedDispatcherCount >= 1 && snapshot.scheduler.ownerScope === 'remote',
+      );
+      expect(blockedSnapshot.scheduler.ownerQueryInstanceId).toBe(primaryScheduler.ownerQueryInstanceId);
+      expect((await secondary.getTask(blockedTask.id, { teamName: blockedTeamName }))?.status).toBe('pending');
+
+      primary.close();
+
+      await waitForTask(
+        secondary,
+        blockedTask.id,
+        blockedTeamName,
+        (item) => item.status === 'completed',
+      );
+      const handedOffScheduler = await waitForSchedulerSnapshot(
+        secondary,
+        blockedTeamName,
+        (item) => item.ownerScope === 'local' && item.ownerQueryInstanceId !== primaryScheduler.ownerQueryInstanceId,
+      );
+      expect(handedOffScheduler.ownerScope).toBe('local');
+
+      await secondary.stopTaskDispatcher(secondaryDispatcher.dispatcherId);
+      secondary.close();
     } finally {
       temp.cleanup();
     }
@@ -1293,6 +1391,7 @@ describe('query() task dispatcher control plane', () => {
         teamName,
         (item) => item.ownerSessionId === sessionId && typeof item.ownerQueryInstanceId === 'string' && item.ownerQueryInstanceId.length > 0,
       );
+      expect(primaryScheduler.ownerScope).toBe('local');
 
       const secondary = query('dispatcher ownership secondary', {
         cwd: temp.cwd,
@@ -1317,6 +1416,7 @@ describe('query() task dispatcher control plane', () => {
         (item) => item.ownerSessionId === sessionId && item.ownerQueryInstanceId === primaryScheduler.ownerQueryInstanceId,
       );
       expect(secondaryBeforeHandoff.ownerQueryInstanceId).toBe(primaryScheduler.ownerQueryInstanceId);
+      expect(secondaryBeforeHandoff.ownerScope).toBe('remote');
 
       primary.close();
 
@@ -1336,6 +1436,7 @@ describe('query() task dispatcher control plane', () => {
           && item.ownerQueryInstanceId !== primaryScheduler.ownerQueryInstanceId,
       );
       expect(secondaryAfterHandoff.ownerQueryInstanceId).not.toBe(primaryScheduler.ownerQueryInstanceId);
+      expect(secondaryAfterHandoff.ownerScope).toBe('local');
 
       await secondary.stopTaskDispatcher(dispatcher.dispatcherId);
       secondary.close();

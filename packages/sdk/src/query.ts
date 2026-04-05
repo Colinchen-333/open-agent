@@ -2136,6 +2136,7 @@ export function query(
     const scheduler = {
       ownerQueryInstanceId: state.scheduler.ownerQueryInstanceId,
       ownerSessionId: state.scheduler.ownerSessionId,
+      ownerScope: state.scheduler.ownerScope,
       ...(state.scheduler.claimedAt ? { claimedAt: state.scheduler.claimedAt } : {}),
       ...(state.scheduler.heartbeatAt ? { heartbeatAt: state.scheduler.heartbeatAt } : {}),
       fairnessCursor: state.scheduler.fairnessCursor,
