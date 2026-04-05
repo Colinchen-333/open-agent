@@ -1,7 +1,68 @@
 import { existsSync, readFileSync } from 'fs';
+import { readFile, access } from 'node:fs/promises';
 import { join, resolve } from 'path';
 import { homedir } from 'os';
 import type { McpServerConfig } from './types.js';
+
+// ---------------------------------------------------------------------------
+// loadMemoryPrompt — standalone async export
+// ---------------------------------------------------------------------------
+
+/**
+ * Ordered list of memory file names: CLAUDE.md takes precedence,
+ * AGENT.md is kept as a fallback alias for backward compatibility.
+ */
+const MEMORY_FILENAMES = ['CLAUDE.md', 'AGENT.md'];
+
+async function fileExists(p: string): Promise<boolean> {
+  try {
+    await access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Locate and return the first memory-instruction file found, using the
+ * Claude Code precedence order:
+ *
+ *   1. `<cwd>/.claude/CLAUDE.md`   (project config dir — highest priority)
+ *   2. `<cwd>/CLAUDE.md`           (project root)
+ *   3. `<home>/.claude/CLAUDE.md`  (user-level global)
+ *
+ * At each level, `AGENT.md` is tried as a fallback alias after `CLAUDE.md`.
+ *
+ * @param cwd  Working directory to search from (defaults to `process.cwd()`).
+ * @param home User home directory (defaults to `os.homedir()`; injectable for testing).
+ * @returns The file contents as a string, or `''` if no file is found.
+ */
+export async function loadMemoryPrompt(
+  cwd: string = process.cwd(),
+  home: string = homedir(),
+): Promise<string> {
+  const candidates: string[] = [];
+
+  // 1. $PWD/.claude/<name>  (highest precedence)
+  for (const name of MEMORY_FILENAMES) {
+    candidates.push(join(cwd, '.claude', name));
+  }
+  // 2. $PWD/<name>
+  for (const name of MEMORY_FILENAMES) {
+    candidates.push(join(cwd, name));
+  }
+  // 3. ~/.claude/<name>  (user-level global)
+  for (const name of MEMORY_FILENAMES) {
+    candidates.push(join(home, '.claude', name));
+  }
+
+  for (const path of candidates) {
+    if (await fileExists(path)) {
+      return await readFile(path, 'utf8');
+    }
+  }
+  return '';
+}
 
 // ---------------------------------------------------------------------------
 // Settings type

@@ -13,7 +13,7 @@ export {
   type SessionUpdate,
 } from './session-manager.js';
 export { AutoMemory } from './auto-memory.js';
-export { ConfigLoader, type Settings, type PermissionRuleConfig, type HookConfig } from './config-loader.js';
+export { ConfigLoader, loadMemoryPrompt, type Settings, type PermissionRuleConfig, type HookConfig } from './config-loader.js';
 export {
   DEFAULT_PROMPT_CONTEXT_PROVIDERS,
   createAdditionalDirectoriesProvider,
