@@ -7,6 +7,7 @@ import type {
   SandboxConfig,
 } from './types';
 import { classifyBashCommand } from './bash-policy.js';
+import { runPipeline, type PipelineContext, type PipelineStage } from './pipeline.js';
 
 // Read-only tools that are always safe for informational access
 const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion'];
@@ -103,6 +104,9 @@ export class PermissionEngine {
   private deniedPaths: string[];
   private _permissionPromptToolName?: string;
 
+  /** @internal test instrumentation — set to a callback to observe pipeline stage execution order */
+  public __trace?: (stage: PipelineStage) => void;
+
   constructor(config?: Partial<PermissionConfig & { sandbox: SandboxConfig }>) {
     this.mode = config?.mode ?? 'default';
     this.rules = {
@@ -120,36 +124,114 @@ export class PermissionEngine {
   /**
    * Evaluate a permission request and return the decision.
    *
-   * Evaluation order:
-   *   1. bypassPermissions mode  → always allow
-   *   2. plan mode               → only read-only tools allowed
-   *   3. deny rules              → highest priority, always deny on match
-   *   4. allow rules             → explicitly pre-approved
-   *   5. ask rules               → explicitly requires confirmation
-   *   6. acceptEdits mode        → auto-allow file edit tools
-   *   7. dontAsk mode            → deny anything not pre-approved above
-   *   8. default mode            → allow safe tools; ask for dangerous/write tools
+   * The evaluation runs through an explicit 6-stage pipeline in order:
+   *   1. validateInput    — sandbox enforcement + file path restrictions
+   *   2. alwaysDeny       — plan mode deny + explicit deny rules
+   *   3. alwaysAllow      — bypassPermissions + plan mode allow + allow rules
+   *   4. preToolUseHooks  — pre-tool-use hook results (stub; returns undefined)
+   *   5. classifier       — ML/heuristic classifier (stub; returns undefined)
+   *   6. prompt           — ask rules + mode-specific heuristics (always resolves)
+   *
+   * The first stage that returns a PermissionDecision short-circuits the
+   * pipeline. The `prompt` stage always returns a decision, so the pipeline
+   * will never fall through to the error throw in `runPipeline`.
    */
-  evaluate(request: PermissionRequest): PermissionDecision {
-    // 1. bypassPermissions: skip all checks
-    if (this.mode === 'bypassPermissions') {
-      return { behavior: 'allow', reason: 'bypass mode' };
-    }
+  async evaluate(request: PermissionRequest): Promise<PermissionDecision> {
+    return runPipeline({ request, trace: this.__trace }, [
+      ['validateInput',   (ctx) => this.stageValidateInput(ctx)],
+      ['alwaysDeny',      (ctx) => this.stageAlwaysDeny(ctx)],
+      ['alwaysAllow',     (ctx) => this.stageAlwaysAllow(ctx)],
+      ['preToolUseHooks', (ctx) => this.stagePreToolUseHooks(ctx)],
+      ['classifier',      (ctx) => this.stageClassifier(ctx)],
+      ['prompt',          (ctx) => this.stagePrompt(ctx)],
+    ]);
+  }
 
-    // 1b. Sandbox enforcement — file system + auto-allow bash if sandboxed.
+  // ── Pipeline stage methods ───────────────────────────────────────────────────
+
+  /**
+   * Stage 1 — validateInput
+   *
+   * Enforces hard infrastructure constraints before any policy logic:
+   *   - Sandbox filesystem read/write restrictions
+   *   - File path allowlist / denylist restrictions
+   *
+   * Note: bypassPermissions is intentionally NOT handled here so that sandbox
+   * and path constraints remain enforced even when that mode is active (matching
+   * the original evaluation order where bypassPermissions precedes these checks).
+   * bypassPermissions is instead handled in stageAlwaysAllow so that the
+   * pipeline always runs all 6 stages for observability.
+   *
+   * For a request that does not trigger any constraint this stage returns
+   * undefined and the pipeline continues to the next stage.
+   */
+  private async stageValidateInput(ctx: PipelineContext): Promise<PermissionDecision | undefined> {
+    const { request } = ctx;
+
+    // Sandbox enforcement — file system + auto-allow bash if sandboxed.
     if (this.sandbox.enabled) {
       const sandboxDecision = this.checkSandbox(request);
       if (sandboxDecision) return sandboxDecision;
     }
 
-    // 1c. File system path restrictions — checked after bypassPermissions but
-    //     before all other rules so they can't be bypassed by allow rules.
+    // File system path restrictions — deny if the requested path violates
+    // configured allowedPaths / deniedPaths.
     if (FILE_SYSTEM_TOOLS.includes(request.toolName)) {
       const pathDecision = this.checkPathRestrictions(request);
       if (pathDecision) return pathDecision;
     }
 
-    // 2. plan mode: only read-only tools permitted
+    return undefined;
+  }
+
+  /**
+   * Stage 2 — alwaysDeny
+   *
+   * Returns a deny decision for requests that must always be blocked:
+   *   - plan mode: any tool that is not read-only is denied
+   *   - Explicit deny rules: highest-priority user-configured blocks
+   */
+  private async stageAlwaysDeny(ctx: PipelineContext): Promise<PermissionDecision | undefined> {
+    const { request } = ctx;
+
+    // plan mode: deny tools that are not read-only.
+    if (this.mode === 'plan') {
+      if (READ_ONLY_TOOLS.includes(request.toolName)) {
+        // Read-only built-in tool — let stageAlwaysAllow handle the allow.
+        return undefined;
+      }
+      if (isMetadataReadOnly(request) && !isMetadataOpenWorld(request) && !isMetadataDestructive(request)) {
+        // Read-only MCP/dynamic tool — let stageAlwaysAllow handle the allow.
+        return undefined;
+      }
+      return { behavior: 'deny', reason: 'plan mode: only read-only tools allowed' };
+    }
+
+    // Explicit deny rules take highest priority over everything below.
+    if (this.matchesRules(request, this.rules.deny)) {
+      return { behavior: 'deny', reason: 'matched deny rule' };
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Stage 3 — alwaysAllow
+   *
+   * Returns an allow decision for requests that should always be permitted:
+   *   - bypassPermissions mode: skip all checks
+   *   - plan mode: read-only tools and read-only MCP tools are allowed
+   *   - Explicit allow rules: pre-approved by the user
+   */
+  private async stageAlwaysAllow(ctx: PipelineContext): Promise<PermissionDecision | undefined> {
+    const { request } = ctx;
+
+    // bypassPermissions: skip all further checks.
+    if (this.mode === 'bypassPermissions') {
+      return { behavior: 'allow', reason: 'bypass mode' };
+    }
+
+    // plan mode: allow read-only tools that weren't denied by stageAlwaysDeny.
     if (this.mode === 'plan') {
       if (READ_ONLY_TOOLS.includes(request.toolName)) {
         return { behavior: 'allow', reason: 'read-only in plan mode' };
@@ -157,39 +239,76 @@ export class PermissionEngine {
       if (isMetadataReadOnly(request) && !isMetadataOpenWorld(request) && !isMetadataDestructive(request)) {
         return { behavior: 'allow', reason: `${dynamicReadOnlyReason(request)} in plan mode` };
       }
-      return { behavior: 'deny', reason: 'plan mode: only read-only tools allowed' };
+      // Non-read-only in plan mode was already denied by stageAlwaysDeny;
+      // nothing more to allow here.
+      return undefined;
     }
 
-    // 3. Deny rules take highest priority over everything below
-    if (this.matchesRules(request, this.rules.deny)) {
-      return { behavior: 'deny', reason: 'matched deny rule' };
-    }
-
-    // 4. Explicit allow rules
+    // Explicit allow rules.
     if (this.matchesRules(request, this.rules.allow)) {
       return { behavior: 'allow', reason: 'matched allow rule' };
     }
 
-    // 5. Explicit ask rules
+    return undefined;
+  }
+
+  /**
+   * Stage 4 — preToolUseHooks
+   *
+   * Placeholder for future pre-tool-use hook integration. Currently returns
+   * undefined so the pipeline always continues to the classifier stage.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  private async stagePreToolUseHooks(_ctx: PipelineContext): Promise<PermissionDecision | undefined> {
+    return undefined;
+  }
+
+  /**
+   * Stage 5 — classifier
+   *
+   * Placeholder for a future ML/heuristic classifier that can auto-approve or
+   * auto-reject requests based on learned patterns. Currently returns undefined
+   * so the pipeline always continues to the prompt stage.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  private async stageClassifier(_ctx: PipelineContext): Promise<PermissionDecision | undefined> {
+    return undefined;
+  }
+
+  /**
+   * Stage 6 — prompt
+   *
+   * The final decision stage — always returns a PermissionDecision so the
+   * pipeline never falls through. Handles:
+   *   - Explicit ask rules
+   *   - acceptEdits mode: auto-allow file-editing tools
+   *   - dontAsk mode: deny anything not pre-approved by earlier stages
+   *   - default / acceptEdits mode heuristics: safe tools, Bash classification,
+   *     metadata-based allow/ask, and a catch-all ask
+   */
+  private async stagePrompt(ctx: PipelineContext): Promise<PermissionDecision | undefined> {
+    const { request } = ctx;
+
+    // Explicit ask rules.
     if (this.matchesRules(request, this.rules.ask)) {
       return { behavior: 'ask', reason: 'matched ask rule' };
     }
 
-    // 6. acceptEdits: auto-allow file editing tools
+    // acceptEdits: auto-allow file editing tools.
     if (this.mode === 'acceptEdits') {
       if (EDIT_TOOLS.includes(request.toolName)) {
         return { behavior: 'allow', reason: 'acceptEdits mode' };
       }
     }
 
-    // 7. dontAsk: deny anything that was not pre-approved above
+    // dontAsk: deny anything that was not pre-approved above.
     if (this.mode === 'dontAsk') {
       return { behavior: 'deny', reason: 'not pre-approved in dontAsk mode' };
     }
 
-    // 8. default mode heuristics
+    // default / acceptEdits mode heuristics.
     if (this.mode === 'default' || this.mode === 'acceptEdits') {
-      // Always-safe tools need no confirmation
+      // Always-safe tools need no confirmation.
       if (SAFE_TOOLS.includes(request.toolName)) {
         return { behavior: 'allow', reason: 'safe tool' };
       }
@@ -206,7 +325,7 @@ export class PermissionEngine {
         return { behavior: 'allow', reason: dynamicReadOnlyReason(request) };
       }
 
-      // Bash commands are audited for destructive patterns
+      // Bash commands are audited for destructive patterns.
       if (request.toolName === 'Bash') {
         const cmd = String((request.input as Record<string, unknown>)?.command ?? '');
         const disableSandbox = Boolean((request.input as Record<string, unknown>)?.dangerouslyDisableSandbox);
@@ -271,11 +390,11 @@ export class PermissionEngine {
         }
       }
 
-      // Write/Edit/other tools need user confirmation in default mode
+      // Write/Edit/other tools need user confirmation in default mode.
       return { behavior: 'ask', reason: 'requires approval in default mode' };
     }
 
-    // Fallback: ask
+    // Fallback: ask (catches any future modes not yet handled above).
     return { behavior: 'ask' };
   }
 
