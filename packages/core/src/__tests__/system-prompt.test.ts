@@ -323,4 +323,27 @@ describe('buildSystemPrompt runtime snapshot', () => {
     expect(prompt).not.toContain('duplicate memory section');
     expect(prompt).toContain('Current MEMORY.md contents');
   });
+
+  it('contains Claude-Code-aligned core principles', () => {
+    const REQUIRED_PHRASES = [
+      "Don't add features",
+      "Only add comments where the logic isn't self-evident",
+      "Don't add error handling",
+      "Don't create helpers",
+      'diagnose why before switching tactics',
+      'Before reporting a task complete, verify it actually works',
+      "Never claim \"all tests pass\" when output shows failures",
+    ];
+
+    const prompt = buildSystemPrompt({
+      cwd: '/tmp',
+      model: 'glm-4.7',
+      permissionMode: 'default',
+      tools: [],
+    });
+
+    for (const phrase of REQUIRED_PHRASES) {
+      expect(prompt).toContain(phrase);
+    }
+  });
 });
