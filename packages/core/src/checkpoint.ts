@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, readdirSync } from 'fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'fs';
 import { join, dirname } from 'path';
 
 interface CheckpointEntry {
@@ -7,6 +16,15 @@ interface CheckpointEntry {
   originalContent: string | null; // null means file didn't exist
   timestamp: number;
 }
+
+interface StoredCheckpointEntry extends CheckpointEntry {
+  checkpointFile: string;
+}
+
+type PathSnapshot =
+  | { kind: 'missing' }
+  | { kind: 'file'; content: string }
+  | { kind: 'directory' };
 
 export interface RewindTarget {
   filePath: string;
@@ -18,7 +36,7 @@ export interface RewindTarget {
  * enabling rewind to any previous tool_use checkpoint.
  */
 export class FileCheckpoint {
-  private entries: CheckpointEntry[] = [];
+  private entries: StoredCheckpointEntry[] = [];
   private sessionDir: string;
 
   constructor(sessionDir: string) {
@@ -29,13 +47,17 @@ export class FileCheckpoint {
 
   private loadFromDisk(): void {
     if (!existsSync(this.sessionDir)) return;
-    const loaded: CheckpointEntry[] = [];
+    const loaded: StoredCheckpointEntry[] = [];
     for (const file of readdirSync(this.sessionDir)) {
       if (!file.endsWith('.json')) continue;
       try {
-        const entry = JSON.parse(readFileSync(join(this.sessionDir, file), 'utf-8')) as CheckpointEntry;
+        const checkpointFile = join(this.sessionDir, file);
+        const entry = JSON.parse(readFileSync(checkpointFile, 'utf-8')) as CheckpointEntry;
         if (entry?.toolUseId && entry?.filePath && typeof entry.timestamp === 'number') {
-          loaded.push(entry);
+          loaded.push({
+            ...entry,
+            checkpointFile,
+          });
         }
       } catch {
         // Ignore malformed checkpoint files.
@@ -52,17 +74,22 @@ export class FileCheckpoint {
       originalContent = readFileSync(filePath, 'utf-8');
     }
 
-    const entry: CheckpointEntry = {
+    const timestamp = Date.now();
+    const checkpointFile = join(
+      this.sessionDir,
+      `${toolUseId}-${timestamp}-${Math.random().toString(36).slice(2, 6)}.json`,
+    );
+    const entry: StoredCheckpointEntry = {
       toolUseId,
       filePath,
       originalContent,
-      timestamp: Date.now(),
+      timestamp,
+      checkpointFile,
     };
 
     this.entries.push(entry);
 
     // Also persist to disk
-    const checkpointFile = join(this.sessionDir, `${toolUseId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`);
     writeFileSync(checkpointFile, JSON.stringify(entry), 'utf-8');
   }
 
@@ -76,25 +103,36 @@ export class FileCheckpoint {
     const toRewind = this.entries.slice(idx).reverse();
     const restored: string[] = [];
     const errors: string[] = [];
+    const rollbackSnapshots = new Map<string, PathSnapshot>();
+    const touchedPaths: string[] = [];
 
     for (const entry of toRewind) {
       try {
-        if (entry.originalContent === null) {
-          // File didn't exist before - remove it
-          if (existsSync(entry.filePath)) {
-            unlinkSync(entry.filePath);
-          }
-        } else {
-          mkdirSync(dirname(entry.filePath), { recursive: true });
-          writeFileSync(entry.filePath, entry.originalContent, 'utf-8');
+        if (!rollbackSnapshots.has(entry.filePath)) {
+          rollbackSnapshots.set(entry.filePath, snapshotPath(entry.filePath));
+          touchedPaths.push(entry.filePath);
         }
+        restoreCheckpointTarget(entry.filePath, entry.originalContent);
         restored.push(entry.filePath);
       } catch (err: unknown) {
         errors.push(`Failed to restore ${entry.filePath}: ${err instanceof Error ? err.message : String(err)}`);
+        const rollbackErrors = this.rollbackRewind(touchedPaths, rollbackSnapshots);
+        return {
+          restored: [],
+          errors: [...errors, ...rollbackErrors],
+        };
       }
     }
 
-    // Remove rewound entries
+    for (const entry of this.entries.slice(idx)) {
+      try {
+        unlinkSync(entry.checkpointFile);
+      } catch {
+        // Ignore checkpoint cleanup failures after a successful restore.
+      }
+    }
+
+    // Remove rewound entries from memory only after the restore commits.
     this.entries = this.entries.slice(0, idx);
 
     return { restored, errors };
@@ -128,4 +166,75 @@ export class FileCheckpoint {
       originalContent,
     }));
   }
+
+  private rollbackRewind(
+    touchedPaths: string[],
+    snapshots: Map<string, PathSnapshot>,
+  ): string[] {
+    const errors: string[] = [];
+    for (const filePath of [...touchedPaths].reverse()) {
+      const snapshot = snapshots.get(filePath);
+      if (!snapshot) continue;
+      try {
+        restorePathSnapshot(filePath, snapshot);
+      } catch (err: unknown) {
+        errors.push(
+          `Failed to roll back ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return errors;
+  }
+}
+
+function restoreCheckpointTarget(filePath: string, originalContent: string | null): void {
+  if (originalContent === null) {
+    if (existsSync(filePath)) {
+      rmSync(filePath, { recursive: true, force: true });
+    }
+    return;
+  }
+
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(filePath, originalContent, 'utf-8');
+}
+
+function snapshotPath(filePath: string): PathSnapshot {
+  if (!existsSync(filePath)) {
+    return { kind: 'missing' };
+  }
+
+  const stat = lstatSync(filePath);
+  if (stat.isDirectory()) {
+    return { kind: 'directory' };
+  }
+
+  return {
+    kind: 'file',
+    content: readFileSync(filePath, 'utf-8'),
+  };
+}
+
+function restorePathSnapshot(filePath: string, snapshot: PathSnapshot): void {
+  if (snapshot.kind === 'missing') {
+    if (existsSync(filePath)) {
+      rmSync(filePath, { recursive: true, force: true });
+    }
+    return;
+  }
+
+  if (snapshot.kind === 'directory') {
+    if (existsSync(filePath)) {
+      const stat = lstatSync(filePath);
+      if (stat.isDirectory()) {
+        return;
+      }
+      rmSync(filePath, { recursive: true, force: true });
+    }
+    mkdirSync(filePath, { recursive: true });
+    return;
+  }
+
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(filePath, snapshot.content, 'utf-8');
 }
