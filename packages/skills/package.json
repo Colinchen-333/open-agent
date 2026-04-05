@@ -15,6 +15,7 @@
     "dev": "echo 'No dev step for skills'"
   },
   "dependencies": {
+    "@open-agent/core": "workspace:*",
     "@open-agent/plugins": "workspace:*"
   }
 }

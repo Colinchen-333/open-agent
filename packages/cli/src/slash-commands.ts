@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import type { ConversationLoop, FileCheckpoint, SessionManager } from '@open-agent/core';
+import { loadMarkdownConfig } from '@open-agent/core';
 import {
   createTaskOutputTool,
   createTaskStopTool,
@@ -68,6 +69,62 @@ export interface SlashCommandResult {
   output?: string;
   shouldExit?: boolean;
   shouldClear?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// User slash commands — loaded from ~/.claude/commands/*.md and
+// <cwd>/.claude/commands/*.md at startup (or lazily on first dispatch).
+// ---------------------------------------------------------------------------
+
+export interface UserSlashCommand {
+  /** Command name without the leading `/`. */
+  name: string;
+  description: string;
+  /** The markdown body that becomes the prompt when the command is invoked. */
+  body: string;
+}
+
+/**
+ * Load user-defined slash commands from:
+ *   - `<home>/.claude/commands/*.md`  (user layer)
+ *   - `<cwd>/.claude/commands/*.md`   (project layer, takes precedence)
+ *
+ * The `name` of each command is either the frontmatter `name` field or the
+ * filename stem (without `.md`). When the user types `/<name>`, the body is
+ * emitted as a user message to the agent loop.
+ *
+ * Callers should cache the returned array; this function performs file I/O on
+ * every call.
+ */
+export async function loadUserSlashCommands(
+  cwd: string,
+  home?: string,
+): Promise<UserSlashCommand[]> {
+  const entries = await loadMarkdownConfig({ subdir: 'commands', cwd, home });
+  return entries.map((entry) => {
+    const fm = entry.frontmatter;
+    return {
+      name: (fm.name as string | undefined) ?? entry.name,
+      description: (fm.description as string | undefined) ?? '',
+      body: entry.body,
+    };
+  });
+}
+
+// Module-level cache keyed by cwd so it is populated once per project root.
+const _userCommandCache = new Map<string, UserSlashCommand[]>();
+
+async function getUserCommands(cwd: string): Promise<UserSlashCommand[]> {
+  if (!_userCommandCache.has(cwd)) {
+    const cmds = await loadUserSlashCommands(cwd);
+    _userCommandCache.set(cwd, cmds);
+  }
+  return _userCommandCache.get(cwd)!;
+}
+
+/** Clear the user command cache (useful in tests). */
+export function clearUserCommandCache(): void {
+  _userCommandCache.clear();
 }
 
 const SLASH_COMMANDS: Record<
@@ -812,15 +869,29 @@ export async function handleSlashCommand(
 
   const cmd = SLASH_COMMANDS[cmdName];
   if (!cmd) {
-    // Check if the input matches a known skill name (strip leading slash).
-    const skillName = cmdName.slice(1);
-    const matchedSkill = ctx.skills?.find((s) => s.name === skillName);
+    const nameWithoutSlash = cmdName.slice(1);
+
+    // Check if the input matches a known skill name.
+    const matchedSkill = ctx.skills?.find((s) => s.name === nameWithoutSlash);
     if (matchedSkill && matchedSkill.userInvocable === false) {
       return {
         handled: true,
-        output: `Skill '${skillName}' is not user-invocable.`,
+        output: `Skill '${nameWithoutSlash}' is not user-invocable.`,
       };
     }
+
+    // Check user-loaded markdown commands.
+    const userCmds = await getUserCommands(ctx.cwd);
+    const matchedUserCmd = userCmds.find((c) => c.name === nameWithoutSlash);
+    if (matchedUserCmd) {
+      // Emit the command body as a new user message to the agent loop.
+      // `handled: false` causes the REPL to forward the output string as user input.
+      return {
+        handled: false,
+        output: matchedUserCmd.body,
+      };
+    }
+
     return {
       handled: true,
       output: `Unknown command: ${cmdName}. Type /help for available commands.`,

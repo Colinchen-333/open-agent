@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { SkillRegistry } from '../index.js';
+import { SkillRegistry, loadUserSkills, augmentRegistryWithUserSkills } from '../index.js';
 
 describe('SkillRegistry', () => {
   it('loads local markdown skills and resolves arguments', () => {
@@ -115,5 +115,173 @@ Inspect the code touched by $ARGUMENTS and summarize the risks.`,
       const entries = registry.list();
       expect(entries[0].userInvocable).toBe(false);
     });
+  });
+});
+
+describe('loadUserSkills', () => {
+  function makeTempDir() {
+    return mkdtempSync(join(tmpdir(), 'open-agent-user-skills-'));
+  }
+
+  it('loads a skill from <cwd>/.claude/skills/', async () => {
+    const cwd = makeTempDir();
+    const skillsDir = join(cwd, '.claude', 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+    writeFileSync(
+      join(skillsDir, 'test-skill.md'),
+      `---
+name: test-skill
+description: A test skill loaded from markdown
+---
+Do the thing with $ARGUMENTS.`,
+      'utf-8',
+    );
+
+    const skills = await loadUserSkills(cwd);
+    expect(skills).toHaveLength(1);
+    expect(skills[0].name).toBe('test-skill');
+    expect(skills[0].description).toBe('A test skill loaded from markdown');
+    expect(skills[0].prompt).toContain('Do the thing with $ARGUMENTS.');
+    expect(skills[0].source).toBe('local');
+  });
+
+  it('uses filename stem as name when frontmatter name is absent', async () => {
+    const cwd = makeTempDir();
+    const skillsDir = join(cwd, '.claude', 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+    writeFileSync(
+      join(skillsDir, 'auto-named.md'),
+      `---
+description: No explicit name
+---
+Prompt body here.`,
+      'utf-8',
+    );
+
+    const skills = await loadUserSkills(cwd);
+    expect(skills[0].name).toBe('auto-named');
+  });
+
+  it('sets userInvocable: false when frontmatter says false', async () => {
+    const cwd = makeTempDir();
+    const skillsDir = join(cwd, '.claude', 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+    writeFileSync(
+      join(skillsDir, 'hidden-skill.md'),
+      `---
+name: hidden-skill
+description: Internal skill
+user-invocable: false
+---
+Internal prompt.`,
+      'utf-8',
+    );
+
+    const skills = await loadUserSkills(cwd);
+    expect(skills).toHaveLength(1);
+    expect(skills[0].userInvocable).toBe(false);
+  });
+
+  it('leaves userInvocable undefined when frontmatter omits it', async () => {
+    const cwd = makeTempDir();
+    const skillsDir = join(cwd, '.claude', 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+    writeFileSync(
+      join(skillsDir, 'public-skill.md'),
+      `---
+name: public-skill
+description: No userInvocable field
+---
+Prompt.`,
+      'utf-8',
+    );
+
+    const skills = await loadUserSkills(cwd);
+    expect(skills[0].userInvocable).toBeUndefined();
+  });
+
+  it('returns empty array when no .claude/skills directory exists', async () => {
+    const cwd = makeTempDir();
+    const skills = await loadUserSkills(cwd);
+    expect(skills).toHaveLength(0);
+  });
+
+  it('project layer overrides user layer for same name', async () => {
+    const home = makeTempDir();
+    const cwd = makeTempDir();
+
+    const userSkillsDir = join(home, '.claude', 'skills');
+    const projectSkillsDir = join(cwd, '.claude', 'skills');
+    mkdirSync(userSkillsDir, { recursive: true });
+    mkdirSync(projectSkillsDir, { recursive: true });
+
+    writeFileSync(
+      join(userSkillsDir, 'shared.md'),
+      `---\nname: shared\ndescription: User version\n---\nUser prompt.`,
+      'utf-8',
+    );
+    writeFileSync(
+      join(projectSkillsDir, 'shared.md'),
+      `---\nname: shared\ndescription: Project version\n---\nProject prompt.`,
+      'utf-8',
+    );
+
+    const skills = await loadUserSkills(cwd, home);
+    // Only one entry for "shared", and it should be the project version
+    const sharedSkills = skills.filter((s) => s.name === 'shared');
+    expect(sharedSkills).toHaveLength(1);
+    expect(sharedSkills[0].description).toBe('Project version');
+  });
+});
+
+describe('augmentRegistryWithUserSkills', () => {
+  it('augments registry with user skills, overriding same-named bundled skill', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-augment-'));
+    const registry = new SkillRegistry({ cwd });
+
+    // Register a bundled skill
+    registry.register({
+      name: 'shared-skill',
+      description: 'Bundled version',
+      prompt: 'Bundled prompt.',
+      source: 'local',
+      sourceLabel: 'bundled',
+    });
+
+    // Add a user skill with the same name in .claude/skills/
+    const skillsDir = join(cwd, '.claude', 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+    writeFileSync(
+      join(skillsDir, 'shared-skill.md'),
+      `---\nname: shared-skill\ndescription: User override\n---\nUser prompt.`,
+      'utf-8',
+    );
+
+    await augmentRegistryWithUserSkills(registry, cwd);
+
+    const resolved = registry.resolve('shared-skill');
+    expect(resolved).not.toBeNull();
+    expect(resolved?.description).toBe('User override');
+    expect(resolved?.prompt).toContain('User prompt.');
+  });
+
+  it('adds new skills not already present in registry', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-augment-new-'));
+    const registry = new SkillRegistry({ cwd });
+
+    const skillsDir = join(cwd, '.claude', 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+    writeFileSync(
+      join(skillsDir, 'new-skill.md'),
+      `---\nname: new-skill\ndescription: Brand new\n---\nNew prompt.`,
+      'utf-8',
+    );
+
+    await augmentRegistryWithUserSkills(registry, cwd);
+
+    const entries = registry.list();
+    const found = entries.find((e) => e.name === 'new-skill');
+    expect(found).toBeDefined();
+    expect(found?.description).toBe('Brand new');
   });
 });

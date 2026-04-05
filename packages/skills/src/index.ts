@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync } from 'fs';
 import { basename, join } from 'path';
 import { homedir } from 'os';
 import { PluginLoader } from '@open-agent/plugins';
+import { loadMarkdownConfig } from '@open-agent/core';
 
 export interface SkillDefinition {
   name: string;
@@ -204,5 +205,116 @@ export class SkillRegistry {
         });
       }
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// User-defined skills via ~/.claude/skills/*.md and <cwd>/.claude/skills/*.md
+// ---------------------------------------------------------------------------
+
+/**
+ * Coerce a frontmatter value for the userInvocable field.
+ * The core frontmatter parser returns booleans for `true`/`false` literals, but
+ * older YAML-like files may store the value as a string.
+ */
+function coerceUserInvocable(
+  raw: string | boolean | number | string[] | undefined,
+): boolean | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw === 'boolean') return raw;
+  if (typeof raw === 'number') return raw !== 0;
+  if (typeof raw === 'string') {
+    const lower = raw.toLowerCase();
+    if (lower === 'false' || lower === '0' || lower === 'no') return false;
+    return true;
+  }
+  return undefined;
+}
+
+/**
+ * Load user-defined skill definitions from:
+ *   - `<home>/.claude/skills/*.md`  (user layer)
+ *   - `<cwd>/.claude/skills/*.md`   (project layer, takes precedence)
+ *
+ * The returned array contains `SkillDefinition` objects that can be passed
+ * to `SkillRegistry.register()`. If a project-layer file and a user-layer
+ * file share the same name, the project layer wins (handled by `loadMarkdownConfig`).
+ */
+export async function loadUserSkills(
+  cwd: string,
+  home?: string,
+): Promise<SkillDefinition[]> {
+  const entries = await loadMarkdownConfig({ subdir: 'skills', cwd, home });
+
+  return entries.map((entry) => {
+    const fm = entry.frontmatter;
+
+    const name = (fm.name as string | undefined) ?? entry.name;
+    const description = (fm.description as string | undefined) ?? '';
+    const userInvocable = coerceUserInvocable(
+      (fm.userInvocable ?? fm['user-invocable']) as
+        | string
+        | boolean
+        | number
+        | undefined,
+    );
+
+    const allowedToolsRaw = fm.allowedTools ?? fm['allowed-tools'];
+    const disallowedToolsRaw = fm.disallowedTools ?? fm['disallowed-tools'];
+    const activationKeywordsRaw = fm.activationKeywords;
+
+    const toStringArray = (
+      v: string | boolean | number | string[] | undefined,
+    ): string[] | undefined => {
+      if (!v) return undefined;
+      if (Array.isArray(v)) return v.length > 0 ? v : undefined;
+      if (typeof v === 'string') {
+        const items = v
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        return items.length > 0 ? items : undefined;
+      }
+      return undefined;
+    };
+
+    const def: SkillDefinition = {
+      name,
+      description,
+      prompt: entry.body,
+      source: 'local',
+      sourceLabel: entry.source === 'project' ? entry.filePath : entry.filePath,
+      path: entry.filePath,
+      allowedTools: toStringArray(allowedToolsRaw),
+      disallowedTools: toStringArray(disallowedToolsRaw),
+      activationKeywords: toStringArray(activationKeywordsRaw),
+      ...(userInvocable !== undefined ? { userInvocable } : {}),
+    };
+
+    return def;
+  });
+}
+
+/**
+ * Augment an existing `SkillRegistry` with user-defined markdown skills.
+ * Loaded skills override bundled skills with the same name (user-defined
+ * project skills take priority over built-in defaults).
+ *
+ * This is intentionally free-standing rather than wired into `SkillRegistry.load()`
+ * to keep the load path synchronous and allow callers to control when async I/O
+ * occurs during initialisation.
+ *
+ * @param registry - The registry to augment in place.
+ * @param cwd      - Project root directory.
+ * @param home     - User home directory (defaults to `os.homedir()`).
+ */
+export async function augmentRegistryWithUserSkills(
+  registry: SkillRegistry,
+  cwd: string,
+  home?: string,
+): Promise<void> {
+  const skills = await loadUserSkills(cwd, home);
+  for (const skill of skills) {
+    registry.register(skill);
   }
 }

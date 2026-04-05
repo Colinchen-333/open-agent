@@ -1,5 +1,13 @@
-import { describe, expect, it } from 'bun:test';
-import { getSlashCommands, handleSlashCommand } from '../slash-commands.js';
+import { describe, expect, it, beforeEach } from 'bun:test';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import {
+  getSlashCommands,
+  handleSlashCommand,
+  loadUserSlashCommands,
+  clearUserCommandCache,
+} from '../slash-commands.js';
 
 // Minimal mock loop sufficient for all new commands.
 const mockLoop = {
@@ -211,5 +219,134 @@ describe('user skill invocation via /<skill-name>', () => {
     ]));
     expect(result?.output).not.toContain('not user-invocable');
     expect(result?.output).toContain('Unknown command');
+  });
+});
+
+describe('loadUserSlashCommands', () => {
+  function makeTempDir() {
+    return mkdtempSync(join(tmpdir(), 'open-agent-cmds-'));
+  }
+
+  it('loads a command from <cwd>/.claude/commands/', async () => {
+    const home = makeTempDir(); // isolated home so real ~/.claude is not read
+    const cwd = makeTempDir();
+    const cmdsDir = join(cwd, '.claude', 'commands');
+    mkdirSync(cmdsDir, { recursive: true });
+    writeFileSync(
+      join(cmdsDir, 'greet.md'),
+      `---
+name: greet
+description: Greet the user warmly
+---
+Say hello and introduce yourself.`,
+      'utf-8',
+    );
+
+    const commands = await loadUserSlashCommands(cwd, home);
+    expect(commands).toHaveLength(1);
+    expect(commands[0].name).toBe('greet');
+    expect(commands[0].description).toBe('Greet the user warmly');
+    expect(commands[0].body).toContain('Say hello and introduce yourself.');
+  });
+
+  it('uses filename stem as name when frontmatter name is absent', async () => {
+    const home = makeTempDir();
+    const cwd = makeTempDir();
+    const cmdsDir = join(cwd, '.claude', 'commands');
+    mkdirSync(cmdsDir, { recursive: true });
+    writeFileSync(
+      join(cmdsDir, 'auto-cmd.md'),
+      `---
+description: No name in frontmatter
+---
+Body content.`,
+      'utf-8',
+    );
+
+    const commands = await loadUserSlashCommands(cwd, home);
+    expect(commands[0].name).toBe('auto-cmd');
+  });
+
+  it('returns empty array when no .claude/commands directory exists', async () => {
+    const home = makeTempDir();
+    const cwd = makeTempDir();
+    const commands = await loadUserSlashCommands(cwd, home);
+    expect(commands).toHaveLength(0);
+  });
+
+  it('project layer overrides user layer for same name', async () => {
+    const home = makeTempDir();
+    const cwd = makeTempDir();
+
+    const userCmdsDir = join(home, '.claude', 'commands');
+    const projectCmdsDir = join(cwd, '.claude', 'commands');
+    mkdirSync(userCmdsDir, { recursive: true });
+    mkdirSync(projectCmdsDir, { recursive: true });
+
+    writeFileSync(
+      join(userCmdsDir, 'greet.md'),
+      `---\nname: greet\ndescription: User version\n---\nUser body.`,
+      'utf-8',
+    );
+    writeFileSync(
+      join(projectCmdsDir, 'greet.md'),
+      `---\nname: greet\ndescription: Project version\n---\nProject body.`,
+      'utf-8',
+    );
+
+    const commands = await loadUserSlashCommands(cwd, home);
+    const greets = commands.filter((c) => c.name === 'greet');
+    expect(greets).toHaveLength(1);
+    expect(greets[0].description).toBe('Project version');
+    expect(greets[0].body).toContain('Project body.');
+  });
+});
+
+describe('user slash command dispatch via handleSlashCommand', () => {
+  beforeEach(() => {
+    clearUserCommandCache();
+  });
+
+  it('dispatches a user markdown command by emitting its body', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-dispatch-'));
+    const cmdsDir = join(cwd, '.claude', 'commands');
+    mkdirSync(cmdsDir, { recursive: true });
+    writeFileSync(
+      join(cmdsDir, 'greet.md'),
+      `---\nname: greet\ndescription: Greet\n---\nSay hello warmly.`,
+      'utf-8',
+    );
+
+    const ctx = { ...baseCtx, cwd };
+    const result = await handleSlashCommand('/greet', ctx);
+    expect(result).not.toBeNull();
+    // handled: false means REPL re-dispatches the body as a user message
+    expect(result?.handled).toBe(false);
+    expect(result?.output).toContain('Say hello warmly.');
+  });
+
+  it('falls through to unknown-command when no user command matches', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-dispatch-miss-'));
+    const ctx = { ...baseCtx, cwd };
+    const result = await handleSlashCommand('/nonexistent', ctx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('Unknown command');
+  });
+
+  it('user command takes priority over unknown-command fallback', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'open-agent-dispatch-prio-'));
+    const cmdsDir = join(cwd, '.claude', 'commands');
+    mkdirSync(cmdsDir, { recursive: true });
+    writeFileSync(
+      join(cmdsDir, 'mycommand.md'),
+      `---\nname: mycommand\ndescription: Custom\n---\nCustom prompt body.`,
+      'utf-8',
+    );
+
+    const ctx = { ...baseCtx, cwd };
+    const result = await handleSlashCommand('/mycommand', ctx);
+    expect(result?.handled).toBe(false);
+    expect(result?.output).not.toContain('Unknown command');
+    expect(result?.output).toContain('Custom prompt body.');
   });
 });
