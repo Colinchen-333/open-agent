@@ -101,6 +101,59 @@ export interface AgentDefinition {
   isolation?: 'worktree' | 'none';
   timeoutMs?: number;
   allowBackgroundExecution?: boolean;
+
+  // ── Claude Code parity fields ─────────────────────────────────────────────
+
+  /**
+   * Effort level for the subagent.
+   * Influences the thinking budget and model auto-routing.
+   * - 'low'    → minimal thinking, fastest / cheapest
+   * - 'medium' → balanced (default behaviour when omitted)
+   * - 'high'   → extended thinking enabled
+   * - 'max'    → maximum budget cap lifted
+   */
+  effort?: 'low' | 'medium' | 'high' | 'max';
+
+  /**
+   * Permission mode override scoped to this agent only.
+   * Takes precedence over the parent session's mode for the duration of the
+   * subagent invocation.
+   */
+  permissionMode?: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions' | 'dontAsk';
+
+  /**
+   * Hook configuration scoped to this agent only.
+   * Keys are hook event names (e.g. 'PreToolUse', 'PostToolUse'); values are
+   * opaque hook descriptor objects forwarded to the hook runner unchanged.
+   */
+  hooks?: Record<string, unknown>;
+
+  /**
+   * Per-agent memory: a file path or inline markdown that is injected into
+   * the agent's context before the first turn.
+   */
+  memory?: string;
+
+  /**
+   * When true the agent is dispatched as a background task and the parent
+   * session does not wait for its result before continuing.
+   * Defaults to false.
+   */
+  background?: boolean;
+
+  /**
+   * MCP server names that MUST be available before this agent starts.
+   * The loader will fail with an error if any listed server is not registered.
+   */
+  requiredMcpServers?: string[];
+
+  /**
+   * When true, the project-level CLAUDE.md / AGENT.md memory file is NOT
+   * injected into this agent's system prompt.
+   * Useful for sandboxed or evaluation agents that should not see project
+   * conventions.
+   */
+  omitClaudeMd?: boolean;
 }
 
 // MCP server configurations
