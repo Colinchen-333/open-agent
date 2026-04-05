@@ -22,6 +22,7 @@ import {
   syncTeamInboxMemberControlPlane,
   syncMcpServerState,
   syncRuntimeControlPlane,
+  syncSchedulerControlPlane,
   syncSessionControlPlane,
   syncToolRegistryState,
   upsertTaskControlPlane,
@@ -123,6 +124,8 @@ import type {
   SubscribeOrchestrationEventsOptions,
   SDKTaskDispatcherEvent,
   SDKTimelineItem,
+  SchedulerControlPlaneSnapshot,
+  SchedulerQueueEntry,
   SubscribeTimelineOptions,
   FollowUpExecutable,
   FollowUpExecutionResult,
@@ -863,6 +866,28 @@ export function query(
       dispatcherFairnessCursor = null;
     }
   };
+  const buildSchedulerQueueEntries = (): SchedulerQueueEntry[] => {
+    const eligible = listFairDispatchers();
+    const nextTurnDispatcherId = pickFairDispatcher()?.record.dispatcherId ?? null;
+    return eligible.map((state) => ({
+      dispatcherId: state.record.dispatcherId,
+      teamName: state.record.teamName,
+      status: state.record.status,
+      schedulerState: state.record.schedulerState,
+      activeAssignments: state.activeAssignments.size,
+      maxConcurrentWorkers: state.record.maxConcurrentWorkers,
+      startedAt: state.record.startedAt,
+      updatedAt: state.record.updatedAt,
+      ...(state.record.lastBlockedReason ? { lastBlockedReason: state.record.lastBlockedReason } : {}),
+      ...(state.record.lastBlockedAt ? { lastBlockedAt: state.record.lastBlockedAt } : {}),
+      nextTurn: nextTurnDispatcherId === state.record.dispatcherId,
+    }));
+  };
+  const buildSchedulerControlPlaneSnapshot = (): SchedulerControlPlaneSnapshot => ({
+    fairnessCursor: dispatcherFairnessCursor,
+    updatedAt: new Date().toISOString(),
+    queue: buildSchedulerQueueEntries(),
+  });
   const touchTaskDispatcherRecord = (state: TaskDispatcherState, timestamp = new Date().toISOString()): void => {
     state.record.updatedAt = timestamp;
   };
@@ -1871,6 +1896,17 @@ export function query(
       return next;
     });
   };
+  const syncAppSchedulerControlPlane = () => {
+    const liveSnapshot = buildSchedulerControlPlaneSnapshot();
+    const persistedSnapshot = readPersistedSchedulerControlPlaneSnapshot();
+    const schedulerSnapshot = liveSnapshot.queue.length > 0 || !persistedSnapshot
+      ? liveSnapshot
+      : persistedSnapshot;
+    appStore.setState((prev) => syncSchedulerControlPlane(prev, schedulerSnapshot));
+    if (liveSnapshot.queue.length > 0 || !persistedSnapshot) {
+      persistSchedulerControlPlaneSnapshot(schedulerSnapshot);
+    }
+  };
 
   syncAppRuntimeControlPlane();
 
@@ -2072,6 +2108,13 @@ export function query(
       .map((entry) => entry.payload as TaskDispatcherHealthReport)
       .filter((entry) => !teamName || entry.dispatcher.teamName === teamName)
       .sort((left, right) => left.observedAt.localeCompare(right.observedAt));
+    const scheduler = {
+      fairnessCursor: state.scheduler.fairnessCursor,
+      updatedAt: state.scheduler.updatedAt,
+      queue: state.scheduler.queue
+        .filter((entry) => !teamName || entry.teamName === teamName)
+        .map((entry) => ({ ...entry })),
+    };
     const summary = {
       taskCount: tasks.length,
       pendingTaskCount: tasks.filter((entry) => entry.status === 'pending').length,
@@ -2111,6 +2154,7 @@ export function query(
       sessionId: state.sessionId,
       activeTeamName: state.activeTeamName,
       summary,
+      scheduler,
       tasks,
       workers,
       dispatchers,
@@ -2924,6 +2968,7 @@ export function query(
     state.record.activeWorkerIds = activeAssignments.map((assignment) => assignment.workerId);
     upsertDispatcherStoreRecord(state.record);
     persistTaskDispatcherLedgerRecord(state.record);
+    syncAppSchedulerControlPlane();
     return state.record;
   };
 
@@ -2987,6 +3032,7 @@ export function query(
     }
     taskDispatchers.delete(state.record.dispatcherId);
     clearDispatcherFairnessCursorIfNeeded(state.record.dispatcherId);
+    syncAppSchedulerControlPlane();
   };
 
   const ensureTaskDispatcherRecovery = async (): Promise<void> => {
@@ -4802,11 +4848,44 @@ export function query(
         dispatcherDiagnoses: Array.isArray(parsed.dispatcherDiagnoses)
           ? parsed.dispatcherDiagnoses.map((item) => JSON.parse(JSON.stringify(item)) as TaskDispatcherHealthReport)
           : [],
+        scheduler: parsed.scheduler && typeof parsed.scheduler === 'object'
+          ? {
+            fairnessCursor:
+              typeof parsed.scheduler.fairnessCursor === 'string'
+                ? parsed.scheduler.fairnessCursor
+                : null,
+            updatedAt:
+              typeof parsed.scheduler.updatedAt === 'string'
+                ? parsed.scheduler.updatedAt
+                : '',
+            queue: Array.isArray(parsed.scheduler.queue)
+              ? parsed.scheduler.queue
+                .filter((item) => item && typeof item === 'object' && typeof item.dispatcherId === 'string')
+                .map((item) => JSON.parse(JSON.stringify(item)) as SchedulerQueueEntry)
+              : [],
+          }
+          : {
+            fairnessCursor: null,
+            updatedAt: '',
+            queue: [],
+          },
       };
     } catch {
       return null;
     }
   };
+
+  function readPersistedSchedulerControlPlaneSnapshot(): SchedulerControlPlaneSnapshot | null {
+    const unified = readUnifiedOrchestrationLedger();
+    if (!unified) {
+      return null;
+    }
+    return {
+      fairnessCursor: unified.scheduler.fairnessCursor,
+      updatedAt: unified.scheduler.updatedAt,
+      queue: unified.scheduler.queue.map((entry) => ({ ...entry })),
+    };
+  }
 
   const readTaskDispatcherOwnershipRecord = (dispatcherId: string): TaskDispatcherOwnershipRecord | null => {
     const ownershipPath = getTaskDispatcherOwnershipPath(dispatcherId);
@@ -4930,6 +5009,11 @@ export function query(
         dispatchers: [],
         timelineItems: [],
         dispatcherDiagnoses: [],
+        scheduler: {
+          fairnessCursor: null,
+          updatedAt: '',
+          queue: [],
+        },
       };
       const next = updater(current);
       writeFileSync(ledgerPath, JSON.stringify(next, null, 2));
@@ -4937,6 +5021,19 @@ export function query(
       // Non-fatal: unified orchestration durability should not break query execution.
     }
   };
+
+  function persistSchedulerControlPlaneSnapshot(snapshot: SchedulerControlPlaneSnapshot): void {
+    writeUnifiedOrchestrationLedger((current) => ({
+      ...current,
+      scheduler: {
+        fairnessCursor: snapshot.fairnessCursor,
+        updatedAt: snapshot.updatedAt,
+        queue: snapshot.queue.map((entry) => ({ ...entry })),
+      },
+    }));
+  }
+
+  syncAppSchedulerControlPlane();
 
   const readPersistedOrchestrationTimelineLedgerItems = (): SDKTimelineItem[] => {
     const unified = readUnifiedOrchestrationLedger();
@@ -7323,6 +7420,7 @@ interface PersistedOrchestrationLedgerFile {
   dispatchers: TaskDispatcherRecord[];
   timelineItems: SDKTimelineItem[];
   dispatcherDiagnoses: TaskDispatcherHealthReport[];
+  scheduler: SchedulerControlPlaneSnapshot;
 }
 
 interface PersistedTaskDispatcherLedgerFile {

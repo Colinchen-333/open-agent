@@ -452,10 +452,31 @@ export interface OrchestrationControlPlaneSummary {
   dispatcherWarningCount: number;
 }
 
+export interface SchedulerQueueEntry {
+  dispatcherId: string;
+  teamName: string;
+  status: TaskDispatcherRecord['status'];
+  schedulerState: TaskDispatcherSchedulingState;
+  activeAssignments: number;
+  maxConcurrentWorkers: number;
+  startedAt: string;
+  updatedAt: string;
+  lastBlockedReason?: TaskDispatcherBlockReason;
+  lastBlockedAt?: string;
+  nextTurn: boolean;
+}
+
+export interface SchedulerControlPlaneSnapshot {
+  fairnessCursor: string | null;
+  updatedAt: string;
+  queue: SchedulerQueueEntry[];
+}
+
 export interface OrchestrationControlPlaneSnapshot {
   sessionId: string;
   activeTeamName: string | null;
   summary: OrchestrationControlPlaneSummary;
+  scheduler: SchedulerControlPlaneSnapshot;
   tasks: TaskRecord[];
   workers: WorkerRecord[];
   dispatchers: TaskDispatcherRecord[];

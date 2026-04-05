@@ -8,6 +8,7 @@ import type {
   RuntimeDiagnosticState,
   RuntimeHookState,
   RuntimePluginState,
+  SchedulerControlPlaneState,
   TeamApprovalControlPlaneState,
   TeamInboxMemberControlPlaneState,
   TeamInboxMessageControlPlaneState,
@@ -213,6 +214,20 @@ export function upsertDispatcherDiagnosisControlPlane(
       [diagnosis.dispatcherId]: {
         ...diagnosis,
       },
+    },
+  };
+}
+
+export function syncSchedulerControlPlane(
+  state: AppState,
+  scheduler: SchedulerControlPlaneState,
+): AppState {
+  return {
+    ...state,
+    scheduler: {
+      fairnessCursor: scheduler.fairnessCursor,
+      updatedAt: scheduler.updatedAt,
+      queue: scheduler.queue.map((entry) => ({ ...entry })),
     },
   };
 }

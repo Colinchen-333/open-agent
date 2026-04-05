@@ -126,6 +126,26 @@ export interface DispatcherDiagnosisControlPlaneState {
   payload: unknown;
 }
 
+export interface SchedulerQueueControlPlaneEntryState {
+  dispatcherId: string;
+  teamName: string;
+  status: string;
+  schedulerState: string;
+  activeAssignments: number;
+  maxConcurrentWorkers: number;
+  startedAt: string;
+  updatedAt: string;
+  lastBlockedReason?: string;
+  lastBlockedAt?: string;
+  nextTurn: boolean;
+}
+
+export interface SchedulerControlPlaneState {
+  fairnessCursor: string | null;
+  updatedAt: string;
+  queue: SchedulerQueueControlPlaneEntryState[];
+}
+
 export interface WorkerControlPlaneState {
   workerId: string;
   workerType: string;
@@ -210,6 +230,7 @@ export interface AppState {
   workers: Record<string, WorkerControlPlaneState>;
   dispatchers: Record<string, DispatcherControlPlaneState>;
   dispatcherDiagnoses: Record<string, DispatcherDiagnosisControlPlaneState>;
+  scheduler: SchedulerControlPlaneState;
   timeline: TimelineControlPlaneItemState[];
   inboxes: Record<string, Record<string, TeamInboxMemberControlPlaneState>>;
   approvals: Record<string, Record<string, TeamApprovalControlPlaneState[]>>;
@@ -259,6 +280,11 @@ export function createDefaultAppState(overrides: Partial<AppState> = {}): AppSta
     workers: {},
     dispatchers: {},
     dispatcherDiagnoses: {},
+    scheduler: {
+      fairnessCursor: null,
+      updatedAt: '',
+      queue: [],
+    },
     timeline: [],
     inboxes: {},
     approvals: {},

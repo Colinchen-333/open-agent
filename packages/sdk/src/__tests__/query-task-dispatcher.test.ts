@@ -297,6 +297,11 @@ describe('query() task dispatcher control plane', () => {
       expect(saturated.summary.availableDispatcherWorkerBudget).toBe(0);
       expect(saturated.summary.globalBudgetBlockedDispatcherCount).toBe(2);
       expect(saturated.summary.teamBudgetBlockedDispatcherCount).toBe(0);
+      expect(saturated.scheduler.queue).toHaveLength(1);
+      expect(saturated.scheduler.queue[0]).toEqual(expect.objectContaining({
+        schedulerState: 'waiting_for_global_worker_budget',
+        nextTurn: true,
+      }));
 
       const alphaState = saturated.dispatchers.find((item) => item.dispatcherId === alphaDispatcher.dispatcherId);
       const betaState = saturated.dispatchers.find((item) => item.dispatcherId === betaDispatcher.dispatcherId);
@@ -833,6 +838,9 @@ describe('query() task dispatcher control plane', () => {
       expect(snapshot.dispatchers).toEqual(expect.arrayContaining([
         expect.objectContaining({ dispatcherId: dispatcher.dispatcherId, teamName }),
       ]));
+      expect(snapshot.scheduler).toEqual(expect.objectContaining({
+        fairnessCursor: null,
+      }));
 
       const report = await q.inspectTaskDispatcherHealth(dispatcher.dispatcherId, {
         now: new Date(Date.now() + 2_000),
@@ -929,6 +937,16 @@ describe('query() task dispatcher control plane', () => {
       ]));
       expect(recovered.dispatchers).toEqual(expect.arrayContaining([
         expect.objectContaining({ dispatcherId: dispatcher.dispatcherId, teamName }),
+      ]));
+      expect(recovered.scheduler).toEqual(expect.objectContaining({
+        fairnessCursor: dispatcher.dispatcherId,
+      }));
+      expect(recovered.scheduler.queue).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          dispatcherId: dispatcher.dispatcherId,
+          teamName,
+          nextTurn: true,
+        }),
       ]));
 
       reader.close();
