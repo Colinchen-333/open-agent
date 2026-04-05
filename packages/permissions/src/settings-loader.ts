@@ -32,6 +32,17 @@ export interface SettingsFile {
  * from all sources are preserved rather than overwritten.
  */
 export class SettingsLoader {
+  getCandidatePaths(
+    cwd: string,
+    sources: SettingSource[] = ['user', 'project', 'local'],
+  ): string[] {
+    const ordered: string[] = [];
+    for (const source of sources) {
+      ordered.push(...this.getSettingsPaths(source, cwd));
+    }
+    return [...new Set(ordered)];
+  }
+
   load(
     cwd: string,
     sources: SettingSource[] = ['user', 'project', 'local']

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { mkdtempSync, mkdirSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import type { ToolDefinition } from '@open-agent/tools';
@@ -27,6 +27,10 @@ function makeTempHome(prefix: string): { cwd: string; cleanup(): void } {
       rmSync(cwd, { recursive: true, force: true });
     },
   };
+}
+
+function writeJson(filePath: string, value: unknown): void {
+  writeFileSync(filePath, JSON.stringify(value), 'utf-8');
 }
 
 function makeBlockingProvider(): { provider: LLMProvider; release(): void; waitUntilStarted(): Promise<void> } {
@@ -421,6 +425,88 @@ describe('SDK runtime control surface', () => {
         expect(Array.isArray(runtimeControlPlane.permissions.suspendedAllowRules)).toBe(true);
       } finally {
         q.close();
+      }
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('refreshes runtime settings from disk and updates subsequent bash sandbox policies', async () => {
+    const { cwd, cleanup } = makeTempHome('open-agent-settings-refresh-');
+    const observedPolicies: string[][] = [];
+    const settingsDir = join(cwd, '.open-agent');
+    const initialAllowedDir = join(cwd, 'initial-allowed');
+    const refreshedAllowedDir = join(cwd, 'refreshed-allowed');
+    mkdirSync(settingsDir, { recursive: true });
+    mkdirSync(initialAllowedDir, { recursive: true });
+    mkdirSync(refreshedAllowedDir, { recursive: true });
+    writeJson(join(settingsDir, 'settings.json'), {
+      permissions: {
+        allow: [{ toolName: 'Read' }],
+        allowedPaths: [initialAllowedDir],
+      },
+      sandbox: {
+        enabled: true,
+        filesystem: {
+          allowWrite: [initialAllowedDir],
+        },
+      },
+    });
+
+    try {
+      const session = createSession({
+        cwd,
+        model: 'mock-model',
+        settingSources: ['project'],
+        provider: makeMockProvider([
+          toolUseResponse('bash-refresh-1', 'Bash', { command: 'pwd' }),
+          textResponse('first'),
+          toolUseResponse('bash-refresh-2', 'Bash', { command: 'pwd' }),
+          textResponse('second'),
+        ]),
+        canUseTool(toolName, input) {
+          if (toolName === 'Bash') {
+            const policy = input[BASH_SANDBOX_POLICY_FIELD] as {
+              allowWritePaths?: string[];
+            } | undefined;
+            observedPolicies.push([...(policy?.allowWritePaths ?? [])]);
+          }
+          return true;
+        },
+      } as any);
+
+      try {
+        for await (const _message of session.send('first turn')) {
+          // drain
+        }
+
+        writeJson(join(settingsDir, 'settings.json'), {
+          permissions: {
+            allow: [{ toolName: 'Write' }],
+            allowedPaths: [refreshedAllowedDir],
+          },
+          sandbox: {
+            enabled: true,
+            filesystem: {
+              allowWrite: [refreshedAllowedDir],
+            },
+          },
+        });
+
+        const refreshed = await session.refreshRuntimeSettings();
+        expect(refreshed.permissions.allowedPaths).toEqual([refreshedAllowedDir]);
+        expect(refreshed.permissions.allowRules).toEqual([{ toolName: 'Write' }]);
+
+        for await (const _message of session.send('second turn')) {
+          // drain
+        }
+
+        expect(observedPolicies).toHaveLength(2);
+        expect(observedPolicies[0]).toEqual(expect.arrayContaining([initialAllowedDir]));
+        expect(observedPolicies[1]).toEqual(expect.arrayContaining([refreshedAllowedDir]));
+        expect(observedPolicies[1]).not.toEqual(expect.arrayContaining([initialAllowedDir]));
+      } finally {
+        session.close();
       }
     } finally {
       cleanup();

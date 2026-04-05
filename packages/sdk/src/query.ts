@@ -59,6 +59,7 @@ import type { Message, LLMProvider } from '@open-agent/providers';
 import {
   PermissionEngine,
   SettingsLoader,
+  SettingsChangeDetector,
   BASH_SANDBOX_POLICY_FIELD,
   BASH_SANDBOX_BYPASS_APPROVED_FIELD,
   buildBashSandboxPolicy,
@@ -223,8 +224,12 @@ export function query(
     ? randomUUID()
     : (options.sessionId ?? effectiveResumeSessionId ?? randomUUID());
   const settingSources = options.settingSources ?? [];
-  const loadedSettings: SettingsFile | null = settingSources.length > 0
-    ? new SettingsLoader().load(cwd, settingSources)
+  const settingsLoader = new SettingsLoader();
+  const settingsChangeDetector = settingSources.length > 0
+    ? new SettingsChangeDetector(settingsLoader)
+    : null;
+  let loadedSettings: SettingsFile | null = settingSources.length > 0
+    ? settingsLoader.load(cwd, settingSources)
     : null;
   const shouldPersist = options.persistSession !== false;
   const sharedSessionManager = options.sessionManager ?? null;
@@ -1643,7 +1648,7 @@ export function query(
   // MCP servers — connect and discover tools
   // ------------------------------------------------------------------
   const mcpManager = runtime.getMcpManager();
-  const configuredMcpServers = mergeMcpServerConfigs(
+  let configuredMcpServers = mergeMcpServerConfigs(
     loadedSettings?.mcpServers as Record<string, McpServerConfig> | undefined,
     pluginRuntime.mcpServers,
     options.mcpServers,
@@ -1750,7 +1755,7 @@ export function query(
       // Non-fatal: background task notification sync is best-effort.
     }
   }
-  const settingsSandbox = parseSandboxConfig(loadedSettings?.sandbox);
+  let settingsSandbox = parseSandboxConfig(loadedSettings?.sandbox);
   if (loadedSettings && loadedSettings.sandbox !== undefined && !settingsSandbox) {
     throw new Error('Loaded settings sandbox config is invalid; expected explicit boolean enabled field.');
   }
@@ -1761,14 +1766,33 @@ export function query(
       throw new Error('options.sandbox must be a valid sandbox config with an explicit boolean enabled field.');
     }
   }
-  const effectiveSandboxConfig = optionSandbox ?? settingsSandbox;
-  const permissionEngine = new PermissionEngine({
-    mode: permMode,
-    ...(effectiveSandboxConfig ? { sandbox: effectiveSandboxConfig } : {}),
+  const resolveSandboxConfigFromSettings = (): SandboxConfig | undefined => (
+    optionSandbox ?? settingsSandbox ?? undefined
+  );
+  let currentPermissionMode = permMode;
+  const sessionPermissionUpdates: unknown[] = [];
+  let permissionEngine = new PermissionEngine({
+    mode: currentPermissionMode,
+    ...(resolveSandboxConfigFromSettings() ? { sandbox: resolveSandboxConfigFromSettings() } : {}),
   });
-  if (loadedSettings) {
-    permissionEngine.loadFromSettings(loadedSettings as Record<string, any>);
-  }
+  const rebuildPermissionEngine = (settings: SettingsFile | null): PermissionEngine => {
+    const nextEngine = new PermissionEngine({
+      mode: currentPermissionMode,
+      ...(resolveSandboxConfigFromSettings() ? { sandbox: resolveSandboxConfigFromSettings() } : {}),
+    });
+    if (settings) {
+      nextEngine.loadFromSettings(settings as Record<string, any>);
+    }
+    if (sessionPermissionUpdates.length > 0) {
+      applyPermissionUpdates(nextEngine, sessionPermissionUpdates);
+    }
+    if (options.permissionPromptToolName) {
+      nextEngine.setPermissionPromptToolName(options.permissionPromptToolName);
+    }
+    currentPermissionMode = nextEngine.getMode();
+    return nextEngine;
+  };
+  permissionEngine = rebuildPermissionEngine(loadedSettings);
   let effectivePermissionEngine: {
     evaluate: (request: {
       toolName: string;
@@ -1792,11 +1816,6 @@ export function query(
     setMode?: (mode: string) => void;
   } = permissionEngine as any;
 
-  // Wire permissionPromptToolName into the permission engine when provided.
-  if (options.permissionPromptToolName) {
-    permissionEngine.setPermissionPromptToolName(options.permissionPromptToolName);
-  }
-
   const attachBashSandboxPolicy = (
     request: { toolName: string; input: unknown; metadata?: unknown },
     permissionBehavior?: 'allow' | 'deny' | 'ask',
@@ -1818,10 +1837,9 @@ export function query(
     input[BASH_SANDBOX_POLICY_FIELD] = policy;
   };
 
-  const originalEvaluate = permissionEngine.evaluate.bind(permissionEngine);
   effectivePermissionEngine = {
     evaluate: async (request) => {
-      const baselineDecision = await originalEvaluate(request as any);
+      const baselineDecision = await permissionEngine.evaluate(request as any);
       attachBashSandboxPolicy(request, baselineDecision.behavior);
 
       if (!options.canUseTool) {
@@ -1858,7 +1876,21 @@ export function query(
       }
 
       if (result && typeof result === 'object' && 'updatedPermissions' in result) {
+        if (Array.isArray(result.updatedPermissions)) {
+          sessionPermissionUpdates.push(...JSON.parse(JSON.stringify(
+            result.updatedPermissions.filter((update: unknown) => (
+              update
+              && typeof update === 'object'
+              && (update as { destination?: unknown }).destination === 'session'
+              && (update as { type?: unknown }).type !== 'setMode'
+            )),
+          )));
+        }
         applyPermissionUpdates(permissionEngine, result.updatedPermissions);
+        currentPermissionMode = permissionEngine.getMode();
+        appStore.setState((prev) => syncSessionControlPlane(prev, {
+          permissionMode: currentPermissionMode,
+        }));
         syncAppPermissionControlPlane();
       }
 
@@ -1908,9 +1940,34 @@ export function query(
       attachBashSandboxPolicy(request, baselineDecision.behavior);
       return baselineDecision;
     },
-    addRule: permissionEngine.addRule.bind(permissionEngine),
-    removeRule: (permissionEngine as any).removeRule?.bind(permissionEngine),
-    setMode: (permissionEngine as any).setMode?.bind(permissionEngine),
+    addRule: (behavior, rule) => {
+      sessionPermissionUpdates.push({
+        type: 'addRules',
+        behavior,
+        destination: 'session',
+        rules: [{ ...rule }],
+      });
+      permissionEngine.addRule(behavior, rule);
+      syncAppPermissionControlPlane();
+    },
+    removeRule: (behavior, rule) => {
+      sessionPermissionUpdates.push({
+        type: 'removeRules',
+        behavior,
+        destination: 'session',
+        rules: [{ ...rule }],
+      });
+      (permissionEngine as any).removeRule?.(behavior, rule);
+      syncAppPermissionControlPlane();
+    },
+    setMode: (mode) => {
+      (permissionEngine as any).setMode?.(mode);
+      currentPermissionMode = permissionEngine.getMode();
+      appStore.setState((prev) => syncSessionControlPlane(prev, {
+        permissionMode: currentPermissionMode,
+      }));
+      syncAppPermissionControlPlane();
+    },
   };
 
   const basePermissionPrompter = createPermissionPrompterBridge({
@@ -2101,11 +2158,14 @@ export function query(
   }
 
   let cleanedUp = false;
+  let settingsChangeSubscription: { close(): void } | null = null;
   function cleanupQueryResources(): void {
     if (cleanedUp) return;
     cleanedUp = true;
     cleanupTaskDispatchers(true);
     releaseTaskSchedulerOwnership();
+    settingsChangeSubscription?.close();
+    settingsChangeSubscription = null;
     if (mcpManager) {
       runtime.disconnectMcpServers().catch(() => {});
     }
@@ -2171,6 +2231,35 @@ export function query(
       allowedPaths: summary.allowedPaths,
       deniedPaths: summary.deniedPaths,
     }));
+  };
+  const refreshRuntimeSettingsFromSources = async (): Promise<RuntimeControlPlaneSnapshot> => {
+    if (settingSources.length > 0) {
+      const nextLoadedSettings = settingsLoader.load(cwd, settingSources);
+      const nextSettingsSandbox = parseSandboxConfig(nextLoadedSettings?.sandbox);
+      if (!(nextLoadedSettings && nextLoadedSettings.sandbox !== undefined && !nextSettingsSandbox)) {
+        settingsSandbox = nextSettingsSandbox;
+      }
+      loadedSettings = nextLoadedSettings;
+      permissionEngine = rebuildPermissionEngine(loadedSettings);
+      const nextConfiguredMcpServers = mergeMcpServerConfigs(
+        loadedSettings?.mcpServers as Record<string, McpServerConfig> | undefined,
+        pluginRuntime.mcpServers,
+        options.mcpServers,
+      );
+      configuredMcpServers = nextConfiguredMcpServers;
+      hasConfiguredMcpServers = Object.keys(configuredMcpServers).length > 0;
+      await runtime.setMcpServers(configuredMcpServers);
+      mcpReadyPromise = runtime.waitForMcpReady();
+    }
+
+    appStore.setState((prev) => syncSessionControlPlane(prev, {
+      permissionMode: currentPermissionMode,
+    }));
+    syncAppPermissionControlPlane();
+    refreshManagedSystemPrompt();
+    syncLoopToolsFromRegistry();
+    syncAppRuntimeControlPlane();
+    return readRuntimeControlPlaneSnapshot();
   };
   const syncAppSchedulerControlPlane = () => {
     persistDispatcherWorkerPoolBudgetConfig();
@@ -2550,6 +2639,18 @@ export function query(
     loop.setSystemPrompt(systemPrompt);
     syncAppRuntimeControlPlane();
   };
+  if (settingsChangeDetector) {
+    const unsubscribeSettingsBus = settingsChangeDetector.subscribe(() => {
+      void refreshRuntimeSettingsFromSources();
+    });
+    const watchedSettings = settingsChangeDetector.watch(cwd, settingSources);
+    settingsChangeSubscription = {
+      close() {
+        unsubscribeSettingsBus();
+        watchedSettings?.close();
+      },
+    };
+  }
 
   // ------------------------------------------------------------------
   // Core generator – iterates over all SDKMessages
@@ -3745,6 +3846,7 @@ export function query(
           'permissionMode="bypassPermissions" requires allowDangerouslySkipPermissions=true',
         );
       }
+      currentPermissionMode = mode;
       loop.setPermissionMode(mode);
       appStore.setState((prev) => syncSessionControlPlane(prev, {
         permissionMode: mode,
@@ -3810,6 +3912,8 @@ export function query(
       .filter((entry) => !options?.severity || entry.severity === options.severity)
       .filter((entry) => !options?.source || entry.source === options.source)
   );
+
+  queryObj.refreshRuntimeSettings = async () => refreshRuntimeSettingsFromSources();
 
   queryObj.readOrchestrationControlPlane = async (options?: OrchestrationControlPlaneOptions) => {
     await ensureTaskDispatcherRecovery();

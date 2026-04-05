@@ -1072,6 +1072,8 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   readRuntimeControlPlane(): Promise<RuntimeControlPlaneSnapshot>;
   /** Return runtime diagnostics from the authoritative control-plane snapshot. */
   listRuntimeDiagnostics(options?: RuntimeDiagnosticListOptions): Promise<RuntimeDiagnosticRecord[]>;
+  /** Re-read settings sources and re-apply runtime permission/sandbox state. */
+  refreshRuntimeSettings(): Promise<RuntimeControlPlaneSnapshot>;
   /** Return the unified task/worker/dispatcher control-plane snapshot mirrored in AppState. */
   readOrchestrationControlPlane(options?: OrchestrationControlPlaneOptions): Promise<OrchestrationControlPlaneSnapshot>;
   /** Return the runtime status of every configured MCP server. */
@@ -1287,6 +1289,8 @@ export interface Session {
   readRuntimeControlPlane(): Promise<RuntimeControlPlaneSnapshot>;
   /** Return runtime diagnostics from the authoritative control-plane snapshot. */
   listRuntimeDiagnostics(options?: RuntimeDiagnosticListOptions): Promise<RuntimeDiagnosticRecord[]>;
+  /** Re-read settings sources and re-apply runtime permission/sandbox state. */
+  refreshRuntimeSettings(): Promise<RuntimeControlPlaneSnapshot>;
   /** Return the unified task/worker/dispatcher control-plane snapshot mirrored in AppState. */
   readOrchestrationControlPlane(options?: OrchestrationControlPlaneOptions): Promise<OrchestrationControlPlaneSnapshot>;
   /** Return the runtime status of every configured MCP server. */

@@ -369,6 +369,10 @@ describe('createSession()', () => {
     });
     expect(Array.isArray(runtimeControlPlane.runtime.agentNames)).toBe(true);
     expect(Array.isArray(await session.listRuntimeDiagnostics())).toBe(true);
+    await expect(session.refreshRuntimeSettings()).resolves.toMatchObject({
+      sessionId: session.sessionId,
+      permissionMode: 'acceptEdits',
+    });
     const orchestrationControlPlane = await session.readOrchestrationControlPlane();
     expect(orchestrationControlPlane.sessionId).toBe(session.sessionId);
     expect(Array.isArray(orchestrationControlPlane.tasks)).toBe(true);
