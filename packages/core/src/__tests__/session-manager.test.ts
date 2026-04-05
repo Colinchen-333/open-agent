@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
-import { mkdtempSync, rmSync, appendFileSync, mkdirSync, writeFileSync } from 'fs';
+import { describe, it, expect, beforeAll, afterAll, test } from 'bun:test';
+import { mkdtempSync, rmSync, appendFileSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { SessionManager } from '../session-manager.js';
+import { projectHash } from '../session-io.js';
 
 // We point the SessionManager at a temp directory instead of ~/. open-agent
 // by monkey-patching the private baseDir field via a subclass.
@@ -364,4 +365,21 @@ describe('SessionManager', () => {
     const ids = sessions.map((s) => s.id);
     expect(ids.indexOf(b.id)).toBeLessThan(ids.indexOf(a.id));
   });
+});
+
+test('SessionManager persists transcript as JSONL under projects/<hash>/sessions/', async () => {
+  const root = mkdtempSync(`${tmpdir()}/oa-sm-`);
+  const cwd = '/fake/project';
+  const sm = new SessionManager({ root, cwd });
+  const session = await sm.createSession({ model: 'glm-4.7', permissionMode: 'default' });
+  await sm.appendMessage(session.id, { type: 'user', text: 'first' });
+  await sm.appendMessage(session.id, { type: 'assistant', text: 'reply' });
+
+  const expected = `${root}/projects/${projectHash(cwd)}/sessions/${session.id}.jsonl`;
+  expect(existsSync(expected)).toBe(true);
+  const lines = readFileSync(expected, 'utf8').trimEnd().split('\n').map(l => JSON.parse(l));
+  expect(lines).toHaveLength(2);
+  expect(lines[0]).toMatchObject({ type: 'user', text: 'first' });
+
+  rmSync(root, { recursive: true, force: true });
 });

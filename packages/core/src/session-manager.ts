@@ -12,6 +12,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import type { SDKMessage } from './types.js';
 import type { Message } from '@open-agent/providers';
+import { resolveSessionPath, SessionJsonlWriter, readJsonlSession } from './session-io.js';
 
 export interface SessionInfo {
   id: string;
@@ -94,11 +95,22 @@ export interface SessionUpdate {
  * as `/a-b/c` and `/a/b-c`.  Legacy safe-path directories are still read as a
  * fallback for backwards compatibility.
  */
+export interface SessionManagerOptions {
+  root?: string;
+  cwd?: string;
+}
+
 export class SessionManager {
   private baseDir: string;
+  private root: string;
+  private defaultCwd: string | undefined;
+  private writers = new Map<string, SessionJsonlWriter>();
 
-  constructor() {
-    this.baseDir = join(homedir(), '.open-agent', 'projects');
+  constructor(options?: SessionManagerOptions) {
+    const root = options?.root ?? join(homedir(), '.open-agent');
+    this.root = root;
+    this.baseDir = join(root, 'projects');
+    this.defaultCwd = options?.cwd;
   }
 
   // ---------------------------------------------------------------------------
@@ -260,8 +272,30 @@ export class SessionManager {
   /**
    * Create a new session for the given working directory and model.
    * Writes a `.meta.json` file and returns the session metadata.
+   *
+   * Supports two call signatures:
+   *   createSession(cwd, model, metadata?)  — classic (sync)
+   *   createSession({ model, ...metadata }) — new form when defaultCwd is set (returns Promise for API compat)
    */
-  createSession(cwd: string, model: string, metadata?: SessionCreateMetadata): SessionInfo {
+  createSession(cwd: string, model: string, metadata?: SessionCreateMetadata): SessionInfo;
+  createSession(metadata: SessionCreateMetadata & { model: string }): Promise<SessionInfo>;
+  createSession(
+    cwdOrMetadata: string | (SessionCreateMetadata & { model: string }),
+    model?: string,
+    metadata?: SessionCreateMetadata,
+  ): SessionInfo | Promise<SessionInfo> {
+    if (typeof cwdOrMetadata === 'object') {
+      // New form: createSession({ model, ...metadata })
+      const { model: m, ...rest } = cwdOrMetadata;
+      const cwd = this.defaultCwd ?? process.cwd();
+      const result = this._createSessionSync(cwd, m, rest);
+      return Promise.resolve(result);
+    }
+    // Classic form: createSession(cwd, model, metadata?)
+    return this._createSessionSync(cwdOrMetadata, model!, metadata);
+  }
+
+  private _createSessionSync(cwd: string, model: string, metadata?: SessionCreateMetadata): SessionInfo {
     const id = randomUUID();
     const now = new Date().toISOString();
     const info: SessionInfo = {
@@ -282,6 +316,22 @@ export class SessionManager {
     this.updateGlobalIndex(id, cwd);
 
     return info;
+  }
+
+  /**
+   * Append a message record to the JSONL session file under
+   * `<root>/projects/<hash(cwd)>/sessions/<sessionId>.jsonl`.
+   * Uses `defaultCwd` when the SessionManager was constructed with `{ cwd }`.
+   */
+  async appendMessage(sessionId: string, record: unknown): Promise<void> {
+    let writer = this.writers.get(sessionId);
+    if (!writer) {
+      const cwd = this.defaultCwd ?? process.cwd();
+      const path = resolveSessionPath(this.root, cwd, sessionId);
+      writer = new SessionJsonlWriter(path);
+      this.writers.set(sessionId, writer);
+    }
+    await writer.append(record);
   }
 
   /**
