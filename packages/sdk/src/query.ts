@@ -438,6 +438,10 @@ export function query(
     push: (event: SDKOrchestrationEvent) => void;
     close: () => void;
   }>();
+  const sessionStateSubscribers = new Set<{
+    push: (snapshot: SessionStateSnapshot) => void;
+    close: () => void;
+  }>();
   let currentTurnObservation: PromptSuggestionObservation = createPromptSuggestionObservation();
   const enqueueSubagentMessages = (
     parentToolUseId: string,
@@ -2172,6 +2176,9 @@ export function query(
     for (const subscriber of [...orchestrationSubscribers]) {
       subscriber.close();
     }
+    for (const subscriber of [...sessionStateSubscribers]) {
+      subscriber.close();
+    }
     inputClosed = true;
     notifyQueue();
     removeCallerAbortListener();
@@ -2208,6 +2215,52 @@ export function query(
       next = setActiveTeamControlPlane(next, activeTeamName);
       return next;
     });
+  };
+  const resolveProviderCapabilityRecord = async (requestedModel?: string): Promise<ProviderCapabilityRecord> => {
+    const resolvedModel = normalizeOptionalString(requestedModel) ?? activeModel;
+    const modelInfo = (await provider.listModels()).find((entry) => entry.value === resolvedModel);
+    const providerCapabilities = provider.getCapabilities
+      ? await provider.getCapabilities(resolvedModel)
+      : null;
+    return {
+      provider: providerCapabilities?.provider ?? provider.name,
+      model: providerCapabilities?.model ?? resolvedModel,
+      thinkingMode: providerCapabilities?.thinking ?? ((modelInfo?.supportsThinking ?? provider.name === 'anthropic') ? 'native' : 'unsupported'),
+      structuredOutputMode: providerCapabilities?.structuredOutput ?? ((modelInfo?.supportsStructuredOutput ?? provider.name !== 'ollama') ? 'native' : 'unsupported'),
+      toolUseMode: providerCapabilities?.toolUse ?? 'native',
+      serverToolsMode: providerCapabilities?.serverTools ?? ((modelInfo?.supportsServerTools ?? provider.name === 'anthropic') ? 'native' : 'unsupported'),
+      supportsThinking: providerCapabilities
+        ? providerCapabilities.thinking === 'native'
+        : (modelInfo?.supportsThinking ?? provider.name === 'anthropic'),
+      supportsAdaptiveThinking: providerCapabilities?.supportsAdaptiveThinking
+        ?? modelInfo?.supportsAdaptiveThinking
+        ?? provider.name === 'anthropic',
+      supportsStructuredOutput: providerCapabilities
+        ? providerCapabilities.structuredOutput === 'native'
+        : (modelInfo?.supportsStructuredOutput ?? provider.name !== 'ollama'),
+      supportsImages: modelInfo?.supportsImages ?? provider.name !== 'ollama',
+      supportsServerTools: providerCapabilities
+        ? providerCapabilities.serverTools === 'native'
+        : (modelInfo?.supportsServerTools ?? provider.name === 'anthropic'),
+      supportsEffort: modelInfo?.supportsEffort ?? provider.name === 'anthropic',
+      supportedEffortLevels: [
+        ...(providerCapabilities?.supportedEffortLevels ?? modelInfo?.supportedEffortLevels ?? []),
+      ],
+    };
+  };
+  const syncAppProviderControlPlane = async (requestedModel?: string): Promise<ProviderCapabilityRecord> => {
+    const providerRecord = await resolveProviderCapabilityRecord(requestedModel);
+    appStore.setState((prev) => ({
+      ...prev,
+      runtime: {
+        ...prev.runtime,
+        provider: {
+          ...providerRecord,
+          supportedEffortLevels: [...providerRecord.supportedEffortLevels],
+        },
+      },
+    }));
+    return providerRecord;
   };
   const syncAppPermissionControlPlane = () => {
     const summary = permissionEngine.getSummary();
@@ -2259,6 +2312,7 @@ export function query(
     refreshManagedSystemPrompt();
     syncLoopToolsFromRegistry();
     syncAppRuntimeControlPlane();
+    await syncAppProviderControlPlane(activeModel).catch(() => null);
     return readRuntimeControlPlaneSnapshot();
   };
   const syncAppSchedulerControlPlane = () => {
@@ -2277,6 +2331,7 @@ export function query(
   syncDispatcherWorkerPoolBudgetConfig();
   syncAppPermissionControlPlane();
   syncAppRuntimeControlPlane();
+  void syncAppProviderControlPlane(activeModel).catch(() => null);
 
   const touchSessionState = (patch: Partial<Pick<
     SessionStateSnapshot,
@@ -2294,6 +2349,7 @@ export function query(
     }
     sessionActiveTurn = patch.activeTurn ?? sessionActiveTurn;
     sessionLastActivityAt = new Date().toISOString();
+    emitSessionStateSnapshot();
   };
 
   const readSessionStateSnapshot = (): SessionStateSnapshot => ({
@@ -2314,6 +2370,13 @@ export function query(
     ...(sessionIdleReason ? { idleReason: sessionIdleReason } : {}),
     ...(sessionLastError ? { lastError: sessionLastError } : {}),
   });
+
+  const emitSessionStateSnapshot = (): void => {
+    const snapshot = readSessionStateSnapshot();
+    for (const subscriber of sessionStateSubscribers) {
+      subscriber.push(snapshot);
+    }
+  };
 
   const upsertDispatcherStoreRecord = (record: TaskDispatcherRecord) => {
     appStore.setState((prev) => upsertDispatcherControlPlane(prev, {
@@ -3839,6 +3902,81 @@ export function query(
 
   queryObj.getSessionState = async () => readSessionStateSnapshot();
 
+  queryObj.subscribeSessionState = (
+    subscriptionOptions = {},
+  ): AsyncIterable<SessionStateSnapshot> => {
+    const queue: SessionStateSnapshot[] = [];
+    let closed = false;
+    let queueNotifier: (() => void) | null = null;
+    let lastFingerprint: string | null = null;
+
+    const notify = () => {
+      if (queueNotifier) {
+        const resolve = queueNotifier;
+        queueNotifier = null;
+        resolve();
+      }
+    };
+
+    const push = (snapshot: SessionStateSnapshot) => {
+      if (closed) return;
+      const cloned = JSON.parse(JSON.stringify(snapshot)) as SessionStateSnapshot;
+      const fingerprint = JSON.stringify(cloned);
+      if (fingerprint === lastFingerprint) {
+        return;
+      }
+      lastFingerprint = fingerprint;
+      queue.push(cloned);
+      notify();
+    };
+
+    const subscriber = {
+      push,
+      close() {
+        if (closed) return;
+        closed = true;
+        sessionStateSubscribers.delete(subscriber);
+        subscriptionOptions.signal?.removeEventListener('abort', abortListener);
+        notify();
+      },
+    };
+
+    const abortListener = () => {
+      subscriber.close();
+    };
+
+    if (subscriptionOptions.signal?.aborted) {
+      subscriber.close();
+    } else {
+      sessionStateSubscribers.add(subscriber);
+      if (subscriptionOptions.emitInitial !== false) {
+        push(readSessionStateSnapshot());
+      }
+      subscriptionOptions.signal?.addEventListener('abort', abortListener, { once: true });
+    }
+
+    return {
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      async next() {
+        while (queue.length === 0) {
+          if (closed) {
+            return { done: true, value: undefined };
+          }
+          await new Promise<void>((resolve) => {
+            queueNotifier = resolve;
+          });
+        }
+        return { done: false, value: queue.shift()! };
+      },
+      async return() {
+        subscriber.close();
+        return { done: true, value: undefined };
+      },
+    };
+  };
+
   queryObj.setPermissionMode = async (mode) => {
     if (mode !== undefined) {
       if (mode === 'bypassPermissions' && options.allowDangerouslySkipPermissions !== true) {
@@ -3852,6 +3990,7 @@ export function query(
         permissionMode: mode,
       }));
       syncAppPermissionControlPlane();
+      emitSessionStateSnapshot();
       try {
         sessionMgr?.updateSession(cwd, sessionId, { permissionMode: mode }, { touch: false });
       } catch {
@@ -3871,6 +4010,7 @@ export function query(
         model: newModel,
       }));
       refreshManagedSystemPrompt();
+      emitSessionStateSnapshot();
       try {
         sessionMgr?.updateSession(cwd, sessionId, { model: newModel }, { touch: false });
       } catch {

@@ -369,6 +369,11 @@ export interface SessionStateSnapshot {
   lastError?: string;
 }
 
+export interface SubscribeSessionStateOptions {
+  signal?: AbortSignal;
+  emitInitial?: boolean;
+}
+
 export interface ProviderCapabilityRecord {
   provider: string;
   model: string;
@@ -423,6 +428,7 @@ export interface RuntimeControlPlaneSnapshot {
     hooks: RuntimeControlPlaneHookRecord[];
     diagnostics: RuntimeDiagnosticRecord[];
     capabilitySummary: RuntimeControlPlaneCapabilitySummary;
+    provider: ProviderCapabilityRecord | null;
   };
 }
 
@@ -1048,6 +1054,8 @@ export interface Query extends AsyncGenerator<SDKMessage, void> {
   interrupt(): Promise<void>;
   /** Return whether this query is idle, running, failed, or closed. */
   getSessionState(): Promise<SessionStateSnapshot>;
+  /** Subscribe to live session state transitions for this query/session. */
+  subscribeSessionState(options?: SubscribeSessionStateOptions): AsyncIterable<SessionStateSnapshot>;
   /** Dynamically change the permission mode mid-run. */
   setPermissionMode(mode: PermissionMode): Promise<void>;
   /** Swap the model mid-run (takes effect on the next LLM call). */
@@ -1265,6 +1273,8 @@ export interface Session {
   interrupt(): Promise<void>;
   /** Return whether this session is idle, running, failed, or closed. */
   getSessionState(): Promise<SessionStateSnapshot>;
+  /** Subscribe to live session state transitions for this session. */
+  subscribeSessionState(options?: SubscribeSessionStateOptions): AsyncIterable<SessionStateSnapshot>;
   /** Dynamically change the permission mode before the next turn. */
   setPermissionMode(mode: PermissionMode): Promise<void>;
   /** Swap the model before the next turn. */

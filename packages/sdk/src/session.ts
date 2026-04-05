@@ -90,6 +90,7 @@ type SessionControlMethods = Pick<
   Query,
   | 'interrupt'
   | 'getSessionState'
+  | 'subscribeSessionState'
   | 'setPermissionMode'
   | 'setModel'
   | 'setMaxThinkingTokens'
@@ -402,6 +403,7 @@ function _buildSession(
 
     interrupt: (...args) => q.interrupt(...args),
     getSessionState: (...args) => q.getSessionState(...args),
+    subscribeSessionState: (...args) => q.subscribeSessionState(...args),
     setPermissionMode: (...args) => q.setPermissionMode(...args),
     setModel: (...args) => q.setModel(...args),
     setMaxThinkingTokens: (...args) => q.setMaxThinkingTokens(...args),
@@ -678,6 +680,7 @@ export function unstable_v2_createSession(
 
     interrupt: (...args) => q.interrupt(...args),
     getSessionState: (...args) => q.getSessionState(...args),
+    subscribeSessionState: (...args) => q.subscribeSessionState(...args),
     setPermissionMode: (...args) => q.setPermissionMode(...args),
     setModel: (...args) => q.setModel(...args),
     setMaxThinkingTokens: (...args) => q.setMaxThinkingTokens(...args),

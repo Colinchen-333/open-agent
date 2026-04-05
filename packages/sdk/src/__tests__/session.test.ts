@@ -148,6 +148,7 @@ describe('createSession()', () => {
     expect(typeof session.send).toBe('function');
     expect(typeof session.interrupt).toBe('function');
     expect(typeof session.getSessionState).toBe('function');
+    expect(typeof session.subscribeSessionState).toBe('function');
     expect(typeof session.setPermissionMode).toBe('function');
     expect(typeof session.setModel).toBe('function');
     expect(typeof session.setMaxThinkingTokens).toBe('function');

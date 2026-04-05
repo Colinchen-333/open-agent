@@ -235,6 +235,57 @@ describe('SDK runtime control surface', () => {
     }
   });
 
+  it('streams live session state transitions without polling', async () => {
+    const { cwd, cleanup } = makeTempHome('open-agent-session-state-stream-');
+    const blocking = makeBlockingProvider();
+    try {
+      const session = createSession({
+        cwd,
+        model: 'mock-model',
+        provider: blocking.provider,
+      });
+
+      const iterator = session.subscribeSessionState()[Symbol.asyncIterator]();
+      const initial = await iterator.next();
+      expect(initial.value).toMatchObject({
+        status: 'idle',
+        activeTurn: false,
+        canAcceptInput: true,
+      });
+
+      const turn = session.send('hello');
+      const consume = (async () => {
+        for await (const _msg of turn) {
+          // drain
+        }
+      })();
+      await blocking.waitUntilStarted();
+
+      const running = await iterator.next();
+      expect(running.value).toMatchObject({
+        status: 'running',
+        activeTurn: true,
+        canAcceptInput: false,
+      });
+
+      blocking.release();
+      await consume;
+
+      const idleAgain = await iterator.next();
+      expect(idleAgain.value).toMatchObject({
+        status: 'idle',
+        activeTurn: false,
+        canAcceptInput: true,
+        idleReason: 'awaiting_input',
+      });
+
+      await iterator.return?.();
+      session.close();
+    } finally {
+      cleanup();
+    }
+  });
+
   it('exposes provider capability flags instead of silent degradation', async () => {
     const q = query('provider capability test', {
       model: 'cap-model',
