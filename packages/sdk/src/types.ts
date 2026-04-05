@@ -442,6 +442,10 @@ export interface OrchestrationControlPlaneSummary {
   runningDispatcherCount: number;
   drainingDispatcherCount: number;
   stoppedDispatcherCount: number;
+  idleDispatcherCount: number;
+  globalBudgetBlockedDispatcherCount: number;
+  teamBudgetBlockedDispatcherCount: number;
+  fairnessBlockedDispatcherCount: number;
   activeAssignmentCount: number;
   unhealthyDispatcherCount: number;
   dispatcherErrorCount: number;
@@ -626,6 +630,20 @@ export interface TaskDispatcherAssignmentRecord {
   attempts?: number;
 }
 
+export type TaskDispatcherSchedulingState =
+  | 'idle'
+  | 'dispatching'
+  | 'waiting_for_global_worker_budget'
+  | 'waiting_for_team_worker_budget'
+  | 'waiting_for_fair_turn'
+  | 'draining'
+  | 'stopped';
+
+export type TaskDispatcherBlockReason =
+  | 'global_worker_budget'
+  | 'team_worker_budget'
+  | 'fairness_turn';
+
 export interface TaskDispatcherRecord {
   dispatcherId: string;
   owner: string;
@@ -643,6 +661,9 @@ export interface TaskDispatcherRecord {
   mode?: string;
   cwd?: string;
   isolation?: 'worktree';
+  schedulerState: TaskDispatcherSchedulingState;
+  lastBlockedReason?: TaskDispatcherBlockReason;
+  lastBlockedAt?: string;
   activeTaskIds: string[];
   activeWorkerIds: string[];
   activeAssignments: TaskDispatcherAssignmentRecord[];
@@ -682,6 +703,7 @@ export type TaskDispatcherHealthCode =
   | 'task_missing'
   | 'assignment_drift'
   | 'lease_expired'
+  | 'team_quota_saturated'
   | 'draining_timeout';
 
 export interface TaskDispatcherHealthFinding {
@@ -870,6 +892,9 @@ export interface SDKTaskDispatcherEvent {
   mode?: string;
   cwd?: string;
   isolation?: 'worktree';
+  schedulerState: TaskDispatcherSchedulingState;
+  lastBlockedReason?: TaskDispatcherBlockReason;
+  lastBlockedAt?: string;
   taskId?: string;
   workerId?: string;
   taskStatus?: TaskRecord['status'];

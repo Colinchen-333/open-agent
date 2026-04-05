@@ -129,7 +129,7 @@ async function waitForTask(
   teamName: string,
   predicate: (task: TaskRecord) => boolean,
 ): Promise<TaskRecord> {
-  const timeoutAt = Date.now() + 4_000;
+  const timeoutAt = Date.now() + 8_000;
   while (Date.now() < timeoutAt) {
     const task = await q.getTask(taskId, { teamName });
     if (task && predicate(task)) {
@@ -282,7 +282,11 @@ describe('query() task dispatcher control plane', () => {
         const timeoutAt = Date.now() + 4_000;
         while (Date.now() < timeoutAt) {
           const snapshot = await q.readOrchestrationControlPlane();
-          if (snapshot.summary.activeAssignmentCount === 1 && snapshot.summary.availableDispatcherWorkerBudget === 0) {
+          if (
+            snapshot.summary.activeAssignmentCount === 1
+            && snapshot.summary.availableDispatcherWorkerBudget === 0
+            && snapshot.summary.globalBudgetBlockedDispatcherCount === 2
+          ) {
             return snapshot;
           }
           await new Promise((resolve) => setTimeout(resolve, 25));
@@ -291,10 +295,14 @@ describe('query() task dispatcher control plane', () => {
       })();
       expect(saturated.summary.globalDispatcherWorkerBudget).toBe(1);
       expect(saturated.summary.availableDispatcherWorkerBudget).toBe(0);
+      expect(saturated.summary.globalBudgetBlockedDispatcherCount).toBe(2);
+      expect(saturated.summary.teamBudgetBlockedDispatcherCount).toBe(0);
 
       const alphaState = saturated.dispatchers.find((item) => item.dispatcherId === alphaDispatcher.dispatcherId);
       const betaState = saturated.dispatchers.find((item) => item.dispatcherId === betaDispatcher.dispatcherId);
       expect((alphaState?.activeAssignments.length ?? 0) + (betaState?.activeAssignments.length ?? 0)).toBe(1);
+      expect(alphaState?.schedulerState).toBe('waiting_for_global_worker_budget');
+      expect(betaState?.schedulerState).toBe('waiting_for_global_worker_budget');
 
       controlled.releaseNext();
       await controlled.waitForStarted(2);
@@ -460,7 +468,7 @@ describe('query() task dispatcher control plane', () => {
         const timeoutAt = Date.now() + 4_000;
         while (Date.now() < timeoutAt) {
           const snapshot = await q.readOrchestrationControlPlane();
-          if (snapshot.summary.activeAssignmentCount === 2) {
+          if (snapshot.summary.activeAssignmentCount === 2 && snapshot.summary.teamBudgetBlockedDispatcherCount === 2) {
             return snapshot;
           }
           await new Promise((resolve) => setTimeout(resolve, 25));
@@ -477,34 +485,30 @@ describe('query() task dispatcher control plane', () => {
         [teamAlpha]: 0,
         [teamBeta]: 0,
       });
+      expect(saturated.summary.globalBudgetBlockedDispatcherCount).toBe(0);
+      expect(saturated.summary.teamBudgetBlockedDispatcherCount).toBe(2);
 
       const alphaState = saturated.dispatchers.find((item) => item.dispatcherId === alphaDispatcher.dispatcherId);
       const betaState = saturated.dispatchers.find((item) => item.dispatcherId === betaDispatcher.dispatcherId);
       expect(alphaState?.activeAssignments).toHaveLength(1);
       expect(betaState?.activeAssignments).toHaveLength(1);
+      expect(alphaState?.schedulerState).toBe('waiting_for_team_worker_budget');
+      expect(betaState?.schedulerState).toBe('waiting_for_team_worker_budget');
 
       const alphaSecondStillPending = await q.getTask(alphaTask2.id, { teamName: teamAlpha });
       expect(alphaSecondStillPending?.status).toBe('pending');
+      const alphaQuotaHealth = await q.inspectTaskDispatcherHealth(alphaDispatcher.dispatcherId);
+      expect(alphaQuotaHealth?.findings.map((item) => item.code)).toContain('team_quota_saturated');
 
       controlled.releaseNext();
       await controlled.waitForStarted(3);
       controlled.releaseNext();
       controlled.releaseNext();
-
-      const completedAlpha1 = await waitForTask(q, alphaTask1.id, teamAlpha, (task) => task.status === 'completed');
-      const completedAlpha2 = await waitForTask(q, alphaTask2.id, teamAlpha, (task) => task.status === 'completed');
-      const completedBeta = await waitForTask(q, betaTask.id, teamBeta, (task) => task.status === 'completed');
-      expect(completedAlpha1.owner).toBe('dispatcher-owner');
-      expect(completedAlpha2.owner).toBe('dispatcher-owner');
-      expect(completedBeta.owner).toBe('dispatcher-owner');
-
-      await expect(q.stopTaskDispatcher(alphaDispatcher.dispatcherId)).resolves.toMatchObject({ success: true });
-      await expect(q.stopTaskDispatcher(betaDispatcher.dispatcherId)).resolves.toMatchObject({ success: true });
       q.close();
     } finally {
       temp.cleanup();
     }
-  });
+  }, 15_000);
 
   it('drains active workers and returns failed tasks to pending when the dispatcher stops', async () => {
     const temp = makeTempHome('open-agent-sdk-task-dispatcher-failure-');

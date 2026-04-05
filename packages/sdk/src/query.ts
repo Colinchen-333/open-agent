@@ -90,7 +90,9 @@ import type {
   TaskDispatchInput,
   TaskDispatchResult,
   TaskDispatcherListOptions,
+  TaskDispatcherBlockReason,
   TaskDispatcherRecord,
+  TaskDispatcherSchedulingState,
   TaskDispatcherHealthFinding,
   TaskDispatcherHealthSummary,
   TaskDispatcherHealthOptions,
@@ -731,9 +733,17 @@ export function query(
     heartbeatAt: string;
   }
 
-  const cloneTaskDispatcherRecord = (record: TaskDispatcherRecord): TaskDispatcherRecord => (
-    JSON.parse(JSON.stringify(record))
-  );
+  const cloneTaskDispatcherRecord = (record: TaskDispatcherRecord): TaskDispatcherRecord => {
+    const cloned = JSON.parse(JSON.stringify(record)) as TaskDispatcherRecord;
+    if (!cloned.schedulerState) {
+      cloned.schedulerState = cloned.status === 'draining'
+        ? 'draining'
+        : cloned.status === 'stopped'
+          ? 'stopped'
+          : 'idle';
+    }
+    return cloned;
+  };
   const queryInstanceId = randomUUID();
   const countActiveDispatcherAssignments = (): number => {
     let total = 0;
@@ -852,6 +862,29 @@ export function query(
     if (dispatcherFairnessCursor === dispatcherId) {
       dispatcherFairnessCursor = null;
     }
+  };
+  const touchTaskDispatcherRecord = (state: TaskDispatcherState, timestamp = new Date().toISOString()): void => {
+    state.record.updatedAt = timestamp;
+  };
+  const setTaskDispatcherSchedulerState = (
+    state: TaskDispatcherState,
+    schedulerState: TaskDispatcherSchedulingState,
+    blockReason?: TaskDispatcherBlockReason,
+  ): boolean => {
+    let changed = false;
+    if (state.record.schedulerState !== schedulerState) {
+      touchTaskDispatcherRecord(state);
+      state.record.schedulerState = schedulerState;
+      changed = true;
+    }
+    if (blockReason) {
+      const timestamp = new Date().toISOString();
+      state.record.lastBlockedReason = blockReason;
+      state.record.lastBlockedAt = timestamp;
+      state.record.updatedAt = timestamp;
+      changed = true;
+    }
+    return changed;
   };
 
   const toWorkerRecord = (session: AgentSession): WorkerRecord => ({
@@ -2065,6 +2098,10 @@ export function query(
       runningDispatcherCount: dispatchers.filter((entry) => entry.status === 'running').length,
       drainingDispatcherCount: dispatchers.filter((entry) => entry.status === 'draining').length,
       stoppedDispatcherCount: dispatchers.filter((entry) => entry.status === 'stopped').length,
+      idleDispatcherCount: dispatchers.filter((entry) => entry.schedulerState === 'idle').length,
+      globalBudgetBlockedDispatcherCount: dispatchers.filter((entry) => entry.schedulerState === 'waiting_for_global_worker_budget').length,
+      teamBudgetBlockedDispatcherCount: dispatchers.filter((entry) => entry.schedulerState === 'waiting_for_team_worker_budget').length,
+      fairnessBlockedDispatcherCount: dispatchers.filter((entry) => entry.schedulerState === 'waiting_for_fair_turn').length,
       activeAssignmentCount: dispatchers.reduce((total, entry) => total + entry.activeAssignments.length, 0),
       unhealthyDispatcherCount: dispatcherDiagnoses.filter((entry) => !entry.healthy).length,
       dispatcherErrorCount: dispatcherDiagnoses.reduce((total, entry) => total + entry.summary.errorCount, 0),
@@ -2815,6 +2852,9 @@ export function query(
       ...(state.mode ? { mode: state.mode } : {}),
       ...(state.cwd ? { cwd: state.cwd } : {}),
       ...(state.isolation ? { isolation: state.isolation } : {}),
+      schedulerState: record.schedulerState,
+      ...(record.lastBlockedReason ? { lastBlockedReason: record.lastBlockedReason } : {}),
+      ...(record.lastBlockedAt ? { lastBlockedAt: record.lastBlockedAt } : {}),
       activeTaskIds: [...record.activeTaskIds],
       activeWorkerIds: [...record.activeWorkerIds],
       ...(overrides.taskId ? { taskId: overrides.taskId } : {}),
@@ -2893,6 +2933,13 @@ export function query(
       record: {
         ...clonedRecord,
         source: 'live',
+        schedulerState:
+          clonedRecord.schedulerState
+          ?? (clonedRecord.status === 'draining'
+            ? 'draining'
+            : clonedRecord.status === 'stopped'
+              ? 'stopped'
+              : 'idle'),
       },
       ...(clonedRecord.prompt ? { prompt: clonedRecord.prompt } : {}),
       ...(clonedRecord.name ? { name: clonedRecord.name } : {}),
@@ -2974,7 +3021,9 @@ export function query(
     state.running = false;
     state.rerunRequested = false;
     state.record.status = 'stopped';
+    state.record.schedulerState = 'stopped';
     state.record.stoppedAt = state.record.stoppedAt ?? new Date().toISOString();
+    touchTaskDispatcherRecord(state, state.record.stoppedAt);
     const record = syncTaskDispatcherRecord(state);
     releaseTaskDispatcherOwnership(state.record.dispatcherId);
     clearDispatcherFairnessCursorIfNeeded(state.record.dispatcherId);
@@ -3081,6 +3130,9 @@ export function query(
       syncTaskDispatcherRecord(state);
 
       if (state.record.status === 'draining') {
+        if (setTaskDispatcherSchedulerState(state, 'draining')) {
+          syncTaskDispatcherRecord(state);
+        }
         if (state.activeAssignments.size === 0) {
           markTaskDispatcherStopped(state);
         }
@@ -3099,6 +3151,23 @@ export function query(
       const dispatchLimit = countSchedulableDispatchers() > 1
         ? Math.min(boundedCapacity, 1)
         : boundedCapacity;
+      if (dispatchLimit <= 0) {
+        const schedulingState = availableTeamWorkerBudget !== null && availableTeamWorkerBudget <= 0
+          ? 'waiting_for_team_worker_budget'
+          : availableWorkerBudget !== null && availableWorkerBudget <= 0
+            ? 'waiting_for_global_worker_budget'
+            : state.activeAssignments.size > 0
+              ? 'dispatching'
+              : 'idle';
+        const blockReason = schedulingState === 'waiting_for_team_worker_budget'
+          ? 'team_worker_budget'
+          : schedulingState === 'waiting_for_global_worker_budget'
+            ? 'global_worker_budget'
+            : undefined;
+        if (setTaskDispatcherSchedulerState(state, schedulingState, blockReason)) {
+          syncTaskDispatcherRecord(state);
+        }
+      }
 
       for (
         let dispatchedCount = 0;
@@ -3108,9 +3177,27 @@ export function query(
         dispatchedCount += 1
       ) {
         if (!isDispatcherFairnessTurn(state)) {
+          if (setTaskDispatcherSchedulerState(state, 'waiting_for_fair_turn', 'fairness_turn')) {
+            syncTaskDispatcherRecord(state);
+          }
           break;
         }
         if (!tryReserveDispatcherWorkerSlot(state.record.teamName)) {
+          const remainingGlobalBudget = getAvailableDispatcherWorkerBudget();
+          const remainingTeamBudget = getAvailableDispatcherWorkerBudgetForTeam(state.record.teamName);
+          const schedulingState = remainingTeamBudget !== null && remainingTeamBudget <= 0
+            ? 'waiting_for_team_worker_budget'
+            : remainingGlobalBudget !== null && remainingGlobalBudget <= 0
+              ? 'waiting_for_global_worker_budget'
+              : 'idle';
+          const blockReason = schedulingState === 'waiting_for_team_worker_budget'
+            ? 'team_worker_budget'
+            : schedulingState === 'waiting_for_global_worker_budget'
+              ? 'global_worker_budget'
+              : undefined;
+          if (setTaskDispatcherSchedulerState(state, schedulingState, blockReason)) {
+            syncTaskDispatcherRecord(state);
+          }
           break;
         }
         let dispatched: Awaited<ReturnType<typeof queryObj.dispatchNextTask>> = null;
@@ -3132,6 +3219,12 @@ export function query(
           releaseReservedDispatcherWorkerSlot(state.record.teamName);
         }
         if (!dispatched) {
+          if (setTaskDispatcherSchedulerState(
+            state,
+            state.activeAssignments.size > 0 ? 'dispatching' : 'idle',
+          )) {
+            syncTaskDispatcherRecord(state);
+          }
           break;
         }
 
@@ -3148,6 +3241,7 @@ export function query(
           taskId: dispatched.task.id,
         });
         state.record.lastDispatchAt = new Date().toISOString();
+        setTaskDispatcherSchedulerState(state, 'dispatching');
         syncTaskDispatcherRecord(state);
         emitTaskDispatcherOrchestrationEvent(state, 'dispatched', {
           taskId: dispatched.task.id,
@@ -4596,6 +4690,7 @@ export function query(
         ...(normalizeOptionalString(input.mode) ? { mode: normalizeOptionalString(input.mode) } : {}),
         ...(normalizeOptionalString(input.cwd) ? { cwd: normalizeOptionalString(input.cwd) } : {}),
         ...(input.isolation ? { isolation: input.isolation } : {}),
+        schedulerState: 'idle',
         activeTaskIds: [],
         activeWorkerIds: [],
         activeAssignments: [],
@@ -5330,6 +5425,28 @@ export function query(
       }
     }
 
+    const teamBudget = getConfiguredTeamDispatcherWorkerBudget(dispatcher.teamName);
+    const availableTeamWorkerBudget = getAvailableDispatcherWorkerBudgetForTeam(dispatcher.teamName);
+    if (
+      dispatcher.status === 'running'
+      && dispatcher.activeAssignments.length < dispatcher.maxConcurrentWorkers
+      && teamBudget !== null
+      && availableTeamWorkerBudget !== null
+      && availableTeamWorkerBudget <= 0
+    ) {
+      const pendingTeamTasks = (await queryObj.listTasks({ teamName: dispatcher.teamName }))
+        .filter((task) => task.status === 'pending');
+      if (pendingTeamTasks.length > 0) {
+        findings.push({
+          code: 'team_quota_saturated',
+          severity: 'warning',
+          message: `Team ${dispatcher.teamName} exhausted its dispatcher worker quota (${teamBudget}) while pending tasks remain.`,
+          observedAt,
+          taskId: pendingTeamTasks[0]?.id,
+        });
+      }
+    }
+
     const updatedAtMs = Date.parse(dispatcher.updatedAt);
     if (
       dispatcher.status === 'draining'
@@ -5497,6 +5614,7 @@ export function query(
     if (state.record.status === 'stopped') {
       markTaskDispatcherStopped(state);
     } else {
+      setTaskDispatcherSchedulerState(state, 'draining');
       emitTaskDispatcherOrchestrationEvent(state, 'draining');
       scheduleTaskDispatcherRun(state, 0);
     }
