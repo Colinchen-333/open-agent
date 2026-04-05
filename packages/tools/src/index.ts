@@ -84,3 +84,5 @@ export { getToolPromptDescriptions } from './tool-descriptions.js';
 export { withToolDefaults } from './tool-defaults.js';
 export * from './sandbox/darwin-profile.js';
 export * from './sandbox/darwin-runner.js';
+export { createTodoWriteTool, getTodosForSession, clearTodoSessions } from './todo-write.js';
+export type { TodoItem, TodoWriteOptions } from './todo-write.js';

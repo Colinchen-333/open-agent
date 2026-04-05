@@ -13,6 +13,7 @@ import { createWebSearchTool } from './web-search.js';
 import { createConfigTool } from './config-tool.js';
 import { createTaskOutputTool, createTaskStopTool } from './task-management.js';
 import { createEnterWorktreeTool } from './worktree.js';
+import { createTodoWriteTool } from './todo-write.js';
 
 /**
  * Central registry for all available tools.
@@ -96,6 +97,7 @@ export function createDefaultToolRegistry(_cwd: string): ToolRegistry {
   registry.register(createTaskOutputTool());
   registry.register(createTaskStopTool());
   registry.register(createEnterWorktreeTool());
+  registry.register(createTodoWriteTool());
   return registry;
 }
 
