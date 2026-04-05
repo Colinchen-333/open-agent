@@ -1,4 +1,4 @@
-import type { ModelInfo, ThinkingConfig } from '@open-agent/core';
+import type { ModelInfo, SystemPromptBlock, ThinkingConfig } from '@open-agent/core';
 
 export interface LLMProvider {
   chat(messages: Message[], options: ChatOptions): AsyncGenerator<StreamEvent>;
@@ -57,6 +57,13 @@ export interface ChatOptions {
   thinking?: ThinkingConfig;
   effort?: 'low' | 'medium' | 'high' | 'max';
   systemPrompt?: string;
+  /**
+   * Structured system prompt blocks with static/dynamic labels.
+   * When provided, AnthropicProvider uses buildAnthropicSystemParam to
+   * place cache_control on the static prefix boundary instead of marking
+   * the entire system prompt as a single cached block.
+   */
+  systemPromptBlocks?: SystemPromptBlock[];
   stopSequences?: string[];
   /** AbortSignal to cancel the in-flight HTTP request (Ctrl+C support). */
   signal?: AbortSignal;

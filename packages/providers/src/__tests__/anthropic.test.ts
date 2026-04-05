@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'bun:test';
 import {
+  buildAnthropicSystemParam,
   convertMessages,
   extractSystemPrompt,
   convertTools,
@@ -366,5 +367,58 @@ describe('effortToBudget', () => {
 
   it('returns 8000 for undefined (default)', () => {
     expect(effortToBudget(undefined)).toBe(8000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildAnthropicSystemParam
+// ---------------------------------------------------------------------------
+
+describe('buildAnthropicSystemParam', () => {
+  it('marks only the last static block with cache_control', () => {
+    const blocks = [
+      { text: 'STATIC-IDENTITY', section: 'static' as const },
+      { text: 'STATIC-TOOLS', section: 'static' as const },
+      { text: 'DYNAMIC-PROJECT', section: 'dynamic' as const },
+      { text: 'DYNAMIC-GIT', section: 'dynamic' as const },
+    ];
+
+    const system = buildAnthropicSystemParam(blocks);
+
+    expect(system).toEqual([
+      { type: 'text', text: 'STATIC-IDENTITY' },
+      { type: 'text', text: 'STATIC-TOOLS', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'DYNAMIC-PROJECT' },
+      { type: 'text', text: 'DYNAMIC-GIT' },
+    ]);
+  });
+
+  it('handles a list with only static blocks by marking the last one', () => {
+    const blocks = [
+      { text: 'STATIC-A', section: 'static' as const },
+      { text: 'STATIC-B', section: 'static' as const },
+    ];
+
+    const system = buildAnthropicSystemParam(blocks);
+
+    expect(system[0]).toEqual({ type: 'text', text: 'STATIC-A' });
+    expect(system[1]).toEqual({ type: 'text', text: 'STATIC-B', cache_control: { type: 'ephemeral' } });
+  });
+
+  it('applies no cache_control when there are no static blocks', () => {
+    const blocks = [
+      { text: 'DYNAMIC-A', section: 'dynamic' as const },
+      { text: 'DYNAMIC-B', section: 'dynamic' as const },
+    ];
+
+    const system = buildAnthropicSystemParam(blocks);
+
+    for (const entry of system) {
+      expect(entry.cache_control).toBeUndefined();
+    }
+  });
+
+  it('returns an empty array for empty input', () => {
+    expect(buildAnthropicSystemParam([])).toEqual([]);
   });
 });

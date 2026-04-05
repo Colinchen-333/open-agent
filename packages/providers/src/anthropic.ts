@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import type { ModelInfo } from '@open-agent/core';
+import type { ModelInfo, SystemPromptBlock } from '@open-agent/core';
 import type {
   ChatOptions,
   ContentBlock,
@@ -9,6 +9,37 @@ import type {
   StreamEvent,
   ToolSpec,
 } from './types.js';
+
+/**
+ * Convert a list of SystemPromptBlocks into the Anthropic messages API
+ * `system` parameter format, placing a single `cache_control` marker on the
+ * LAST static block to seal the static prefix for prompt caching.
+ *
+ * Dynamic blocks (cwd, git state, memory, session info) receive no
+ * cache_control so they are always re-sent to the model fresh each turn.
+ */
+export function buildAnthropicSystemParam(
+  blocks: SystemPromptBlock[],
+): Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }> {
+  // Find the last static block — marking it seals the entire static prefix.
+  let lastStaticIdx = -1;
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    if (blocks[i]!.section === 'static') {
+      lastStaticIdx = i;
+      break;
+    }
+  }
+  return blocks.map((b, i) => {
+    const entry: { type: 'text'; text: string; cache_control?: { type: 'ephemeral' } } = {
+      type: 'text',
+      text: b.text,
+    };
+    if (i === lastStaticIdx) {
+      entry.cache_control = { type: 'ephemeral' };
+    }
+    return entry;
+  });
+}
 
 // Convert unified Message[] to Anthropic MessageParam[] format.
 // System messages are extracted separately and not included in the returned array.
@@ -273,9 +304,31 @@ export class AnthropicProvider implements LLMProvider {
       // Enable prompt caching on system prompt and tool definitions.
       // This can reduce costs by up to 90% and latency by 85% on long conversations
       // where the system prompt and tool specs repeat every turn.
-      const systemParam = effectiveSystem
-        ? [{ type: 'text' as const, text: effectiveSystem, cache_control: { type: 'ephemeral' as const } }]
-        : undefined;
+      //
+      // When structured blocks are provided, use buildAnthropicSystemParam to
+      // place cache_control only on the last static block (sealing the static
+      // prefix) so dynamic session content is never cached.  Fall back to a
+      // single fully-cached block when only a flat string is available.
+      let systemParam:
+        | Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }>
+        | undefined;
+
+      if (options.systemPromptBlocks && options.systemPromptBlocks.length > 0) {
+        // If responseFormat appended JSON instructions, attach them as an
+        // extra dynamic block so the boundary placement stays correct.
+        const blocks = options.responseFormat
+          ? [
+              ...options.systemPromptBlocks,
+              {
+                text: `\n\nYou MUST respond with valid JSON matching this schema:\n${JSON.stringify(options.responseFormat.schema)}`,
+                section: 'dynamic' as const,
+              },
+            ]
+          : options.systemPromptBlocks;
+        systemParam = buildAnthropicSystemParam(blocks);
+      } else if (effectiveSystem) {
+        systemParam = [{ type: 'text' as const, text: effectiveSystem, cache_control: { type: 'ephemeral' as const } }];
+      }
 
       // Mark the last tool definition for caching so the entire tool list is cached.
       const cachedTools = tools && tools.length > 0
