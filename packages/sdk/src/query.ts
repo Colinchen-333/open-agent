@@ -1601,11 +1601,30 @@ export function query(
   // Hooks — wire from QueryOptions
   // ------------------------------------------------------------------
   let hookExecutor: InstanceType<typeof HookExecutor> | undefined;
-  const configuredHooks = mergeHookConfigs(
-    loadedSettings?.hooks as Partial<Record<HookEvent, any[]>> | undefined,
-    pluginRuntime.hookConfig,
-    options.hooks,
-  );
+  const replaceConfiguredHooks = (): void => {
+    const settingsHooks = loadedSettings?.hooks as Partial<Record<HookEvent, any[]>> | undefined;
+    const queryOptionHooks = options.hooks;
+    const hasSettingsHooks = Boolean(settingsHooks && Object.keys(settingsHooks).length > 0);
+    const hasPluginHooks = Object.keys(pluginRuntime.hookConfig).length > 0;
+    const hasQueryOptionHooks = Boolean(queryOptionHooks && Object.keys(queryOptionHooks).length > 0);
+
+    if (!hasSettingsHooks && !hasPluginHooks && !hasQueryOptionHooks) {
+      hookExecutor = undefined;
+      return;
+    }
+
+    const nextHookExecutor = new HookExecutor();
+    if (hasSettingsHooks) {
+      nextHookExecutor.loadFromConfig(settingsHooks!, 'settings_json');
+    }
+    if (hasPluginHooks) {
+      nextHookExecutor.loadFromConfig(pluginRuntime.hookConfig, 'plugin');
+    }
+    if (hasQueryOptionHooks) {
+      nextHookExecutor.loadFromConfig(queryOptionHooks!, 'query_options');
+    }
+    hookExecutor = nextHookExecutor;
+  };
   const buildPromptHookSurface = (): RuntimeHookSummary[] => hookExecutor?.getHookSurface() ?? buildRuntimeHookSurfaceSummary(
     pluginRuntime.hooks,
     {
@@ -1617,14 +1636,12 @@ export function query(
       config: options.hooks,
     },
   );
-  if (configuredHooks && Object.keys(configuredHooks).length > 0) {
-    hookExecutor = new HookExecutor();
-    hookExecutor.loadFromConfig(configuredHooks);
-  }
-  // Adapt HookExecutor to LoopHookExecutor interface (loose → strict input type).
-  const loopHookExecutor = hookExecutor
-    ? { execute: (event: string, input: Record<string, unknown>, toolUseId?: string) => hookExecutor!.execute(event as any, input as any, toolUseId) }
-    : undefined;
+  replaceConfiguredHooks();
+  const executeLoopHook = async (
+    event: string,
+    input: Record<string, unknown>,
+    toolUseId?: string,
+  ) => hookExecutor?.execute(event as any, input as any, toolUseId) ?? {};
 
   // ------------------------------------------------------------------
   // File checkpointing — record file state before modifications
@@ -1649,10 +1666,10 @@ export function query(
               }
             }
           }
-          return loopHookExecutor ? loopHookExecutor.execute(event, input, toolUseId) : {};
+          return executeLoopHook(event, input, toolUseId);
         },
       }
-    : loopHookExecutor;
+    : { execute: executeLoopHook };
 
   // Initialize the SDK agent executor now that hooks are available.
   if (taskToolAutoWired) {
@@ -2297,6 +2314,7 @@ export function query(
         settingsSandbox = nextSettingsSandbox;
       }
       loadedSettings = nextLoadedSettings;
+      replaceConfiguredHooks();
       permissionEngine = rebuildPermissionEngine(loadedSettings);
       const nextConfiguredMcpServers = mergeMcpServerConfigs(
         loadedSettings?.mcpServers as Record<string, McpServerConfig> | undefined,

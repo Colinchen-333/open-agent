@@ -423,6 +423,52 @@ describe('SDK runtime control surface', () => {
     }
   });
 
+  it('refreshes effective hook surface from settings during an active session', async () => {
+    const { cwd, cleanup } = makeTempHome('open-agent-runtime-hook-refresh-');
+    const capture = makePromptCaptureProvider();
+    const settingsDir = join(cwd, '.open-agent');
+    mkdirSync(settingsDir, { recursive: true });
+
+    try {
+      const session = createSession({
+        cwd,
+        model: 'mock-model',
+        provider: capture.provider,
+        settingSources: ['project'],
+      });
+
+      try {
+        for await (const _msg of session.send('describe runtime surface before refresh')) {
+          // drain
+        }
+        expect(capture.getPrompt()).not.toContain('Notification');
+
+        writeJson(join(settingsDir, 'settings.json'), {
+          hooks: {
+            Notification: [
+              { command: 'echo refreshed-hook', timeout: 5 },
+            ],
+          },
+        });
+
+        await session.refreshRuntimeSettings();
+
+        for await (const _msg of session.send('describe runtime surface after refresh')) {
+          // drain
+        }
+
+        const prompt = capture.getPrompt();
+        expect(prompt).toContain('# Runtime Hook Surface');
+        expect(prompt).toContain('Notification');
+        expect(prompt).toContain('settings_json');
+      } finally {
+        session.close();
+      }
+    } finally {
+      cleanup();
+    }
+  });
+
   it('exposes provider capability flags instead of silent degradation', async () => {
     const q = query('provider capability test', {
       model: 'cap-model',
