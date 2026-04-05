@@ -24,7 +24,9 @@ import type {
   BashSandboxExecutionPolicy,
   BashSandboxExecutionProvenance,
   BashSandboxExecutionRecord,
+  SandboxMetaPolicy,
 } from '@open-agent/permissions';
+import { filterIgnoredFindings } from '@open-agent/permissions';
 
 const MAX_OUTPUT_LENGTH = 30000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -75,7 +77,36 @@ function pruneBackgroundTasks(tasks: Map<string, { status: string; startTime: nu
   }
 }
 
-export function createBashTool(): ToolDefinition {
+export interface BashToolDeps {
+  /**
+   * If set, runtime sandbox violations matching any rule in
+   * `metaPolicy.ignoreViolations` are filtered out before being attached to
+   * the execution record. Non-silent ignored violations are logged via
+   * console.warn.
+   */
+  sandboxMetaPolicy?: SandboxMetaPolicy;
+}
+
+/**
+ * Apply the sandbox meta policy filter to a raw findings list. Any finding
+ * that matches an `ignoreViolations` rule is removed from the returned array.
+ * Rules with `silent: false` trigger a console.warn for observability.
+ *
+ * Exported for direct unit-testing.
+ */
+export function applyMetaPolicyToFindings(
+  rawFindings: BashSandboxExecutionFinding[],
+  metaPolicy: SandboxMetaPolicy | undefined,
+): BashSandboxExecutionFinding[] {
+  if (!metaPolicy) return rawFindings;
+  return filterIgnoredFindings(rawFindings, metaPolicy, (finding, rule) => {
+    console.warn(
+      `[bash] sandbox violation ignored by rule "${rule.reason}": ${(finding as any).scope ?? 'unknown'}/${finding.code} target=${(finding as any).target ?? 'n/a'}`,
+    );
+  });
+}
+
+export function createBashTool(deps: BashToolDeps = {}): ToolDefinition {
   return withToolDefaults({
     name: 'Bash',
     isConcurrencySafe: false,
@@ -139,7 +170,10 @@ export function createBashTool(): ToolDefinition {
           runInBackground: input.run_in_background === true,
           policy: sandboxPolicy,
           outcome: 'blocked',
-          findings: collectSandboxFindings(sandboxPolicy, preflightViolation),
+          findings: applyMetaPolicyToFindings(
+            collectSandboxFindings(sandboxPolicy, preflightViolation),
+            deps.sandboxMetaPolicy,
+          ),
         });
         appendSandboxExecutionDiagnostic(ctx, preflightRecord);
         const error: BashSandboxError = new Error(preflightViolation.message);
@@ -186,7 +220,10 @@ export function createBashTool(): ToolDefinition {
           policy: sandboxPolicy,
           outcome: 'started',
           wrappedWithSandboxExec: false,
-          findings: collectSandboxFindings(sandboxPolicy),
+          findings: applyMetaPolicyToFindings(
+            collectSandboxFindings(sandboxPolicy),
+            deps.sandboxMetaPolicy,
+          ),
         });
         appendSandboxExecutionDiagnostic(ctx, sandboxExecutionStartedPty);
 
@@ -223,7 +260,10 @@ export function createBashTool(): ToolDefinition {
           wrappedWithSandboxExec: false,
           exitCode: ptyResult.exitCode,
           outputLength: ptyOutput.length,
-          findings: collectSandboxFindings(sandboxPolicy),
+          findings: applyMetaPolicyToFindings(
+            collectSandboxFindings(sandboxPolicy),
+            deps.sandboxMetaPolicy,
+          ),
         });
         appendSandboxExecutionDiagnostic(ctx, sandboxExecutionDonePty);
 
@@ -246,7 +286,10 @@ export function createBashTool(): ToolDefinition {
         policy: sandboxPolicy,
         outcome: 'started',
         wrappedWithSandboxExec: sandboxedCommand.command === DARWIN_SANDBOX_EXEC || wantDarwinRunner,
-        findings: collectSandboxFindings(sandboxPolicy),
+        findings: applyMetaPolicyToFindings(
+          collectSandboxFindings(sandboxPolicy),
+          deps.sandboxMetaPolicy,
+        ),
       });
       appendSandboxExecutionDiagnostic(ctx, sandboxExecutionStarted);
 
@@ -301,9 +344,12 @@ export function createBashTool(): ToolDefinition {
             finalCwd,
             outputLength: cleanOutput.length,
             backgroundTaskId: taskId,
-            findings: collectSandboxFindings(
-              sandboxPolicy,
-              code === 0 ? null : detectSandboxRuntimeViolation(rawOutput, sandboxPolicy, code),
+            findings: applyMetaPolicyToFindings(
+              collectSandboxFindings(
+                sandboxPolicy,
+                code === 0 ? null : detectSandboxRuntimeViolation(rawOutput, sandboxPolicy, code),
+              ),
+              deps.sandboxMetaPolicy,
             ),
           });
           appendSandboxExecutionDiagnostic(ctx, backgroundRecord);
@@ -385,9 +431,12 @@ export function createBashTool(): ToolDefinition {
           outcome: 'aborted',
           wrappedWithSandboxExec,
           exitCode,
-          findings: collectSandboxFindings(
-            sandboxPolicy,
-            detectSandboxRuntimeViolation(rawStderr, sandboxPolicy, exitCode),
+          findings: applyMetaPolicyToFindings(
+            collectSandboxFindings(
+              sandboxPolicy,
+              detectSandboxRuntimeViolation(rawStderr, sandboxPolicy, exitCode),
+            ),
+            deps.sandboxMetaPolicy,
           ),
         });
         appendSandboxExecutionDiagnostic(ctx, abortedRecord);
@@ -432,11 +481,14 @@ export function createBashTool(): ToolDefinition {
         exitCode,
         finalCwd,
         outputLength: output.length,
-        findings: collectSandboxFindings(
-          sandboxPolicy,
-          finalOutcome === 'success'
-            ? null
-            : detectSandboxRuntimeViolation(rawStderr, sandboxPolicy, exitCode),
+        findings: applyMetaPolicyToFindings(
+          collectSandboxFindings(
+            sandboxPolicy,
+            finalOutcome === 'success'
+              ? null
+              : detectSandboxRuntimeViolation(rawStderr, sandboxPolicy, exitCode),
+          ),
+          deps.sandboxMetaPolicy,
         ),
       });
       appendSandboxExecutionDiagnostic(ctx, sandboxExecution);

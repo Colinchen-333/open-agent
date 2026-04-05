@@ -1,13 +1,14 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'bun:test';
+import { describe, it, expect, beforeAll, afterAll, afterEach, spyOn } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { createBashTool } from '../bash.js';
+import { createBashTool, applyMetaPolicyToFindings } from '../bash.js';
 import { createTaskOutputTool } from '../task-management.js';
 import { BASH_SANDBOX_POLICY_FIELD, buildBashSandboxPolicy } from '../../../permissions/src/sandbox-adapter.js';
 import { closeBashPty } from '../bash-pty.js';
 import { setFeatureDefault, clearFeatureOverrides } from '@open-agent/core';
 import { isDarwinSandboxAvailable, wrapWithDarwinSandbox } from '../sandbox/darwin-runner.js';
+import type { SandboxMetaPolicy, BashSandboxExecutionFinding } from '@open-agent/permissions';
 
 describe('Bash tool', () => {
   let tmpDir: string;
@@ -415,5 +416,122 @@ describe('Bash tool', () => {
       expect(startedRecord).toBeDefined();
       expect((startedRecord!.payload as any).provenance.wrappedWithSandboxExec).toBe(true);
     }, 15_000);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Sandbox meta policy filter (applyMetaPolicyToFindings)
+  // ---------------------------------------------------------------------------
+
+  describe('applyMetaPolicyToFindings', () => {
+    const makeFilesystemFinding = (target: string): BashSandboxExecutionFinding => ({
+      code: 'filesystem_write_denied',
+      message: `Write denied: ${target}`,
+      severity: 'error',
+      scope: 'filesystem',
+      target,
+    } as any);
+
+    const makeNetworkFinding = (): BashSandboxExecutionFinding => ({
+      code: 'network_blocked',
+      message: 'Outbound network blocked',
+      severity: 'warning',
+      scope: 'network',
+    } as any);
+
+    it('returns raw findings unchanged when no meta policy is provided', () => {
+      const findings = [makeFilesystemFinding('/etc/hosts'), makeNetworkFinding()];
+      expect(applyMetaPolicyToFindings(findings, undefined)).toEqual(findings);
+    });
+
+    it('returns raw findings unchanged when ignoreViolations is empty', () => {
+      const policy: SandboxMetaPolicy = { ignoreViolations: [] };
+      const findings = [makeFilesystemFinding('/tmp/foo')];
+      expect(applyMetaPolicyToFindings(findings, policy)).toEqual(findings);
+    });
+
+    it('filters out a filesystem finding that matches a pathPattern rule', () => {
+      const policy: SandboxMetaPolicy = {
+        ignoreViolations: [
+          { category: 'filesystem', pathPattern: '/tmp/**', reason: 'tmp writes are fine', silent: true },
+        ],
+      };
+      const tmpFinding = makeFilesystemFinding('/tmp/workdir/output.txt');
+      const etcFinding = makeFilesystemFinding('/etc/hosts');
+      const result = applyMetaPolicyToFindings([tmpFinding, etcFinding], policy);
+      // /tmp/workdir/output.txt matches /tmp/**, should be removed
+      expect(result).not.toContain(tmpFinding);
+      // /etc/hosts does not match, should be kept
+      expect(result).toContain(etcFinding);
+    });
+
+    it('keeps a finding whose target does not match the pathPattern', () => {
+      const policy: SandboxMetaPolicy = {
+        ignoreViolations: [
+          { category: 'filesystem', pathPattern: '/tmp/**', reason: 'tmp only', silent: true },
+        ],
+      };
+      const finding = makeFilesystemFinding('/var/log/app.log');
+      const result = applyMetaPolicyToFindings([finding], policy);
+      expect(result).toContain(finding);
+    });
+
+    it('filters by category — a network rule does not remove a filesystem finding', () => {
+      const policy: SandboxMetaPolicy = {
+        ignoreViolations: [
+          { category: 'network', reason: 'network is allowed', silent: true },
+        ],
+      };
+      const fsFinding = makeFilesystemFinding('/tmp/x');
+      const netFinding = makeNetworkFinding();
+      const result = applyMetaPolicyToFindings([fsFinding, netFinding], policy);
+      expect(result).toContain(fsFinding);
+      expect(result).not.toContain(netFinding);
+    });
+
+    it('calls console.warn for non-silent ignored violations', () => {
+      const policy: SandboxMetaPolicy = {
+        ignoreViolations: [
+          { category: 'filesystem', pathPattern: '/tmp/**', reason: 'tmp ok', silent: false },
+        ],
+      };
+      const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const finding = makeFilesystemFinding('/tmp/scratch/test.txt');
+        const result = applyMetaPolicyToFindings([finding], policy);
+        expect(result).toHaveLength(0);
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        expect(warnSpy.mock.calls[0][0]).toContain('[bash] sandbox violation ignored by rule "tmp ok"');
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('does NOT call console.warn for silent ignored violations', () => {
+      const policy: SandboxMetaPolicy = {
+        ignoreViolations: [
+          { category: 'filesystem', pathPattern: '/tmp/**', reason: 'silent rule', silent: true },
+        ],
+      };
+      const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const finding = makeFilesystemFinding('/tmp/foo');
+        applyMetaPolicyToFindings([finding], policy);
+        expect(warnSpy).not.toHaveBeenCalled();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('createBashTool accepts sandboxMetaPolicy in deps without type error', () => {
+      const policy: SandboxMetaPolicy = {
+        ignoreViolations: [
+          { category: 'filesystem', pathPattern: '/tmp/**', reason: 'test', silent: true },
+        ],
+      };
+      // This test verifies the factory accepts deps.sandboxMetaPolicy at the type level;
+      // the returned tool is a valid ToolDefinition.
+      const toolWithPolicy = createBashTool({ sandboxMetaPolicy: policy });
+      expect(toolWithPolicy.name).toBe('Bash');
+    });
   });
 });
