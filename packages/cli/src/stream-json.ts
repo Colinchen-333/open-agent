@@ -43,3 +43,28 @@ export function emitStreamJson(message: SDKMessage): void {
   }
   process.stdout.write(JSON.stringify(message) + '\n');
 }
+
+/**
+ * Write exactly one JSON line + `\n` for a single SDKMessage to the given
+ * writable stream (defaults to `process.stdout`).
+ *
+ * Alignment with Claude Code SDK protocol:
+ * - One JSON object per line, no pretty-printing, no ANSI escape codes.
+ * - Each write is a single `stream.write()` call — no buffering across calls.
+ * - The `type` discriminant must be present; if absent a TypeError is thrown
+ *   so callers get an explicit signal rather than a silent malformed line.
+ *
+ * @param msg - Any member of the SDKMessage union.
+ * @param out - Optional writable stream; defaults to `process.stdout`.
+ */
+export function writeStreamJsonLine(
+  msg: SDKMessage,
+  out: NodeJS.WritableStream = process.stdout,
+): void {
+  if (typeof (msg as any)?.type !== 'string') {
+    throw new TypeError(
+      `writeStreamJsonLine: msg must have a string "type" field (received ${JSON.stringify(msg)})`,
+    );
+  }
+  out.write(JSON.stringify(msg) + '\n');
+}
