@@ -111,3 +111,4 @@ export {
   type SessionSearchResult,
 } from './session-search.js';
 export * from './keybindings';
+export * from './output-styles.js';

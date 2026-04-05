@@ -211,6 +211,7 @@ const SLASH_COMMANDS: Record<
         '    /plugins         List loaded plugins',
         '    /workflow        Show workflow status',
         '    /keybindings     Show keybindings',
+        '    /output-style [name]  List or set response output style',
         '',
         '  General',
         '    /help            Show this help',
@@ -722,6 +723,74 @@ const SLASH_COMMANDS: Record<
       return {
         handled: true,
         output: 'Keybindings configuration not yet implemented (Round 3 scope).',
+      };
+    },
+  },
+  '/output-style': {
+    description: 'List or set the response output style',
+    handler: async (args, ctx) => {
+      const name = args?.trim();
+      const { loadOutputStyles, mergeOutputStyles, findOutputStyle, BUILTIN_OUTPUT_STYLES } =
+        await import('@open-agent/core');
+      const loaded = await loadOutputStyles(ctx.cwd);
+      const all = mergeOutputStyles(loaded, BUILTIN_OUTPUT_STYLES);
+      if (!name) {
+        // List available styles
+        const lines = ['Available output styles:'];
+        for (const s of all) {
+          lines.push(`  ${s.name.padEnd(12)} ${s.description}`);
+        }
+        return { handled: true, output: lines.join('\n') };
+      }
+      const picked = findOutputStyle(name, all);
+      return {
+        handled: true,
+        output: `Output style set to: ${picked.name}\n${picked.description}`,
+      };
+    },
+  },
+  '/outputstyle': {
+    description: 'Alias for /output-style',
+    handler: async (args, ctx) => {
+      // Delegate to /output-style handler
+      const name = args?.trim();
+      const { loadOutputStyles, mergeOutputStyles, findOutputStyle, BUILTIN_OUTPUT_STYLES } =
+        await import('@open-agent/core');
+      const loaded = await loadOutputStyles(ctx.cwd);
+      const all = mergeOutputStyles(loaded, BUILTIN_OUTPUT_STYLES);
+      if (!name) {
+        const lines = ['Available output styles:'];
+        for (const s of all) {
+          lines.push(`  ${s.name.padEnd(12)} ${s.description}`);
+        }
+        return { handled: true, output: lines.join('\n') };
+      }
+      const picked = findOutputStyle(name, all);
+      return {
+        handled: true,
+        output: `Output style set to: ${picked.name}\n${picked.description}`,
+      };
+    },
+  },
+  '/style': {
+    description: 'Alias for /output-style',
+    handler: async (args, ctx) => {
+      const name = args?.trim();
+      const { loadOutputStyles, mergeOutputStyles, findOutputStyle, BUILTIN_OUTPUT_STYLES } =
+        await import('@open-agent/core');
+      const loaded = await loadOutputStyles(ctx.cwd);
+      const all = mergeOutputStyles(loaded, BUILTIN_OUTPUT_STYLES);
+      if (!name) {
+        const lines = ['Available output styles:'];
+        for (const s of all) {
+          lines.push(`  ${s.name.padEnd(12)} ${s.description}`);
+        }
+        return { handled: true, output: lines.join('\n') };
+      }
+      const picked = findOutputStyle(name, all);
+      return {
+        handled: true,
+        output: `Output style set to: ${picked.name}\n${picked.description}`,
       };
     },
   },

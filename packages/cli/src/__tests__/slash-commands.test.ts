@@ -222,6 +222,43 @@ describe('user skill invocation via /<skill-name>', () => {
   });
 });
 
+describe('/output-style', () => {
+  it('lists built-in styles when called without args', async () => {
+    const result = await handleSlashCommand('/output-style', baseCtx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('Available output styles:');
+    expect(result?.output).toContain('default');
+    expect(result?.output).toContain('verbose');
+    expect(result?.output).toContain('terse');
+  });
+
+  it('/outputstyle alias also lists styles', async () => {
+    const result = await handleSlashCommand('/outputstyle', baseCtx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('Available output styles:');
+    expect(result?.output).toContain('default');
+  });
+
+  it('/style alias also lists styles', async () => {
+    const result = await handleSlashCommand('/style', baseCtx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('Available output styles:');
+    expect(result?.output).toContain('default');
+  });
+
+  it('reports the picked style name when a valid name is given', async () => {
+    const result = await handleSlashCommand('/output-style verbose', baseCtx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('verbose');
+  });
+
+  it('falls back to "default" style when an unknown name is given', async () => {
+    const result = await handleSlashCommand('/output-style nonexistent-xyz', baseCtx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('default');
+  });
+});
+
 describe('loadUserSlashCommands', () => {
   function makeTempDir() {
     return mkdtempSync(join(tmpdir(), 'open-agent-cmds-'));
