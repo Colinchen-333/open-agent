@@ -2018,7 +2018,7 @@ export function query(
   // System prompt
   // ------------------------------------------------------------------
   const sources = new Set(settingSources);
-  const promptContext = loadPromptContext({
+  const loadCurrentPromptContext = () => loadPromptContext({
     cwd,
     includeGit: isGitRepo,
     includeMemory: sources.has('project'),
@@ -2029,8 +2029,6 @@ export function query(
     ],
     additionalDirectories: options.additionalDirectories,
   });
-  const hasContextSection = (key: string): boolean =>
-    promptContext.sections.some((section) => section.key === key);
 
   let activeModel = model;
   let sessionLifecycleStatus: SessionStateSnapshot['status'] = 'idle';
@@ -2051,6 +2049,9 @@ export function query(
     if (typeof options.systemPrompt === 'string') {
       nextPrompt = options.systemPrompt;
     } else {
+      const promptContext = loadCurrentPromptContext();
+      const hasContextSection = (key: string): boolean =>
+        promptContext.sections.some((section) => section.key === key);
       const runtimeSnapshot = runtime.buildSnapshot();
       const availableTools = toolRegistry.list().map((tool) => tool.name);
       const configuredActiveTeam = activeTeamName ?? defaultTeamName;

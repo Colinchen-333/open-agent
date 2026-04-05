@@ -554,10 +554,6 @@ async function main(): Promise<void> {
   const permissionPrompter = wrapCliPermissionPrompter(new TerminalPermissionPrompter());
 
   // ------------------------------------------------------------------
-  // AGENT.md config and Auto-Memory
-  // ------------------------------------------------------------------
-  const agentInstructions = configLoader.loadAgentMd(cwd);
-  // ------------------------------------------------------------------
   // File checkpoint — records file states before Write/Edit operations
   // so the user can /rewind to any prior state.
   // ------------------------------------------------------------------
@@ -716,7 +712,7 @@ async function main(): Promise<void> {
   const getAvailableTools = () => (isPrintMode ? [] : toolRegistry.list());
   let toolNames = getAvailableTools().map((tool) => tool.name);
   const isGitRepo = isGitRepository(cwd);
-  const promptContext = loadPromptContext({
+  const loadCurrentPromptContext = () => loadPromptContext({
     cwd,
     includeGit: isGitRepo,
     includeMemory: true,
@@ -724,6 +720,7 @@ async function main(): Promise<void> {
     additionalDirectories,
   });
   const buildCliSystemPrompt = (): string => {
+    const promptContext = loadCurrentPromptContext();
     const currentTools = getAvailableTools();
     const currentToolNames = currentTools.map((tool) => tool.name);
     const runtimeSnapshot = runtime.buildSnapshot();

@@ -392,6 +392,37 @@ describe('SDK runtime control surface', () => {
     }
   });
 
+  it('reloads project prompt context at turn boundaries when AGENT.md changes', async () => {
+    const { cwd, cleanup } = makeTempHome('open-agent-turn-prompt-context-');
+    const capture = makePromptCaptureProvider();
+    try {
+      const session = createSession({
+        cwd,
+        model: 'mock-model',
+        provider: capture.provider,
+        settingSources: ['project'],
+      });
+
+      const firstTurn = session.send('first turn');
+      for await (const _msg of firstTurn) {
+        // drain
+      }
+      expect(capture.getPrompt()).not.toContain('Follow the freshly written project guidance.');
+
+      writeFileSync(join(cwd, 'AGENT.md'), 'Follow the freshly written project guidance.\n', 'utf-8');
+
+      const secondTurn = session.send('second turn');
+      for await (const _msg of secondTurn) {
+        // drain
+      }
+
+      expect(capture.getPrompt()).toContain('Follow the freshly written project guidance.');
+      session.close();
+    } finally {
+      cleanup();
+    }
+  });
+
   it('exposes provider capability flags instead of silent degradation', async () => {
     const q = query('provider capability test', {
       model: 'cap-model',
