@@ -3,7 +3,7 @@ import { microcompact } from './microcompact.js';
 
 export { snip } from './snip.js';
 export type { SnipOptions } from './snip.js';
-export { microcompact } from './microcompact.js';
+export { microcompact, DEFAULT_TOOL_BUDGETS } from './microcompact.js';
 export type { MicrocompactOptions } from './microcompact.js';
 
 export type AutoCompactPolicy = 'proactive' | 'reactive-only' | 'disabled';
