@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { buildSystemPrompt } from '../system-prompt.js';
 
 describe('buildSystemPrompt runtime snapshot', () => {
-  it('renders runtime context for skills, agents, and MCP servers', () => {
+  it('renders runtime prompt fragments for skills, agents, and MCP servers', () => {
     const prompt = buildSystemPrompt({
       cwd: '/tmp/demo',
       model: 'claude-sonnet-4-6',
@@ -63,13 +63,15 @@ describe('buildSystemPrompt runtime snapshot', () => {
       },
     });
 
-    expect(prompt).toContain('# Runtime Context');
+    expect(prompt).toContain('# Runtime Agent Profiles');
+    expect(prompt).toContain('# Runtime Skills');
+    expect(prompt).toContain('# Runtime MCP Servers');
+    expect(prompt).toContain('# Runtime Coordination');
+    expect(prompt).toContain('# Runtime Tool Capability Layers');
+    expect(prompt).toContain('# Runtime Diagnostics');
     expect(prompt).toContain('**explorer**');
     expect(prompt).toContain('**review-pr**');
     expect(prompt).toContain('**linear**');
-    expect(prompt).toContain('## Coordination');
-    expect(prompt).toContain('## Tool capability layers');
-    expect(prompt).toContain('## Runtime diagnostics');
     expect(prompt).toContain('Summary: 1 total (0 info, 1 warning, 0 error)');
     expect(prompt).toContain('Sources: plugin: 1');
     expect(prompt).toContain('High-risk tools: Bash');
@@ -284,8 +286,8 @@ describe('buildSystemPrompt runtime snapshot', () => {
       ],
     });
 
-    expect(prompt.indexOf('# Runtime Context')).toBeGreaterThan(-1);
-    expect(prompt.indexOf('# Runtime A')).toBeGreaterThan(prompt.indexOf('# Runtime Context'));
+    expect(prompt.indexOf('# Runtime MCP Servers')).toBeGreaterThan(-1);
+    expect(prompt.indexOf('# Runtime A')).toBeLessThan(prompt.indexOf('# Runtime MCP Servers'));
     expect(prompt.indexOf('# Runtime B')).toBeGreaterThan(prompt.indexOf('# Runtime A'));
     expect(prompt.indexOf('# Final Note')).toBeGreaterThan(prompt.indexOf('# Runtime B'));
   });
