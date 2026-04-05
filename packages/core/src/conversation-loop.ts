@@ -8,7 +8,8 @@ import { randomUUID } from 'crypto';
 import { basename } from 'path';
 import { SessionManager } from './session-manager.js';
 import { StreamingToolExecutor } from './tool-executor.js';
-import { runCompactPipeline } from './compact/index.js';
+import { runCompactPipeline, NOOP_SUMMARIZER, llmAutocompact, shouldTriggerProactiveAutocompact } from './compact/index.js';
+import type { MessageSummarizer, AutoCompactPolicy } from './compact/index.js';
 import { fileHistory } from './file-history.js';
 import { feature } from './feature-flags.js';
 
@@ -305,6 +306,10 @@ export class ConversationLoop {
     markRead(filePath: string) { this._readFiles.add(filePath); },
     hasBeenRead(filePath: string) { return this._readFiles.has(filePath); },
   };
+  // LLM-based autocompact support — defaults to noop/reactive-only so existing
+  // behaviour is unchanged until the caller explicitly opts in.
+  private messageSummarizer: MessageSummarizer = NOOP_SUMMARIZER;
+  private autoCompactPolicy: AutoCompactPolicy = 'reactive-only';
 
   constructor(options: ConversationLoopOptions) {
     this.options = options;
@@ -326,6 +331,34 @@ export class ConversationLoop {
       fileHistory.setPersistence(
         this.sessionManager.createFileHistoryPersistence(cwd, sessionId),
       );
+    }
+  }
+
+  /** Wire a custom LLM summarizer for proactive autocompact. */
+  setMessageSummarizer(s: MessageSummarizer): void {
+    this.messageSummarizer = s;
+  }
+
+  /** Set the autocompact policy. 'proactive' fires before each turn when threshold is hit. */
+  setAutoCompactPolicy(p: AutoCompactPolicy): void {
+    this.autoCompactPolicy = p;
+  }
+
+  /**
+   * Run proactive LLM autocompact when the policy is 'proactive' and the
+   * message count threshold is reached.  Errors are silently swallowed so a
+   * summarizer failure cannot crash the conversation loop.
+   */
+  private async maybeProactiveAutocompact(): Promise<void> {
+    if (this.autoCompactPolicy !== 'proactive') return;
+    if (!shouldTriggerProactiveAutocompact(this.messages)) return;
+    try {
+      const result = await llmAutocompact(this.messages, this.messageSummarizer);
+      if (result.didCompact) {
+        this.messages = result.messages as typeof this.messages;
+      }
+    } catch {
+      /* autocompact failures should not crash the loop */
     }
   }
 
@@ -530,6 +563,10 @@ export class ConversationLoop {
     // Main agent loop — each iteration is one LLM call (one "turn").
     while (true) {
       this.turnCount++;
+
+      // Proactive LLM autocompact: summarize old messages before the API call
+      // when the policy is 'proactive' and the threshold is reached.
+      await this.maybeProactiveAutocompact();
 
       // Hard message count ceiling: force compaction if messages exceed 500.
       if (this.messages.length > 500) {

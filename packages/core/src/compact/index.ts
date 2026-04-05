@@ -6,6 +6,11 @@ export type { SnipOptions } from './snip.js';
 export { microcompact } from './microcompact.js';
 export type { MicrocompactOptions } from './microcompact.js';
 
+export type AutoCompactPolicy = 'proactive' | 'reactive-only' | 'disabled';
+
+export * from './summarizer.js';
+export * from './llm-autocompact.js';
+
 export interface CompactPipelineOptions {
   /** Number of recent assistant turns whose tool_results to preserve unchanged. */
   keepLastN: number;
