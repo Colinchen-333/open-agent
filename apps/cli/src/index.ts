@@ -26,7 +26,6 @@ import {
 } from '@open-agent/tools';
 import { AgentLoader, AgentExecutor, TaskManager, TeamManager } from '@open-agent/agents';
 import type { AgentSession } from '@open-agent/agents';
-import { PermissionEngine } from '@open-agent/permissions';
 import { HookExecutor } from '@open-agent/hooks';
 import { OpenAgentRuntime, filterCapabilitySnapshot } from '@open-agent/runtime';
 import type { SDKMessage, AgentDefinition, SDKTaskNotificationMessage } from '@open-agent/core';
@@ -35,6 +34,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
+import { createCliPermissionRuntime, wrapCliPermissionPrompter } from './permission-runtime.js';
 
 const VERSION = '0.1.0';
 
@@ -543,32 +543,24 @@ async function main(): Promise<void> {
     // Non-fatal
   }
 
-  const permissionEngine = new PermissionEngine({
+  const cliPermissionRuntime = createCliPermissionRuntime({
+    cwd,
     mode: effectivePermissionMode,
+    additionalDirectories,
+    permissionPromptToolName: args.permissionPromptTool,
   });
-  // Wire settings-based rules (allow/deny/ask arrays from settings.json permissions key)
-  permissionEngine.loadFromSettings(settings);
-  // Wire path restrictions from settings.json permissions.allowedPaths / deniedPaths
-  if (settings.permissions?.allowedPaths) {
-    permissionEngine.setAllowedPaths(settings.permissions.allowedPaths as string[]);
-  }
-  if (settings.permissions?.deniedPaths) {
-    permissionEngine.setDeniedPaths(settings.permissions.deniedPaths as string[]);
-  }
-  // Allow file access in additional directories specified via --add-dir
-  if (additionalDirectories.length > 0) {
-    const currentAllowed = permissionEngine.getSummary().allowedPaths;
-    // Always add --add-dir paths, even when no allowedPaths are configured yet.
-    // When allowedPaths is empty the engine allows all paths, but once we add
-    // explicit entries it starts enforcing — so include cwd to preserve access.
-    const base = currentAllowed.length > 0 ? currentAllowed : [cwd];
-    permissionEngine.setAllowedPaths([...base, ...additionalDirectories]);
-  }
-  // Wire --permission-prompt-tool: store the tool name in the permission engine
-  if (args.permissionPromptTool) {
-    permissionEngine.setPermissionPromptToolName(args.permissionPromptTool);
-  }
-  const permissionPrompter = new TerminalPermissionPrompter();
+  const permissionEngine = cliPermissionRuntime.permissionEngine;
+  const settingsWatcher = cliPermissionRuntime.watchSettings();
+  let settingsWatcherClosed = false;
+  const closeSettingsWatcher = () => {
+    if (settingsWatcherClosed) return;
+    settingsWatcherClosed = true;
+    settingsWatcher.close();
+  };
+  process.once('exit', closeSettingsWatcher);
+  process.once('SIGINT', closeSettingsWatcher);
+  process.once('SIGTERM', closeSettingsWatcher);
+  const permissionPrompter = wrapCliPermissionPrompter(new TerminalPermissionPrompter());
 
   // ------------------------------------------------------------------
   // AGENT.md config and Auto-Memory

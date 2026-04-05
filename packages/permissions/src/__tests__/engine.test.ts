@@ -524,6 +524,71 @@ describe('PermissionEngine', () => {
       expect(engine.evaluate(req('Read', { file_path: '/workspace/private/secret.txt' })).behavior).toBe('deny');
       expect(engine.evaluate(req('Read', { file_path: '/outside/file.txt' })).behavior).toBe('deny');
     });
+
+    it('loads sandbox config from settings.sandbox', () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      engine.loadFromSettings({
+        sandbox: {
+          enabled: true,
+          filesystem: {
+            denyRead: ['/secret'],
+          },
+        },
+      });
+
+      expect(engine.getSandboxConfig()).toEqual({
+        enabled: true,
+        filesystem: {
+          denyRead: ['/secret'],
+        },
+      });
+      expect(engine.evaluate(req('Read', { file_path: '/secret/token.txt' })).behavior).toBe('deny');
+    });
+  });
+
+  describe('replaceFromSettings', () => {
+    it('replaces prior rules, paths, and sandbox config instead of accumulating them', () => {
+      const engine = new PermissionEngine({
+        mode: 'default',
+        allowRules: [{ toolName: 'Write' }],
+        sandbox: {
+          enabled: true,
+          filesystem: {
+            denyRead: ['/old-secret'],
+          },
+        },
+        allowedPaths: ['/old-workspace'],
+      });
+
+      engine.replaceFromSettings({
+        permissions: {
+          deny: [{ toolName: 'Write' }],
+          allowedPaths: ['/workspace'],
+        },
+        sandbox: {
+          enabled: true,
+          filesystem: {
+            denyRead: ['/new-secret'],
+          },
+        },
+      });
+
+      expect(engine.getSummary()).toMatchObject({
+        allowRules: [],
+        denyRules: [{ toolName: 'Write' }],
+        allowedPaths: ['/workspace'],
+        deniedPaths: [],
+      });
+      expect(engine.getSandboxConfig()).toEqual({
+        enabled: true,
+        filesystem: {
+          denyRead: ['/new-secret'],
+        },
+      });
+      expect(engine.evaluate(req('Write')).behavior).toBe('deny');
+      expect(engine.evaluate(req('Read', { file_path: '/old-workspace/file.txt' })).behavior).toBe('deny');
+      expect(engine.evaluate(req('Read', { file_path: '/new-secret/file.txt' })).behavior).toBe('deny');
+    });
   });
 
   // ---------------------------------------------------------------------------

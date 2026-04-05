@@ -407,6 +407,10 @@ export class PermissionEngine {
     this.deniedPaths = paths;
   }
 
+  setSandboxConfig(sandbox: SandboxConfig): void {
+    this.sandbox = { ...sandbox };
+  }
+
   setPermissionPromptToolName(name: string): void {
     this._permissionPromptToolName = name;
   }
@@ -443,8 +447,15 @@ export class PermissionEngine {
    * ```
    */
   loadFromSettings(settings: Record<string, any>): void {
+    if (settings.sandbox && typeof settings.sandbox === 'object' && typeof settings.sandbox.enabled === 'boolean') {
+      this.setSandboxConfig(settings.sandbox as SandboxConfig);
+    }
+
     const perms = settings.permissions;
-    if (!perms) return;
+    if (!perms) {
+      this.reconcileDangerousAllowRulesForMode();
+      return;
+    }
 
     for (const rule of (perms.allow ?? []) as PermissionRule[]) {
       this.addRule('allow', rule);
@@ -462,6 +473,23 @@ export class PermissionEngine {
       this.setDeniedPaths(perms.deniedPaths.filter((p: unknown): p is string => typeof p === 'string'));
     }
     this.reconcileDangerousAllowRulesForMode();
+  }
+
+  replaceFromSettings(settings: Record<string, any> | null | undefined): void {
+    this.rules = {
+      allow: [],
+      deny: [],
+      ask: [],
+    };
+    this.suspendedAllowRules = [];
+    this.allowedPaths = [];
+    this.deniedPaths = [];
+    this.sandbox = { enabled: false };
+    if (settings) {
+      this.loadFromSettings(settings);
+    } else {
+      this.reconcileDangerousAllowRulesForMode();
+    }
   }
 
   private shouldSuspendDangerousAllowRules(): boolean {
