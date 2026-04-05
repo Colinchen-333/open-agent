@@ -1,4 +1,5 @@
 import type { PermissionMode, PermissionBehavior } from '@open-agent/core';
+import { feature } from '@open-agent/core';
 import type {
   PermissionConfig,
   PermissionDecision,
@@ -8,6 +9,7 @@ import type {
 } from './types';
 import { classifyBashCommand } from './bash-policy.js';
 import { runPipeline, type PipelineContext, type PipelineStage } from './pipeline.js';
+import { classifyPermissionRequest, type ClassifierContext } from './classifier.js';
 
 // Read-only tools that are always safe for informational access
 const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion'];
@@ -119,6 +121,9 @@ export class PermissionEngine {
 
   /** Semantic allow entries registered by ExitPlanModeV2. Consumed by the classifier stage (L23). */
   private allowedPrompts: Array<{ tool: string; prompt: string }> = [];
+
+  /** Recent user messages from the transcript. Populated by ConversationLoop after each user turn. */
+  private recentUserMessages: string[] = [];
 
   /** @internal test instrumentation — set to a callback to observe pipeline stage execution order */
   public __trace?: (stage: PipelineStage) => void;
@@ -301,12 +306,24 @@ export class PermissionEngine {
   /**
    * Stage 5 — classifier
    *
-   * Placeholder for a future ML/heuristic classifier that can auto-approve or
-   * auto-reject requests based on learned patterns. Currently returns undefined
-   * so the pipeline always continues to the prompt stage.
+   * Rule-based classifier that can auto-approve permission requests based on:
+   *   1. Tool annotations (readOnly → auto-allow)
+   *   2. Semantic match against allowedPrompts registered by ExitPlanModeV2
+   *   3. Recent explicit user approval phrase in the transcript
+   *
+   * This stage is feature-gated via the TRANSCRIPT_CLASSIFIER flag (default false).
+   * The classifier is allow-only: it can short-circuit to allow but never to deny.
+   * Denies remain the responsibility of stageAlwaysDeny and stagePrompt.
    */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  private async stageClassifier(_ctx: PipelineContext): Promise<PermissionDecision | undefined> {
+  private async stageClassifier(ctx: PipelineContext): Promise<PermissionDecision | undefined> {
+    if (!feature('TRANSCRIPT_CLASSIFIER')) return undefined;
+    const decision = classifyPermissionRequest(ctx.request, {
+      recentUserMessages: this.recentUserMessages,
+      allowedPrompts: this.getAllowedPrompts(),
+    } satisfies ClassifierContext);
+    if (decision?.approved) {
+      return { behavior: 'allow', reason: `classifier: ${decision.rationale}` };
+    }
     return undefined;
   }
 
@@ -624,6 +641,11 @@ export class PermissionEngine {
   /** Clear all registered allowed prompts. Called when re-entering plan mode. */
   clearAllowedPrompts(): void {
     this.allowedPrompts = [];
+  }
+
+  /** Set the transcript context for the classifier. Called by ConversationLoop after user turn. */
+  setRecentUserMessages(messages: string[]): void {
+    this.recentUserMessages = messages.slice(-10);
   }
 
   /**

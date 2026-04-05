@@ -791,4 +791,41 @@ describe('PermissionEngine', () => {
       expect(engine.getAllowedPrompts()).toHaveLength(0);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Classifier stage (TRANSCRIPT_CLASSIFIER feature flag)
+  // ---------------------------------------------------------------------------
+
+  describe('classifier stage', () => {
+    test('classifier stage auto-approves when TRANSCRIPT_CLASSIFIER flag is on and rule matches', async () => {
+      const { setFeatureDefault, clearFeatureOverrides } = await import('@open-agent/core');
+      setFeatureDefault('TRANSCRIPT_CLASSIFIER', true);
+      try {
+        const engine = new PermissionEngine({ mode: 'default' });
+        const result = await engine.evaluate({
+          toolName: 'Read',
+          input: { file_path: '/tmp/x' },
+          toolUseId: 'test-classifier-1',
+          annotations: { readOnly: true },
+        });
+        expect(result.behavior).toBe('allow');
+        expect(result.reason).toContain('classifier');
+      } finally {
+        clearFeatureOverrides();
+      }
+    });
+
+    test('classifier stage is pass-through when TRANSCRIPT_CLASSIFIER flag is off', async () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      // Without the flag, even readOnly annotated should fall through to prompt
+      const result = await engine.evaluate({
+        toolName: 'Read',
+        input: { file_path: '/tmp/x' },
+        toolUseId: 'test-classifier-2',
+        annotations: { readOnly: true },
+      });
+      // Result depends on baseline behavior — just assert classifier didn't early-exit with its rationale
+      expect(result.reason ?? '').not.toContain('classifier');
+    });
+  });
 });
