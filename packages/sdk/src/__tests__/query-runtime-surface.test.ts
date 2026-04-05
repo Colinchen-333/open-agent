@@ -5,6 +5,7 @@ import { tmpdir } from 'os';
 import type { ToolDefinition } from '@open-agent/tools';
 import type { ChatOptions, LLMProvider, Message, StreamEvent } from '@open-agent/providers';
 import type { ModelInfo } from '@open-agent/core';
+import { BASH_SANDBOX_POLICY_FIELD } from '@open-agent/permissions';
 import { createSession } from '../session.js';
 import { query } from '../query.js';
 
@@ -79,6 +80,48 @@ function makeMetadataProvider(models: ModelInfo[]): LLMProvider {
       return models;
     },
   };
+}
+
+function makeMockProvider(responses: StreamEvent[][]): LLMProvider {
+  let callIndex = 0;
+
+  return {
+    name: 'mock-runtime-surface-provider',
+    async *chat(_messages: Message[], _options: ChatOptions): AsyncGenerator<StreamEvent> {
+      const events = responses[Math.min(callIndex, responses.length - 1)] ?? [];
+      callIndex += 1;
+      for (const event of events) {
+        yield event;
+      }
+    },
+    async listModels(): Promise<ModelInfo[]> {
+      return [{
+        value: 'mock-model',
+        displayName: 'Mock Model',
+        description: 'Runtime surface test model',
+      }];
+    },
+  };
+}
+
+function toolUseResponse(
+  toolId: string,
+  toolName: string,
+  toolInput: Record<string, unknown>,
+): StreamEvent[] {
+  return [
+    { type: 'tool_use_start', id: toolId, name: toolName },
+    { type: 'tool_use_delta', id: toolId, partial_json: JSON.stringify(toolInput) },
+    { type: 'tool_use_end', id: toolId },
+    { type: 'message_end', message: {}, usage: { input_tokens: 10, output_tokens: 20 } },
+  ];
+}
+
+function textResponse(text: string): StreamEvent[] {
+  return [
+    { type: 'text_delta', text },
+    { type: 'message_end', message: {}, usage: { input_tokens: 10, output_tokens: 20 } },
+  ];
 }
 
 function makeBackgroundControlProvider(): LLMProvider {
@@ -297,6 +340,85 @@ describe('SDK runtime control surface', () => {
         const running = await q.listRunningSubagents({ teamName: 'alpha' });
         expect(running.some((entry) => entry.workerId === worker.workerId)).toBe(true);
         await expect(q.cancelSubagent(worker.workerId)).resolves.toEqual({ success: true });
+      } finally {
+        q.close();
+      }
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('surfaces live permission control plane state and refreshes bash sandbox policy from session updates', async () => {
+    const { cwd, cleanup } = makeTempHome('open-agent-runtime-permissions-');
+    const observedPolicies: Array<{
+      allowWritePaths: string[];
+      denyReadPaths: string[];
+      denyWritePaths: string[];
+    }> = [];
+    const runtimeAllowedDir = join(cwd, 'runtime-allowed');
+    mkdirSync(runtimeAllowedDir, { recursive: true });
+    const baselineDir = join(cwd, 'baseline');
+    mkdirSync(baselineDir, { recursive: true });
+
+    try {
+      const q = query('refresh permissions', {
+        cwd,
+        model: 'mock-model',
+        provider: makeMockProvider([
+          toolUseResponse('bash-1', 'Bash', { command: 'pwd' }),
+          toolUseResponse('bash-2', 'Bash', { command: 'pwd' }),
+          textResponse('done'),
+        ]),
+        sandbox: {
+          enabled: true,
+          filesystem: {
+            allowWrite: [baselineDir],
+          },
+        },
+        canUseTool(toolName, input) {
+          if (toolName !== 'Bash') {
+            return true;
+          }
+          const policy = input[BASH_SANDBOX_POLICY_FIELD] as {
+            allowWritePaths?: string[];
+            denyReadPaths?: string[];
+            denyWritePaths?: string[];
+          } | undefined;
+          observedPolicies.push({
+            allowWritePaths: [...(policy?.allowWritePaths ?? [])],
+            denyReadPaths: [...(policy?.denyReadPaths ?? [])],
+            denyWritePaths: [...(policy?.denyWritePaths ?? [])],
+          });
+          if (observedPolicies.length === 1) {
+            return {
+              behavior: 'allow' as const,
+              updatedPermissions: [{
+                type: 'addDirectories' as const,
+                destination: 'session' as const,
+                directories: [runtimeAllowedDir],
+              }],
+            };
+          }
+          return { behavior: 'allow' as const };
+        },
+      });
+
+      try {
+        for await (const _message of q) {
+          // Drain the turn so both Bash tool calls execute.
+        }
+
+        expect(observedPolicies).toHaveLength(2);
+        expect(observedPolicies[0]?.allowWritePaths).toEqual(expect.arrayContaining([baselineDir]));
+        expect(observedPolicies[0]?.allowWritePaths).not.toEqual(expect.arrayContaining([runtimeAllowedDir]));
+        expect(observedPolicies[1]?.allowWritePaths).toEqual(expect.arrayContaining([
+          baselineDir,
+          runtimeAllowedDir,
+        ]));
+
+        const runtimeControlPlane = await q.readRuntimeControlPlane();
+        expect(runtimeControlPlane.permissions.allowedPaths).toEqual([runtimeAllowedDir]);
+        expect(Array.isArray(runtimeControlPlane.permissions.suspendedAllowRules)).toBe(true);
       } finally {
         q.close();
       }

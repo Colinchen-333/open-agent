@@ -9,6 +9,7 @@ import {
   upsertDispatcherDiagnosisControlPlane,
   syncTeamInboxMemberControlPlane,
   syncMcpServerState,
+  syncPermissionControlPlane,
   syncRuntimeControlPlane,
   syncSessionControlPlane,
   syncToolRegistryState,
@@ -104,6 +105,27 @@ describe('state control plane helpers', () => {
       dynamicTools: 1,
     });
     expect(withTeam.activeTeamName).toBe('alpha');
+  });
+
+  it('syncs permission control plane fields', () => {
+    const state = createDefaultAppState();
+    const next = syncPermissionControlPlane(state, {
+      allowRules: [{ toolName: 'Read' }],
+      suspendedAllowRules: [{ toolName: 'Bash', ruleContent: '*' }],
+      denyRules: [{ toolName: 'Write', ruleContent: '/secret' }],
+      askRules: [{ toolName: 'Edit' }],
+      allowedPaths: ['/workspace'],
+      deniedPaths: ['/secret'],
+    });
+
+    expect(next.permissions).toEqual({
+      allowRules: [{ toolName: 'Read' }],
+      suspendedAllowRules: [{ toolName: 'Bash', ruleContent: '*' }],
+      denyRules: [{ toolName: 'Write', ruleContent: '/secret' }],
+      askRules: [{ toolName: 'Edit' }],
+      allowedPaths: ['/workspace'],
+      deniedPaths: ['/secret'],
+    });
   });
 
   it('upserts dispatchers and dedupes timeline items by key', () => {

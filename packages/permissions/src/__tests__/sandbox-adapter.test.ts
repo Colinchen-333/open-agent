@@ -81,6 +81,27 @@ describe('sandbox-adapter', () => {
     ]));
   });
 
+  it('merges runtime permission path overrides into the bash sandbox policy', () => {
+    const policy = buildBashSandboxPolicy({
+      sandbox: {
+        enabled: true,
+        filesystem: {
+          allowWrite: ['./allowed'],
+        },
+      },
+      cwd: tmpDir,
+      runtimeAllowedPaths: ['./runtime-allowed'],
+      runtimeDeniedPaths: ['./runtime-blocked'],
+    });
+
+    expect(policy.allowWritePaths).toEqual(expect.arrayContaining([
+      join(tmpDir, 'allowed'),
+      join(tmpDir, 'runtime-allowed'),
+    ]));
+    expect(policy.denyReadPaths).toEqual([join(tmpDir, 'runtime-blocked')]);
+    expect(policy.denyWritePaths).toEqual([join(tmpDir, 'runtime-blocked')]);
+  });
+
   it('sets networkDisabled when network.disabled=true', () => {
     const policy = buildBashSandboxPolicy({
       sandbox: {

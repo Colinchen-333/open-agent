@@ -359,6 +359,14 @@ describe('createSession()', () => {
     const runtimeControlPlane = await session.readRuntimeControlPlane();
     expect(runtimeControlPlane.sessionId).toBe(session.sessionId);
     expect(runtimeControlPlane.permissionMode).toBe('acceptEdits');
+    expect(runtimeControlPlane.permissions).toEqual({
+      allowRules: [],
+      suspendedAllowRules: [],
+      denyRules: [],
+      askRules: [],
+      allowedPaths: [],
+      deniedPaths: [],
+    });
     expect(Array.isArray(runtimeControlPlane.runtime.agentNames)).toBe(true);
     expect(Array.isArray(await session.listRuntimeDiagnostics())).toBe(true);
     const orchestrationControlPlane = await session.readOrchestrationControlPlane();

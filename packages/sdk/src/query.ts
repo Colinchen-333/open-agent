@@ -19,6 +19,7 @@ import {
   appendTimelineControlPlane,
   createDefaultAppState,
   setActiveTeamControlPlane,
+  syncPermissionControlPlane,
   syncTeamInboxMemberControlPlane,
   syncMcpServerState,
   syncRuntimeControlPlane,
@@ -1804,12 +1805,15 @@ export function query(
     if (!request.input || typeof request.input !== 'object' || Array.isArray(request.input)) return;
 
     const input = request.input as Record<string, unknown>;
+    const permissionSummary = permissionEngine.getSummary();
     const policy = buildBashSandboxPolicy({
-      sandbox: effectiveSandboxConfig,
+      sandbox: permissionEngine.getSandboxConfig(),
       cwd,
       dangerouslyDisableSandbox: input.dangerouslyDisableSandbox === true,
       bypassApproved: input[BASH_SANDBOX_BYPASS_APPROVED_FIELD] === true,
       permissionBehavior,
+      runtimeAllowedPaths: permissionSummary.allowedPaths,
+      runtimeDeniedPaths: permissionSummary.deniedPaths,
     });
     input[BASH_SANDBOX_POLICY_FIELD] = policy;
   };
@@ -1855,6 +1859,7 @@ export function query(
 
       if (result && typeof result === 'object' && 'updatedPermissions' in result) {
         applyPermissionUpdates(permissionEngine, result.updatedPermissions);
+        syncAppPermissionControlPlane();
       }
 
       if (result && typeof result === 'object' && 'updatedInput' in result) {
@@ -2144,6 +2149,29 @@ export function query(
       return next;
     });
   };
+  const syncAppPermissionControlPlane = () => {
+    const summary = permissionEngine.getSummary();
+    appStore.setState((prev) => syncPermissionControlPlane(prev, {
+      allowRules: summary.allowRules.map((rule) => ({
+        toolName: rule.toolName,
+        ...(rule.ruleContent !== undefined ? { ruleContent: rule.ruleContent } : {}),
+      })),
+      suspendedAllowRules: summary.suspendedAllowRules.map((rule) => ({
+        toolName: rule.toolName,
+        ...(rule.ruleContent !== undefined ? { ruleContent: rule.ruleContent } : {}),
+      })),
+      denyRules: summary.denyRules.map((rule) => ({
+        toolName: rule.toolName,
+        ...(rule.ruleContent !== undefined ? { ruleContent: rule.ruleContent } : {}),
+      })),
+      askRules: summary.askRules.map((rule) => ({
+        toolName: rule.toolName,
+        ...(rule.ruleContent !== undefined ? { ruleContent: rule.ruleContent } : {}),
+      })),
+      allowedPaths: summary.allowedPaths,
+      deniedPaths: summary.deniedPaths,
+    }));
+  };
   const syncAppSchedulerControlPlane = () => {
     persistDispatcherWorkerPoolBudgetConfig();
     const liveSnapshot = buildSchedulerControlPlaneSnapshot();
@@ -2158,6 +2186,7 @@ export function query(
   };
 
   syncDispatcherWorkerPoolBudgetConfig();
+  syncAppPermissionControlPlane();
   syncAppRuntimeControlPlane();
 
   const touchSessionState = (patch: Partial<Pick<
@@ -2320,6 +2349,14 @@ export function query(
       model: state.model,
       permissionMode: state.permissionMode,
       activeTeamName: state.activeTeamName,
+      permissions: {
+        allowRules: state.permissions.allowRules.map((rule) => ({ ...rule })),
+        suspendedAllowRules: state.permissions.suspendedAllowRules.map((rule) => ({ ...rule })),
+        denyRules: state.permissions.denyRules.map((rule) => ({ ...rule })),
+        askRules: state.permissions.askRules.map((rule) => ({ ...rule })),
+        allowedPaths: [...state.permissions.allowedPaths],
+        deniedPaths: [...state.permissions.deniedPaths],
+      },
       mcpServers: state.mcpServers.map((server) => ({ ...server })),
       runtime: {
         agentNames: [...state.runtime.agentNames],
@@ -3712,6 +3749,7 @@ export function query(
       appStore.setState((prev) => syncSessionControlPlane(prev, {
         permissionMode: mode,
       }));
+      syncAppPermissionControlPlane();
       try {
         sessionMgr?.updateSession(cwd, sessionId, { permissionMode: mode }, { touch: false });
       } catch {

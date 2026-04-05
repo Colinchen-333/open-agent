@@ -97,6 +97,20 @@ export interface RuntimeCapabilitySummaryState {
   dynamicTools: number;
 }
 
+export interface PermissionRuleState {
+  toolName: string;
+  ruleContent?: string;
+}
+
+export interface PermissionControlPlaneState {
+  allowRules: PermissionRuleState[];
+  suspendedAllowRules: PermissionRuleState[];
+  denyRules: PermissionRuleState[];
+  askRules: PermissionRuleState[];
+  allowedPaths: string[];
+  deniedPaths: string[];
+}
+
 export interface RuntimeControlPlaneState {
   agentNames: string[];
   skillNames: string[];
@@ -231,6 +245,7 @@ export interface AppState {
   teammates: Map<string, AgentInstance>;
   agentNameRegistry: Map<string, string>;
   activeTeamName: string | null;
+  permissions: PermissionControlPlaneState;
 
   // Runtime control plane
   runtime: RuntimeControlPlaneState;
@@ -265,6 +280,14 @@ export function createDefaultAppState(overrides: Partial<AppState> = {}): AppSta
     teammates: new Map(),
     agentNameRegistry: new Map(),
     activeTeamName: null,
+    permissions: {
+      allowRules: [],
+      suspendedAllowRules: [],
+      denyRules: [],
+      askRules: [],
+      allowedPaths: [],
+      deniedPaths: [],
+    },
     runtime: {
       agentNames: [],
       skillNames: [],

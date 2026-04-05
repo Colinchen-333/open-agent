@@ -50,6 +50,8 @@ export {
   type RuntimeDiagnosticState,
   type RuntimeDiagnosticSummaryState,
   type RuntimeCapabilitySummaryState,
+  type PermissionRuleState,
+  type PermissionControlPlaneState,
   type RuntimeControlPlaneState,
   type SchedulerQueueControlPlaneEntryState,
   type SchedulerControlPlaneState,
@@ -68,6 +70,7 @@ export {
   syncToolRegistryState,
   syncMcpServerState,
   syncRuntimeControlPlane,
+  syncPermissionControlPlane,
   setActiveTeamControlPlane,
   upsertTaskControlPlane,
   removeTaskControlPlane,
@@ -79,4 +82,5 @@ export {
   appendTimelineControlPlane,
   syncTeamInboxMemberControlPlane,
   type RuntimeControlPlaneSnapshotInput,
+  type PermissionControlPlaneSnapshotInput,
 } from './control-plane.js';

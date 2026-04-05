@@ -394,12 +394,27 @@ export interface RuntimeToolRemovalResult {
   removed: string[];
 }
 
+export interface RuntimePermissionRuleRecord {
+  toolName: string;
+  ruleContent?: string;
+}
+
+export interface RuntimePermissionControlPlaneSnapshot {
+  allowRules: RuntimePermissionRuleRecord[];
+  suspendedAllowRules: RuntimePermissionRuleRecord[];
+  denyRules: RuntimePermissionRuleRecord[];
+  askRules: RuntimePermissionRuleRecord[];
+  allowedPaths: string[];
+  deniedPaths: string[];
+}
+
 export interface RuntimeControlPlaneSnapshot {
   sessionId: string;
   cwd: string;
   model: string;
   permissionMode: PermissionMode;
   activeTeamName: string | null;
+  permissions: RuntimePermissionControlPlaneSnapshot;
   mcpServers: RuntimeControlPlaneMcpServerRecord[];
   runtime: {
     agentNames: string[];

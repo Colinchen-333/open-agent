@@ -11,6 +11,8 @@ export interface BuildBashSandboxPolicyInput {
   dangerouslyDisableSandbox?: boolean;
   permissionBehavior?: 'allow' | 'deny' | 'ask';
   bypassApproved?: boolean;
+  runtimeAllowedPaths?: string[];
+  runtimeDeniedPaths?: string[];
 }
 
 export function buildBashSandboxPolicy(input: BuildBashSandboxPolicyInput): BashSandboxExecutionPolicy {
@@ -40,9 +42,18 @@ export function buildBashSandboxPolicy(input: BuildBashSandboxPolicyInput): Bash
     };
   }
 
-  const allowWritePaths = normalizePaths(sandbox.filesystem?.allowWrite, input.cwd);
-  const denyReadPaths = normalizePaths(sandbox.filesystem?.denyRead, input.cwd);
-  const denyWritePaths = normalizePaths(sandbox.filesystem?.denyWrite, input.cwd);
+  const allowWritePaths = normalizePaths([
+    ...(sandbox.filesystem?.allowWrite ?? []),
+    ...(input.runtimeAllowedPaths ?? []),
+  ], input.cwd);
+  const denyReadPaths = normalizePaths([
+    ...(sandbox.filesystem?.denyRead ?? []),
+    ...(input.runtimeDeniedPaths ?? []),
+  ], input.cwd);
+  const denyWritePaths = normalizePaths([
+    ...(sandbox.filesystem?.denyWrite ?? []),
+    ...(input.runtimeDeniedPaths ?? []),
+  ], input.cwd);
   const networkDisabled = isNetworkDisabled(sandbox.network);
   const enforcedFeatures = {
     network: executionEngine === 'darwin-sandbox-exec' && networkDisabled,

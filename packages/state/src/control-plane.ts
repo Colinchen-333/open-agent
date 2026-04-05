@@ -5,6 +5,7 @@ import type {
   DispatcherDiagnosisControlPlaneState,
   DispatcherControlPlaneState,
   McpServerStatus,
+  PermissionControlPlaneState,
   RuntimeDiagnosticState,
   RuntimeHookState,
   RuntimePluginState,
@@ -31,6 +32,15 @@ export interface RuntimeControlPlaneSnapshotInput {
       dynamicTools: number;
     };
   };
+}
+
+export interface PermissionControlPlaneSnapshotInput {
+  allowRules?: PermissionControlPlaneState['allowRules'];
+  suspendedAllowRules?: PermissionControlPlaneState['suspendedAllowRules'];
+  denyRules?: PermissionControlPlaneState['denyRules'];
+  askRules?: PermissionControlPlaneState['askRules'];
+  allowedPaths?: string[];
+  deniedPaths?: string[];
 }
 
 function summarizeRuntimeDiagnostics(
@@ -122,6 +132,23 @@ export function setActiveTeamControlPlane(
   return {
     ...state,
     activeTeamName,
+  };
+}
+
+export function syncPermissionControlPlane(
+  state: AppState,
+  snapshot: PermissionControlPlaneSnapshotInput,
+): AppState {
+  return {
+    ...state,
+    permissions: {
+      allowRules: (snapshot.allowRules ?? []).map((rule) => ({ ...rule })),
+      suspendedAllowRules: (snapshot.suspendedAllowRules ?? []).map((rule) => ({ ...rule })),
+      denyRules: (snapshot.denyRules ?? []).map((rule) => ({ ...rule })),
+      askRules: (snapshot.askRules ?? []).map((rule) => ({ ...rule })),
+      allowedPaths: [...(snapshot.allowedPaths ?? [])],
+      deniedPaths: [...(snapshot.deniedPaths ?? [])],
+    },
   };
 }
 
