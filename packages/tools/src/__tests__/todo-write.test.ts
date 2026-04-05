@@ -288,4 +288,21 @@ describe('TodoWrite tool', () => {
     expect(capturedState.tasksState[0].content).toBe('task');
     expect(capturedState.tasksState[0].id).toContain('todo-');
   });
+
+  // ── R7.5 fix: auto-clear must also clear setAppState ─────────────────────
+
+  test('auto-clear also clears setAppState tasksState', async () => {
+    let appState: any = { tasksState: [{ content: 'old', status: 'pending' }] };
+    const ctx = {
+      cwd: '/',
+      sessionId: 'state-test',
+      toolUseId: 'tu-1',
+      setAppState: (updater: Function) => {
+        appState = updater(appState);
+      },
+    } as any;
+    const tool = createTodoWriteTool();
+    await tool.execute({ todos: [{ content: 'done', status: 'completed' }] }, ctx);
+    expect(appState.tasksState).toEqual([]);
+  });
 });

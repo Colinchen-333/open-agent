@@ -180,15 +180,19 @@ export function createTodoWriteTool(options: TodoWriteOptions = {}): ToolDefinit
         );
       }
 
-      // Part 6: Update reactive app state if the context supports it
+      // Part 6: Update reactive app state if the context supports it.
+      // When auto-clear fired (allCompleted), write [] to tasksState so the UI
+      // does not retain a ghost list of completed items (split-state bug R7.5).
       if (typeof (ctx as any).setAppState === 'function') {
         try {
           (ctx as any).setAppState((prev: any) => ({
             ...prev,
-            tasksState: validated.map((t, i) => ({
-              ...t,
-              id: `todo-${sessionKey}-${i}`,
-            })),
+            tasksState: allCompleted
+              ? []
+              : validated.map((t, i) => ({
+                  ...t,
+                  id: `todo-${sessionKey}-${i}`,
+                })),
           }));
         } catch {
           /* setAppState is optional — swallow errors */
