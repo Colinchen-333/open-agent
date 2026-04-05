@@ -85,3 +85,10 @@ export {
   type ExecSyncResult,
   type SpawnHandle,
 } from './runtime.js';
+export {
+  feature,
+  setFeatureDefault,
+  clearFeatureOverrides,
+  FEATURE_FLAG_DEFAULTS,
+  type FeatureFlagName,
+} from './feature-flags.js';
