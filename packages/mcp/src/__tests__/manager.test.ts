@@ -2,6 +2,7 @@ import { describe, expect, it, mock, spyOn, test } from 'bun:test';
 import { McpManager } from '../manager';
 import type { ResourceNotificationEvent } from '../manager';
 import { McpServerState } from '../server-state';
+import { ElicitationManager } from '../elicitation';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -236,6 +237,54 @@ describe('McpManager per-server disable/enable', () => {
     const manager = new McpManager();
     const state = manager.getServerState();
     expect(state).toBeInstanceOf(McpServerState);
+  });
+});
+
+// ── Elicitation integration smoke tests ──────────────────────────────────────
+
+describe('McpManager elicitation', () => {
+  it('exposes setElicitationAdapter and getElicitationManager', () => {
+    const manager = new McpManager();
+    expect(typeof manager.setElicitationAdapter).toBe('function');
+    expect(typeof manager.getElicitationManager).toBe('function');
+  });
+
+  it('getElicitationManager returns an ElicitationManager instance', () => {
+    const manager = new McpManager();
+    expect(manager.getElicitationManager()).toBeInstanceOf(ElicitationManager);
+  });
+
+  it('setElicitationAdapter replaces the adapter used by the manager', async () => {
+    const manager = new McpManager();
+    const custom = {
+      present: async (req: any) => ({
+        elicitationId: req.elicitationId,
+        action: 'accept' as const,
+        data: { injected: true },
+      }),
+    };
+    manager.setElicitationAdapter(custom);
+    const elicMgr = manager.getElicitationManager();
+    const res = await elicMgr.handle({
+      elicitationId: 'smoke-1',
+      serverName: 'test',
+      message: 'hello',
+      type: 'form',
+    });
+    expect(res.action).toBe('accept');
+    expect(res.data).toEqual({ injected: true });
+  });
+
+  it('onServerElicitation routes through the ElicitationManager', async () => {
+    const manager = new McpManager();
+    // Default adapter auto-declines
+    const res = await manager.onServerElicitation('my-server', {
+      elicitationId: 'smoke-2',
+      message: 'need input',
+      type: 'form',
+    });
+    expect(res.action).toBe('decline');
+    expect(res.elicitationId).toBe('smoke-2');
   });
 });
 

@@ -15,6 +15,7 @@ import { McpSseClient } from './sse-transport';
 import type { McpServerConnection, McpToolInfo, McpResourceInfo } from './types';
 import { normalizeMcpToolInfo } from './tool-info';
 import { McpServerState } from './server-state';
+import { ElicitationManager, type ElicitationAdapter, type ElicitationRequest } from './elicitation';
 
 function isAuthError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -104,6 +105,8 @@ export class McpManager {
   private _subscriptions: Map<string, ResourceSubscription> = new Map();
   /** Per-server enable/disable state, survives reconnections. */
   private serverState = new McpServerState();
+  /** Elicitation protocol handler — routes server input-requests to the UI adapter. */
+  private elicitationManager = new ElicitationManager();
 
   constructor(options?: McpManagerOptions) {
     if (options?.policyBlockedServers) {
@@ -359,6 +362,33 @@ export class McpManager {
     return this.serverState;
   }
 
+  // ── Elicitation ───────────────────────────────────────────────────────────
+
+  /**
+   * Replace the UI adapter used to present elicitation requests to the user.
+   * Call this once the UI layer is initialized (e.g. the CLI sets up a stdin adapter).
+   */
+  setElicitationAdapter(adapter: ElicitationAdapter): void {
+    this.elicitationManager.setAdapter(adapter);
+  }
+
+  /** Expose the ElicitationManager for advanced use (e.g. cancellation, in-flight inspection). */
+  getElicitationManager(): ElicitationManager {
+    return this.elicitationManager;
+  }
+
+  /**
+   * Route an elicitation request originating from a named server through the
+   * ElicitationManager. External code (e.g. a custom SDK notification wiring)
+   * can call this directly to simulate or forward server-initiated input requests.
+   */
+  async onServerElicitation(
+    serverName: string,
+    params: Omit<ElicitationRequest, 'serverName'>,
+  ): Promise<ReturnType<ElicitationManager['handle']>> {
+    return this.elicitationManager.handle({ ...params, serverName });
+  }
+
   /**
    * Disconnect all servers (graceful shutdown).
    */
@@ -539,6 +569,8 @@ export class McpManager {
   /**
    * Attach MCP notification handlers to a transport client after it connects.
    * Hooks into `notifications/resources/updated` and `notifications/resources/list_changed`.
+   * Also attempts to register an `elicitation/create` request handler if the SDK
+   * version exports `ElicitationCreateRequestSchema`; falls back silently if not.
    */
   private _attachNotificationHandlers(serverName: string, client: AnyMcpClient): void {
     const sdkClient = this._getUnderlyingClient(client);
@@ -562,6 +594,44 @@ export class McpManager {
       );
     } catch {
       // Older SDK version without notification handler support — skip silently
+    }
+
+    // Attempt to wire the elicitation/create request handler.
+    // This requires the SDK to expose ElicitationCreateRequestSchema; if the
+    // installed version does not ship it yet, this whole block is a no-op.
+    try {
+      if (typeof (sdkClient as any).setRequestHandler === 'function') {
+        import('@modelcontextprotocol/sdk/types.js')
+          .then((m: any) => m.ElicitationCreateRequestSchema ?? null)
+          .catch(() => null)
+          .then((schema) => {
+            if (!schema) return; // SDK version without elicitation support
+            try {
+              (sdkClient as any).setRequestHandler(schema, async (request: any) => {
+                const params = request?.params ?? {};
+                const normalized: ElicitationRequest = {
+                  elicitationId: params.elicitationId ?? `elic-${Date.now()}`,
+                  serverName,
+                  message: params.message ?? '',
+                  type: params.requestedSchema ? 'form' : (params.url ? 'url' : 'form'),
+                  schema: params.requestedSchema,
+                  url: params.url,
+                  timeoutMs: params.timeoutMs,
+                };
+                const response = await this.elicitationManager.handle(normalized);
+                return {
+                  action: response.action,
+                  content: response.data,
+                  reason: response.reason,
+                };
+              });
+            } catch {
+              // setRequestHandler failed (e.g. handler already registered) — ignore
+            }
+          });
+      }
+    } catch {
+      // SDK version without elicitation support — silent fallback
     }
   }
 

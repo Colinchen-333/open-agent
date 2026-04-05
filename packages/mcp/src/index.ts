@@ -9,6 +9,15 @@ export { McpSseClient } from './sse-transport';
 export { McpManager } from './manager';
 export type { ResourceNotificationEvent, McpManagerOptions } from './manager';
 export { McpServerState } from './server-state';
+export {
+  ElicitationManager,
+  AUTO_DECLINE_ADAPTER,
+} from './elicitation';
+export type {
+  ElicitationRequest,
+  ElicitationResponse,
+  ElicitationAdapter,
+} from './elicitation';
 export { parseMcpToolName, buildMcpToolName, isMcpToolName } from './normalization';
 export {
   parseMcpResourceRef,
