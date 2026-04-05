@@ -403,6 +403,83 @@ describe('PermissionEngine', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // pushMode / popMode (mode stack)
+  // ---------------------------------------------------------------------------
+
+  describe('pushMode / popMode', () => {
+    test('plan mode denies non-readonly tools in stageValidateInput', async () => {
+      const engine = new PermissionEngine({ mode: 'plan' });
+      const result = await engine.evaluate({
+        toolName: 'Write',
+        input: { file_path: '/tmp/x', content: 'hi' },
+        toolUseId: 'test-push-1',
+      });
+      expect(result.behavior).toBe('deny');
+      expect(result.reason ?? '').toMatch(/plan mode/i);
+    });
+
+    test('plan mode allows readonly tools (Read, Glob, Grep, WebFetch, WebSearch)', async () => {
+      const engine = new PermissionEngine({ mode: 'plan' });
+      const readOnlyTools = ['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'];
+      for (const toolName of readOnlyTools) {
+        const result = await engine.evaluate({
+          toolName,
+          input: {},
+          toolUseId: `test-push-ro-${toolName}`,
+        });
+        expect(result.behavior).not.toBe('deny');
+      }
+    });
+
+    test('pushMode switches engine to plan mode', () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      engine.pushMode('plan');
+      expect(engine.getMode()).toBe('plan');
+    });
+
+    test('popMode restores the previous mode after pushMode', () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      engine.pushMode('plan');
+      engine.popMode();
+      expect(engine.getMode()).toBe('default');
+    });
+
+    test('pushMode / popMode are nestable', () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      engine.pushMode('acceptEdits');
+      engine.pushMode('plan');
+      expect(engine.getMode()).toBe('plan');
+      engine.popMode();
+      expect(engine.getMode()).toBe('acceptEdits');
+      engine.popMode();
+      expect(engine.getMode()).toBe('default');
+    });
+
+    test('popMode on empty stack is a no-op', () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      engine.popMode(); // should not throw
+      expect(engine.getMode()).toBe('default');
+    });
+
+    test('pushMode with plan suspends dangerous allow rules, popMode restores them', async () => {
+      const engine = new PermissionEngine({
+        mode: 'default',
+        allowRules: [{ toolName: 'Bash', ruleContent: 'python:*' }],
+      });
+      // In default mode the allow rule fires
+      expect((await engine.evaluate(req('Bash', { command: 'python -c "1"' }))).behavior).toBe('allow');
+
+      engine.pushMode('plan');
+      // In plan mode, Bash is denied regardless of allow rules
+      expect((await engine.evaluate(req('Bash', { command: 'python -c "1"' }))).behavior).toBe('deny');
+
+      engine.popMode();
+      // Back to default — allow rule restored
+      expect((await engine.evaluate(req('Bash', { command: 'python -c "1"' }))).behavior).toBe('allow');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Dangerous command detection
   // ---------------------------------------------------------------------------
 

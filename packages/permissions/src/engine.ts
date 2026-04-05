@@ -91,8 +91,21 @@ function isDangerousClassifierAllowRule(rule: PermissionRule): boolean {
   return isDangerousBashAllowRule(rule);
 }
 
+// Tools permitted in plan mode (read-only, no mutations or execution)
+const PLAN_MODE_READONLY_TOOLS = new Set([
+  'Read',
+  'Glob',
+  'Grep',
+  'WebFetch',
+  'WebSearch',
+  'ListMcpResources',
+  'ReadMcpResource',
+  'AskUserQuestion',
+]);
+
 export class PermissionEngine {
   private mode: PermissionMode;
+  private modeStack: PermissionMode[] = [];
   private rules: {
     allow: PermissionRule[];
     deny: PermissionRule[];
@@ -167,6 +180,25 @@ export class PermissionEngine {
    */
   private async stageValidateInput(ctx: PipelineContext): Promise<PermissionDecision | undefined> {
     const { request } = ctx;
+
+    // Plan mode downgrade — deny any tool that is not in the read-only allowlist.
+    // This runs before sandbox/path checks so plan mode is always enforced,
+    // even when sandbox is active.
+    if (this.mode === 'plan') {
+      if (!PLAN_MODE_READONLY_TOOLS.has(request.toolName)) {
+        // Also allow MCP tools that are read-only, non-destructive, and not open-world.
+        const isReadOnlyMcp =
+          isMetadataReadOnly(request) &&
+          !isMetadataDestructive(request) &&
+          !isMetadataOpenWorld(request);
+        if (!isReadOnlyMcp) {
+          return {
+            behavior: 'deny',
+            reason: `plan mode: tool "${request.toolName}" is not permitted (read-only tools only)`,
+          };
+        }
+      }
+    }
 
     // Sandbox enforcement — file system + auto-allow bash if sandboxed.
     if (this.sandbox.enabled) {
@@ -488,6 +520,28 @@ export class PermissionEngine {
 
   getMode(): PermissionMode {
     return this.mode;
+  }
+
+  /**
+   * Push a new mode onto the mode stack, making it the active mode.
+   * Use `popMode()` to restore the previous mode (e.g. when exiting plan mode).
+   */
+  pushMode(newMode: PermissionMode): void {
+    this.modeStack.push(this.mode);
+    this.mode = newMode;
+    this.reconcileDangerousAllowRulesForMode();
+  }
+
+  /**
+   * Pop the top of the mode stack, restoring the previous mode.
+   * If the stack is empty, this is a no-op.
+   */
+  popMode(): void {
+    const prev = this.modeStack.pop();
+    if (prev !== undefined) {
+      this.mode = prev;
+      this.reconcileDangerousAllowRulesForMode();
+    }
   }
 
   getSandboxConfig(): SandboxConfig {
