@@ -404,6 +404,138 @@ describe('/resume', () => {
     const names = commands.map((c) => c.name);
     expect(names).toContain('/resume');
   });
+
+  it('shows numbered choices in search results', async () => {
+    const ctx = {
+      ...baseCtx,
+      cwd: '/proj/a',
+      sessionMgr: {
+        listSessions: () => [
+          { id: 'aaaaaaaa-0000-0000-0000-000000000000', title: 'Fix auth bug', cwd: '/proj/a', model: 'gpt-4', createdAt: new Date().toISOString(), lastActiveAt: new Date().toISOString() },
+          { id: 'bbbbbbbb-0000-0000-0000-000000000000', title: 'Payments module', cwd: '/proj/a', model: 'gpt-4', createdAt: new Date().toISOString(), lastActiveAt: new Date().toISOString() },
+        ],
+      },
+    } as any;
+    const result = await handleSlashCommand('/resume', ctx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('[1]');
+    expect(result?.output).toContain('[2]');
+    expect(result?.output).toContain('/resume <number>');
+  });
+});
+
+describe('/resume hydration', () => {
+  it('hydrates directly when args is a session-id prefix (8+ hex chars)', async () => {
+    const sessions = [
+      { id: 'abcd1234-5678-0000-0000-000000000000', title: 'Test session', cwd: '/proj', lastActiveAt: new Date().toISOString() },
+    ];
+    const ctx = {
+      ...baseCtx,
+      cwd: '/proj',
+      sessionMgr: {
+        listSessions: () => sessions,
+        loadTranscript: () => [
+          { role: 'user', content: 'hello' },
+          { role: 'assistant', content: 'hi' },
+        ],
+      },
+    } as any;
+    const result = await handleSlashCommand('/resume abcd1234', ctx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('Resuming session');
+    expect(result?.shouldResume).toBe('abcd1234-5678-0000-0000-000000000000');
+    expect(result?.resumeTranscript).toHaveLength(2);
+  });
+
+  it('selects from cached results when args is a single digit', async () => {
+    const sessions = [
+      { id: 'aaaa1111-0000-0000-0000-000000000000', title: 'First', cwd: '/proj/digit', lastActiveAt: new Date().toISOString() },
+      { id: 'bbbb2222-0000-0000-0000-000000000000', title: 'Second', cwd: '/proj/digit', lastActiveAt: new Date().toISOString() },
+    ];
+    const ctx = {
+      ...baseCtx,
+      cwd: '/proj/digit',
+      sessionMgr: {
+        listSessions: () => sessions,
+        loadTranscript: () => [{ role: 'user', content: 'x' }],
+      },
+    } as any;
+    // Populate the cache via a text search
+    await handleSlashCommand('/resume test', ctx);
+    // Now select by number
+    const result = await handleSlashCommand('/resume 1', ctx);
+    expect(result?.handled).toBe(true);
+    expect(result?.shouldResume).toBeDefined();
+  });
+
+  it('shows transcript summary in hydration output', async () => {
+    const ctx = {
+      ...baseCtx,
+      cwd: '/proj',
+      sessionMgr: {
+        listSessions: () => [
+          { id: 'cafe1234abcdef00-0000-0000-000000000000', title: 'My work', cwd: '/proj', lastActiveAt: new Date().toISOString() },
+        ],
+        loadTranscript: () => [
+          { role: 'user', content: 'write tests' },
+          { role: 'assistant', content: 'ok' },
+          { role: 'user', content: 'now commit' },
+        ],
+      },
+    } as any;
+    // cafe1234 is 8 hex chars — triggers the prefix path
+    const result = await handleSlashCommand('/resume cafe1234', ctx);
+    expect(result?.output).toContain('3 messages');
+    expect(result?.output).toContain('2 user');
+  });
+
+  it('reports no-transcript when transcript is empty', async () => {
+    const ctx = {
+      ...baseCtx,
+      cwd: '/proj',
+      sessionMgr: {
+        listSessions: () => [
+          { id: 'deadc0de12345678-0000-0000-000000000000', title: 'Empty', cwd: '/proj', lastActiveAt: new Date().toISOString() },
+        ],
+        loadTranscript: () => [],
+      },
+    } as any;
+    // deadc0de is 8 hex chars — triggers the prefix path
+    const result = await handleSlashCommand('/resume deadc0de', ctx);
+    expect(result?.output).toContain('no transcript');
+  });
+
+  it('reports no-number-cache when /resume <digit> is called without prior search', async () => {
+    const ctx = {
+      ...baseCtx,
+      cwd: '/proj/nocache-' + Math.random(),
+      sessionMgr: { listSessions: () => [] },
+    } as any;
+    const result = await handleSlashCommand('/resume 3', ctx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('No cached results');
+  });
+
+  it('sets shouldResume and resumeTranscript on successful hydration', async () => {
+    const transcript = [
+      { role: 'user', content: 'hello world' },
+      { role: 'assistant', content: 'greetings' },
+      { role: 'user', content: 'bye' },
+    ];
+    const ctx = {
+      ...baseCtx,
+      cwd: '/proj',
+      sessionMgr: {
+        listSessions: () => [
+          { id: 'deadbeef-cafe-0000-0000-000000000000', title: 'Sample', cwd: '/proj', lastActiveAt: new Date().toISOString() },
+        ],
+        loadTranscript: () => transcript,
+      },
+    } as any;
+    const result = await handleSlashCommand('/resume deadbeef', ctx);
+    expect(result?.shouldResume).toBe('deadbeef-cafe-0000-0000-000000000000');
+    expect(result?.resumeTranscript).toEqual(transcript);
+  });
 });
 
 describe('loadUserSlashCommands', () => {

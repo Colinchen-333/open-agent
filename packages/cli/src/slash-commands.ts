@@ -77,6 +77,10 @@ export interface SlashCommandResult {
   output?: string;
   shouldExit?: boolean;
   shouldClear?: boolean;
+  /** If set, the REPL should resume this session ID. */
+  shouldResume?: string;
+  /** The transcript messages to load for the resumed session. */
+  resumeTranscript?: unknown[];
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +138,86 @@ async function getUserCommands(cwd: string): Promise<UserSlashCommand[]> {
 export function clearUserCommandCache(): void {
   _userCommandCache.clear();
 }
+
+// ---------------------------------------------------------------------------
+// /resume — session hydration helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Cache the most recent search results per cwd so that `/resume <number>`
+ * can select by position without re-running the search.
+ */
+const _lastResumeResults = new Map<string, { sessionId: string; title?: string; cwd: string }[]>();
+
+/**
+ * Load a session's transcript and return a SlashCommandResult that signals
+ * the REPL to restore conversation state.
+ *
+ * NOTE (wiring gap): The caller (REPL in apps/cli/src/index.ts) must check
+ * `result.shouldResume` / `result.resumeTranscript` and push the messages
+ * onto the ConversationLoop.  That wiring is out of scope for this lane.
+ */
+async function hydrateSession(
+  session: { sessionId?: string; id?: string; title?: string },
+  sessionManager: { readTranscript?: (cwd: string, id: string) => unknown[]; loadTranscript?: (cwd: string, id: string) => unknown[] },
+  ctx: SlashCommandContext,
+): Promise<SlashCommandResult> {
+  const sessionId = session.sessionId ?? session.id ?? '';
+  if (!sessionId) {
+    return { handled: true, output: 'Cannot resume: session ID missing' };
+  }
+
+  try {
+    const transcript: unknown[] =
+      sessionManager.loadTranscript?.(ctx.cwd, sessionId) ??
+      sessionManager.readTranscript?.(ctx.cwd, sessionId) ??
+      [];
+
+    if (transcript.length === 0) {
+      return {
+        handled: true,
+        output: `Session ${sessionId.slice(0, 8)} has no transcript to resume.`,
+      };
+    }
+
+    const userTurns = transcript.filter((m) => (m as { role?: string }).role === 'user').length;
+    const assistantTurns = transcript.filter((m) => (m as { role?: string }).role === 'assistant').length;
+
+    const lastUserMsg = [...transcript]
+      .reverse()
+      .find((m) => (m as { role?: string }).role === 'user') as
+      | { role: string; content: unknown }
+      | undefined;
+
+    const rawContent = lastUserMsg?.content;
+    const lastUserText =
+      typeof rawContent === 'string'
+        ? rawContent.slice(0, 100)
+        : '(structured content)';
+
+    const title = session.title ?? '(untitled)';
+
+    return {
+      handled: true,
+      output: [
+        `Resuming session: ${sessionId.slice(0, 8)} — "${title}"`,
+        `Transcript: ${transcript.length} messages (${userTurns} user, ${assistantTurns} assistant)`,
+        `Last user message: "${lastUserText}${lastUserText.length >= 100 ? '...' : ''}"`,
+        '',
+        'Session transcript loaded. Continue the conversation from where you left off.',
+      ].join('\n'),
+      shouldResume: sessionId,
+      resumeTranscript: transcript,
+    };
+  } catch (e) {
+    return {
+      handled: true,
+      output: `Failed to load session ${sessionId.slice(0, 8)}: ${(e as Error).message}`,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 const SLASH_COMMANDS: Record<
   string,
@@ -933,6 +1017,39 @@ const SLASH_COMMANDS: Record<
         return { handled: true, output: 'No session manager available.' };
       }
 
+      // --- Direct selection by single digit (from a previous search result cache) ---
+      const isNumber = /^[1-9]$/.test(query);
+      if (isNumber) {
+        const cached = _lastResumeResults.get(ctx.cwd);
+        const idx = parseInt(query, 10) - 1;
+        if (cached && idx < cached.length) {
+          return hydrateSession(cached[idx]!, smgr as any, ctx);
+        }
+        return {
+          handled: true,
+          output: cached
+            ? `No result #${query} — last search returned ${cached.length} result(s).`
+            : 'No cached results. Run /resume <query> first.',
+        };
+      }
+
+      // --- Direct hydration by session-ID prefix (8+ hex chars) ---
+      const isSessionIdPrefix = /^[0-9a-f]{8,}$/i.test(query);
+      if (isSessionIdPrefix) {
+        const all = smgr.listSessions(ctx.cwd);
+        const match = all.find(
+          (s: { id?: string }) => s.id?.startsWith(query),
+        );
+        if (match) {
+          return hydrateSession(
+            { sessionId: (match as { id: string }).id, title: (match as { title?: string }).title },
+            smgr as any,
+            ctx,
+          );
+        }
+        // Fall through to text search if no prefix match found
+      }
+
       // listSessions accepts a cwd; call with current cwd to get accessible sessions.
       // Each SessionInfo carries its own .cwd so cross-project detection still works.
       const sessions = smgr.listSessions(ctx.cwd);
@@ -950,19 +1067,28 @@ const SLASH_COMMANDS: Record<
         };
       }
 
+      // Cache results for subsequent `/resume <number>` selection
+      _lastResumeResults.set(
+        ctx.cwd,
+        results.map((r) => ({ sessionId: r.sessionId, title: r.title, cwd: r.cwd })),
+      );
+
       const lines: string[] = [
         `Found ${results.length} session(s)${query ? ` matching "${query}"` : ''}:`,
       ];
-      for (const r of results) {
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i]!;
         const marker = r.crossProject ? '\u21b1' : ' ';
         const title = r.title ?? '(untitled)';
         const score = query ? ` [${r.score.toFixed(2)}]` : '';
-        lines.push(`${marker} ${r.sessionId.slice(0, 8)} ${title}${score}`);
+        lines.push(`  [${i + 1}]${marker} ${r.sessionId.slice(0, 8)}  ${title}${score}`);
         if (r.crossProject) {
           const hint = buildCrossProjectResumeHint(r, ctx.cwd);
-          if (hint) lines.push(`    ${hint}`);
+          if (hint) lines.push(`       ${hint}`);
         }
       }
+      lines.push('');
+      lines.push('Type /resume <number> or /resume <session-id-prefix> to hydrate.');
       return { handled: true, output: lines.join('\n') };
     },
   },
