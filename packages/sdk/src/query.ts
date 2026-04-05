@@ -691,16 +691,14 @@ export function query(
   };
   const DEFAULT_TASK_DISPATCHER_POLL_INTERVAL_MS = 250;
   const DEFAULT_TASK_LEASE_MS = 5 * 60 * 1000;
-  const globalDispatcherWorkerBudget = options.globalDispatcherWorkerBudget !== undefined
+  let globalDispatcherWorkerBudget = options.globalDispatcherWorkerBudget !== undefined
     ? Math.max(1, Math.trunc(options.globalDispatcherWorkerBudget))
     : null;
-  const teamDispatcherWorkerBudgets = Object.fromEntries(
+  let teamDispatcherWorkerBudgets = Object.fromEntries(
     Object.entries(options.teamDispatcherWorkerBudgets ?? {})
       .map(([teamName, budget]) => [normalizeOptionalString(teamName), Math.max(1, Math.trunc(budget))] as const)
       .filter((entry): entry is [string, number] => Boolean(entry[0]) && Number.isFinite(entry[1])),
   );
-  let reservedDispatcherWorkerSlots = 0;
-  const reservedDispatcherWorkerSlotsByTeam = new Map<string, number>();
   let dispatcherFairnessCursor: string | null = null;
 
   interface TaskDispatcherAssignment {
@@ -743,6 +741,20 @@ export function query(
     heartbeatAt: string;
   }
 
+  interface WorkerPoolSlotRecord {
+    slotId: string;
+    queryInstanceId: string;
+    sessionId: string;
+    dispatcherId: string;
+    teamName: string;
+    status: 'reserved' | 'active';
+    claimedAt: string;
+    heartbeatAt: string;
+    expiresAt: string;
+    taskId?: string;
+    workerId?: string;
+  }
+
   const cloneTaskDispatcherRecord = (record: TaskDispatcherRecord): TaskDispatcherRecord => {
     const cloned = JSON.parse(JSON.stringify(record)) as TaskDispatcherRecord;
     if (!cloned.schedulerState) {
@@ -755,30 +767,220 @@ export function query(
     return cloned;
   };
   const queryInstanceId = randomUUID();
-  const countActiveDispatcherAssignments = (): number => {
-    let total = 0;
-    for (const state of taskDispatchers.values()) {
-      if (state.disposed || state.record.status === 'stopped') continue;
-      total += state.activeAssignments.size;
-    }
-    return total;
+  const getWorkerPoolSlotTtlMs = (
+    record: Pick<TaskDispatcherRecord, 'leaseMs' | 'pollIntervalMs'>,
+  ): number => Math.max(record.leaseMs, record.pollIntervalMs * 4, 1_000);
+  const computeWorkerPoolSlotExpiry = (
+    record: Pick<TaskDispatcherRecord, 'leaseMs' | 'pollIntervalMs'>,
+    now = new Date(),
+  ): string => new Date(now.getTime() + getWorkerPoolSlotTtlMs(record)).toISOString();
+  const hasWorkerPoolSlotExpired = (
+    slot: Pick<WorkerPoolSlotRecord, 'expiresAt'>,
+    now = new Date(),
+  ): boolean => {
+    const expiresAtMs = Date.parse(slot.expiresAt);
+    return !Number.isFinite(expiresAtMs) || expiresAtMs <= now.getTime();
   };
-  const countActiveDispatcherAssignmentsForTeam = (teamName: string): number => {
-    let total = 0;
-    for (const state of taskDispatchers.values()) {
-      if (state.disposed || state.record.status === 'stopped' || state.record.teamName !== teamName) continue;
-      total += state.activeAssignments.size;
-    }
-    return total;
-  };
-  const getConfiguredTeamDispatcherWorkerBudget = (teamName: string): number | null => (
-    teamDispatcherWorkerBudgets[teamName] ?? null
-  );
-  const getAvailableDispatcherWorkerBudget = (): number | null => {
-    if (globalDispatcherWorkerBudget === null) {
+  const getWorkerPoolLedgerPath = () => join(cwd, '.open-agent', 'orchestration-ledgers', 'worker-pool.json');
+  const getWorkerPoolLedgerLockPath = () => join(cwd, '.open-agent', 'orchestration-ledgers', 'worker-pool.lock');
+  const buildEffectiveWorkerPoolBudgetConfig = (persisted?: PersistedWorkerPoolLedgerFile | null): {
+    globalWorkerBudget: number | null;
+    teamWorkerBudgets: Record<string, number>;
+  } => ({
+    globalWorkerBudget: globalDispatcherWorkerBudget ?? persisted?.globalWorkerBudget ?? null,
+    teamWorkerBudgets: {
+      ...(persisted?.teamWorkerBudgets ?? {}),
+      ...teamDispatcherWorkerBudgets,
+    },
+  });
+  const readPersistedWorkerPoolLedger = (): PersistedWorkerPoolLedgerFile | null => {
+    const ledgerPath = getWorkerPoolLedgerPath();
+    if (!existsSync(ledgerPath)) {
       return null;
     }
-    return Math.max(0, globalDispatcherWorkerBudget - countActiveDispatcherAssignments() - reservedDispatcherWorkerSlots);
+    try {
+      const parsed = JSON.parse(readFileSync(ledgerPath, 'utf-8')) as PersistedWorkerPoolLedgerFile;
+      if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.slots)) {
+        return null;
+      }
+      const budgetConfig = buildEffectiveWorkerPoolBudgetConfig(parsed);
+      return {
+        version: 1,
+        globalWorkerBudget: budgetConfig.globalWorkerBudget,
+        teamWorkerBudgets: { ...budgetConfig.teamWorkerBudgets },
+        slots: parsed.slots
+          .filter((slot): slot is WorkerPoolSlotRecord =>
+          Boolean(slot)
+          && typeof slot === 'object'
+          && typeof slot.slotId === 'string'
+          && typeof slot.dispatcherId === 'string'
+          && typeof slot.teamName === 'string'
+          && typeof slot.queryInstanceId === 'string'
+          && typeof slot.sessionId === 'string'
+          && (slot.status === 'reserved' || slot.status === 'active')
+          && typeof slot.claimedAt === 'string'
+          && typeof slot.heartbeatAt === 'string'
+          && typeof slot.expiresAt === 'string',
+          )
+          .map((slot) => ({ ...slot })),
+      };
+    } catch {
+      return null;
+    }
+  };
+  const syncDispatcherWorkerPoolBudgetConfig = (): void => {
+    const persisted = readPersistedWorkerPoolLedger();
+    if (!persisted) {
+      return;
+    }
+    if (globalDispatcherWorkerBudget === null && persisted.globalWorkerBudget !== null) {
+      globalDispatcherWorkerBudget = persisted.globalWorkerBudget;
+    }
+    teamDispatcherWorkerBudgets = {
+      ...persisted.teamWorkerBudgets,
+      ...teamDispatcherWorkerBudgets,
+    };
+  };
+  const persistDispatcherWorkerPoolBudgetConfig = (): void => {
+    tryMutateWorkerPoolLedger((ledger) => ({
+      ...ledger,
+      ...buildEffectiveWorkerPoolBudgetConfig(ledger),
+      slots: [...ledger.slots],
+    }));
+  };
+  const tryMutateWorkerPoolLedger = (
+    mutator: (ledger: PersistedWorkerPoolLedgerFile) => PersistedWorkerPoolLedgerFile,
+  ): boolean => {
+    const lockPath = getWorkerPoolLedgerLockPath();
+    try {
+      mkdirSync(dirname(lockPath), { recursive: true });
+      mkdirSync(lockPath);
+    } catch {
+      return false;
+    }
+    try {
+      const now = new Date();
+      const current = readPersistedWorkerPoolLedger() ?? {
+        version: 1 as const,
+        globalWorkerBudget: globalDispatcherWorkerBudget,
+        teamWorkerBudgets: { ...teamDispatcherWorkerBudgets },
+        slots: [],
+      };
+      const nextLedger = mutator({
+        ...current,
+        ...buildEffectiveWorkerPoolBudgetConfig(current),
+        slots: current.slots.filter((slot) => !hasWorkerPoolSlotExpired(slot, now)),
+      });
+      const ledgerPath = getWorkerPoolLedgerPath();
+      mkdirSync(dirname(ledgerPath), { recursive: true });
+      writeFileSync(ledgerPath, JSON.stringify(nextLedger, null, 2));
+      return true;
+    } catch {
+      return false;
+    } finally {
+      rmSync(lockPath, { recursive: true, force: true });
+    }
+  };
+  const listActiveWorkerPoolSlots = (now = new Date()): WorkerPoolSlotRecord[] => (
+    (readPersistedWorkerPoolLedger()?.slots ?? []).filter((slot) => !hasWorkerPoolSlotExpired(slot, now))
+  );
+  const collectLocalWorkerPoolKeys = (status: WorkerPoolSlotRecord['status'], teamName?: string): Set<string> => {
+    const keys = new Set<string>();
+    if (status === 'active') {
+      for (const state of taskDispatchers.values()) {
+        if (state.disposed || state.record.status === 'stopped') continue;
+        if (teamName && state.record.teamName !== teamName) continue;
+        for (const assignment of state.activeAssignments.values()) {
+          keys.add(`${state.record.dispatcherId}:${assignment.workerId}`);
+        }
+      }
+    }
+    return keys;
+  };
+  const countActiveDispatcherAssignments = (): number => {
+    const keys = collectLocalWorkerPoolKeys('active');
+    for (const slot of listActiveWorkerPoolSlots()) {
+      if (slot.status !== 'active') continue;
+      keys.add(`${slot.dispatcherId}:${slot.workerId ?? slot.slotId}`);
+    }
+    return keys.size;
+  };
+  const countActiveDispatcherAssignmentsForTeam = (teamName: string): number => {
+    const keys = collectLocalWorkerPoolKeys('active', teamName);
+    for (const slot of listActiveWorkerPoolSlots()) {
+      if (slot.status !== 'active' || slot.teamName !== teamName) continue;
+      keys.add(`${slot.dispatcherId}:${slot.workerId ?? slot.slotId}`);
+    }
+    return keys.size;
+  };
+  const countReservedDispatcherWorkerSlots = (): number => (
+    listActiveWorkerPoolSlots().filter((slot) => slot.status === 'reserved').length
+  );
+  const countReservedDispatcherWorkerSlotsForTeam = (teamName: string): number => (
+    listActiveWorkerPoolSlots().filter((slot) => slot.status === 'reserved' && slot.teamName === teamName).length
+  );
+  const refreshWorkerPoolSlot = (
+    matcher: (slot: WorkerPoolSlotRecord) => boolean,
+    updater: (slot: WorkerPoolSlotRecord) => WorkerPoolSlotRecord | null,
+  ): boolean => tryMutateWorkerPoolLedger((ledger) => ({
+    ...ledger,
+    slots: ledger.slots.flatMap((slot) => {
+    if (!matcher(slot)) {
+      return [slot];
+    }
+    const next = updater(slot);
+    return next ? [next] : [];
+    }),
+  }));
+  const ensureActiveWorkerPoolSlot = (
+    state: TaskDispatcherState,
+    assignment: TaskDispatcherAssignment,
+    now = new Date(),
+  ): void => {
+    const expiresAt = assignment.leaseExpiresAt ?? computeWorkerPoolSlotExpiry(state.record, now);
+    refreshWorkerPoolSlot(
+      (slot) => slot.dispatcherId === state.record.dispatcherId && slot.workerId === assignment.workerId,
+      (slot) => ({
+        ...slot,
+        status: 'active',
+        taskId: assignment.taskId,
+        workerId: assignment.workerId,
+        heartbeatAt: now.toISOString(),
+        expiresAt,
+      }),
+    ) || tryMutateWorkerPoolLedger((ledger) => ({
+      ...ledger,
+      slots: [
+        ...ledger.slots.filter((slot) => !(slot.dispatcherId === state.record.dispatcherId && slot.workerId === assignment.workerId)),
+        {
+          slotId: `slot-${randomUUID()}`,
+          queryInstanceId,
+          sessionId,
+          dispatcherId: state.record.dispatcherId,
+          teamName: state.record.teamName,
+          status: 'active',
+          taskId: assignment.taskId,
+          workerId: assignment.workerId,
+          claimedAt: assignment.claimedAt ?? now.toISOString(),
+          heartbeatAt: now.toISOString(),
+          expiresAt,
+        },
+      ],
+    }));
+  };
+  const getEffectiveDispatcherWorkerBudgetConfig = (): {
+    globalWorkerBudget: number | null;
+    teamWorkerBudgets: Record<string, number>;
+  } => buildEffectiveWorkerPoolBudgetConfig(readPersistedWorkerPoolLedger());
+  const getConfiguredTeamDispatcherWorkerBudget = (teamName: string): number | null => (
+    getEffectiveDispatcherWorkerBudgetConfig().teamWorkerBudgets[teamName] ?? null
+  );
+  const getAvailableDispatcherWorkerBudget = (): number | null => {
+    const budgetConfig = getEffectiveDispatcherWorkerBudgetConfig();
+    if (budgetConfig.globalWorkerBudget === null) {
+      return null;
+    }
+    return Math.max(0, budgetConfig.globalWorkerBudget - countActiveDispatcherAssignments() - countReservedDispatcherWorkerSlots());
   };
   const getAvailableDispatcherWorkerBudgetForTeam = (teamName: string): number | null => {
     const teamBudget = getConfiguredTeamDispatcherWorkerBudget(teamName);
@@ -789,38 +991,56 @@ export function query(
       0,
       teamBudget
       - countActiveDispatcherAssignmentsForTeam(teamName)
-      - (reservedDispatcherWorkerSlotsByTeam.get(teamName) ?? 0),
+      - countReservedDispatcherWorkerSlotsForTeam(teamName),
     );
   };
-  const tryReserveDispatcherWorkerSlot = (teamName: string): boolean => {
-    if (globalDispatcherWorkerBudget === null) {
+  const tryReserveDispatcherWorkerSlot = (
+    state: Pick<TaskDispatcherState, 'record'>,
+    now = new Date(),
+  ): WorkerPoolSlotRecord | null => {
+    const teamName = state.record.teamName;
+    const budgetConfig = getEffectiveDispatcherWorkerBudgetConfig();
+    if (budgetConfig.globalWorkerBudget === null) {
       const teamAvailable = getAvailableDispatcherWorkerBudgetForTeam(teamName);
       if (teamAvailable !== null && teamAvailable <= 0) {
-        return false;
+        return null;
       }
     } else {
       const available = getAvailableDispatcherWorkerBudget();
       if (available === null || available <= 0) {
-        return false;
+        return null;
       }
     }
     const teamAvailable = getAvailableDispatcherWorkerBudgetForTeam(teamName);
     if (teamAvailable !== null && teamAvailable <= 0) {
-      return false;
+      return null;
     }
-    reservedDispatcherWorkerSlots += 1;
-    reservedDispatcherWorkerSlotsByTeam.set(teamName, (reservedDispatcherWorkerSlotsByTeam.get(teamName) ?? 0) + 1);
-    return true;
+    const reservation: WorkerPoolSlotRecord = {
+      slotId: `slot-${randomUUID()}`,
+      queryInstanceId,
+      sessionId,
+      dispatcherId: state.record.dispatcherId,
+      teamName,
+      status: 'reserved',
+      claimedAt: now.toISOString(),
+      heartbeatAt: now.toISOString(),
+      expiresAt: computeWorkerPoolSlotExpiry(state.record, now),
+    };
+    return tryMutateWorkerPoolLedger((ledger) => ({
+      ...ledger,
+      slots: [...ledger.slots, reservation],
+    }))
+      ? reservation
+      : null;
   };
-  const releaseReservedDispatcherWorkerSlot = (teamName: string): void => {
-    if (reservedDispatcherWorkerSlots > 0) {
-      reservedDispatcherWorkerSlots -= 1;
-    }
-    const reservedForTeam = reservedDispatcherWorkerSlotsByTeam.get(teamName) ?? 0;
-    if (reservedForTeam <= 1) {
-      reservedDispatcherWorkerSlotsByTeam.delete(teamName);
-    } else {
-      reservedDispatcherWorkerSlotsByTeam.set(teamName, reservedForTeam - 1);
+  const releaseDispatcherWorkerSlot = (
+    matcher: (slot: WorkerPoolSlotRecord) => boolean,
+  ): void => {
+    refreshWorkerPoolSlot(matcher, () => null);
+  };
+  const refreshDispatcherWorkerSlots = (state: TaskDispatcherState, now = new Date()): void => {
+    for (const assignment of state.activeAssignments.values()) {
+      ensureActiveWorkerPoolSlot(state, assignment, now);
     }
   };
   const countSchedulableDispatchers = (): number => {
@@ -897,6 +1117,7 @@ export function query(
   };
   const buildSchedulerControlPlaneSnapshot = (): SchedulerControlPlaneSnapshot => {
     const ownership = readTaskSchedulerOwnershipRecord();
+    const budgetConfig = getEffectiveDispatcherWorkerBudgetConfig();
     return {
       ownerQueryInstanceId: ownership?.queryInstanceId ?? null,
       ownerSessionId: sessionId,
@@ -905,6 +1126,8 @@ export function query(
           ? 'local'
           : 'remote'
         : 'unowned',
+      globalWorkerBudget: budgetConfig.globalWorkerBudget,
+      teamWorkerBudgets: { ...budgetConfig.teamWorkerBudgets },
       ...(ownership?.claimedAt ? { claimedAt: ownership.claimedAt } : {}),
       ...(ownership?.heartbeatAt ? { heartbeatAt: ownership.heartbeatAt } : {}),
       fairnessCursor: dispatcherFairnessCursor,
@@ -1922,6 +2145,7 @@ export function query(
     });
   };
   const syncAppSchedulerControlPlane = () => {
+    persistDispatcherWorkerPoolBudgetConfig();
     const liveSnapshot = buildSchedulerControlPlaneSnapshot();
     const persistedSnapshot = readPersistedSchedulerControlPlaneSnapshot();
     const schedulerSnapshot = liveSnapshot.queue.length > 0 || !persistedSnapshot
@@ -1933,6 +2157,7 @@ export function query(
     }
   };
 
+  syncDispatcherWorkerPoolBudgetConfig();
   syncAppRuntimeControlPlane();
 
   const touchSessionState = (patch: Partial<Pick<
@@ -2116,6 +2341,7 @@ export function query(
     options?: OrchestrationControlPlaneOptions,
   ): OrchestrationControlPlaneSnapshot => {
     const state = appStore.getState();
+    const budgetConfig = getEffectiveDispatcherWorkerBudgetConfig();
     const teamName = normalizeOptionalString(options?.teamName);
     const tasks = Object.values(state.tasks)
       .map((entry) => entry.payload as TaskRecord)
@@ -2137,6 +2363,8 @@ export function query(
       ownerQueryInstanceId: state.scheduler.ownerQueryInstanceId,
       ownerSessionId: state.scheduler.ownerSessionId,
       ownerScope: state.scheduler.ownerScope,
+      globalWorkerBudget: state.scheduler.globalWorkerBudget,
+      teamWorkerBudgets: { ...state.scheduler.teamWorkerBudgets },
       ...(state.scheduler.claimedAt ? { claimedAt: state.scheduler.claimedAt } : {}),
       ...(state.scheduler.heartbeatAt ? { heartbeatAt: state.scheduler.heartbeatAt } : {}),
       fairnessCursor: state.scheduler.fairnessCursor,
@@ -2156,11 +2384,11 @@ export function query(
       runningWorkerCount: workers.filter((entry) => entry.status === 'running' || entry.status === 'spawning').length,
       idleWorkerCount: workers.filter((entry) => entry.status === 'idle').length,
       terminalWorkerCount: workers.filter((entry) => entry.status === 'completed' || entry.status === 'failed' || entry.status === 'shutdown').length,
-      globalDispatcherWorkerBudget,
+      globalDispatcherWorkerBudget: budgetConfig.globalWorkerBudget,
       availableDispatcherWorkerBudget: getAvailableDispatcherWorkerBudget(),
-      teamDispatcherWorkerBudgets: { ...teamDispatcherWorkerBudgets },
+      teamDispatcherWorkerBudgets: { ...budgetConfig.teamWorkerBudgets },
       availableTeamDispatcherWorkerBudgets: Object.fromEntries(
-        Object.keys(teamDispatcherWorkerBudgets)
+        Object.keys(budgetConfig.teamWorkerBudgets)
           .sort((left, right) => left.localeCompare(right))
           .map((teamKey) => [teamKey, getAvailableDispatcherWorkerBudgetForTeam(teamKey) ?? 0] as const),
       ),
@@ -3044,6 +3272,7 @@ export function query(
         dispatcherId: state.record.dispatcherId,
         taskId: assignment.taskId,
       });
+      ensureActiveWorkerPoolSlot(state, assignment);
     }
     taskDispatchers.set(state.record.dispatcherId, state);
     syncTaskDispatcherRecord(state);
@@ -3060,6 +3289,8 @@ export function query(
     }
     for (const assignment of state.activeAssignments.values()) {
       taskDispatcherByWorkerId.delete(assignment.workerId);
+      releaseDispatcherWorkerSlot((slot) =>
+        slot.dispatcherId === state.record.dispatcherId && slot.workerId === assignment.workerId);
     }
     taskDispatchers.delete(state.record.dispatcherId);
     clearDispatcherFairnessCursorIfNeeded(state.record.dispatcherId);
@@ -3106,6 +3337,7 @@ export function query(
     state.record.schedulerState = 'stopped';
     state.record.stoppedAt = state.record.stoppedAt ?? new Date().toISOString();
     touchTaskDispatcherRecord(state, state.record.stoppedAt);
+    releaseDispatcherWorkerSlot((slot) => slot.dispatcherId === state.record.dispatcherId);
     const record = syncTaskDispatcherRecord(state);
     releaseTaskDispatcherOwnership(state.record.dispatcherId);
     clearDispatcherFairnessCursorIfNeeded(state.record.dispatcherId);
@@ -3147,6 +3379,8 @@ export function query(
 
     state.activeAssignments.delete(workerId);
     taskDispatcherByWorkerId.delete(workerId);
+    releaseDispatcherWorkerSlot((slot) =>
+      slot.dispatcherId === state.record.dispatcherId && slot.workerId === workerId);
     try {
       getTaskManager(state.record.teamName).releaseLease(
         assignment.taskId,
@@ -3209,9 +3443,12 @@ export function query(
           assignment.lastHeartbeatAt = heartbeatNow.toISOString();
           assignment.leaseExpiresAt = renewedTask.lease?.expiresAt;
           assignment.attempts = renewedTask.lease?.attempts;
+          ensureActiveWorkerPoolSlot(state, assignment, heartbeatNow);
         } catch {
           state.activeAssignments.delete(assignment.workerId);
           taskDispatcherByWorkerId.delete(assignment.workerId);
+          releaseDispatcherWorkerSlot((slot) =>
+            slot.dispatcherId === state.record.dispatcherId && slot.workerId === assignment.workerId);
         }
       }
       syncTaskDispatcherRecord(state);
@@ -3277,7 +3514,8 @@ export function query(
           }
           break;
         }
-        if (!tryReserveDispatcherWorkerSlot(state.record.teamName)) {
+        const reservedSlot = tryReserveDispatcherWorkerSlot(state);
+        if (!reservedSlot) {
           const remainingGlobalBudget = getAvailableDispatcherWorkerBudget();
           const remainingTeamBudget = getAvailableDispatcherWorkerBudgetForTeam(state.record.teamName);
           const schedulingState = remainingTeamBudget !== null && remainingTeamBudget <= 0
@@ -3310,8 +3548,12 @@ export function query(
             ...(state.cwd ? { cwd: state.cwd } : {}),
             ...(state.isolation ? { isolation: state.isolation } : {}),
           });
-        } finally {
-          releaseReservedDispatcherWorkerSlot(state.record.teamName);
+          if (!dispatched) {
+            releaseDispatcherWorkerSlot((slot) => slot.slotId === reservedSlot.slotId);
+          }
+        } catch (error) {
+          releaseDispatcherWorkerSlot((slot) => slot.slotId === reservedSlot.slotId);
+          throw error;
         }
         if (!dispatched) {
           if (setTaskDispatcherSchedulerState(
@@ -3331,11 +3573,23 @@ export function query(
           leaseExpiresAt: dispatched.task.lease?.expiresAt,
           attempts: dispatched.task.lease?.attempts,
         });
+        state.record.lastDispatchAt = new Date().toISOString();
+        refreshWorkerPoolSlot(
+          (slot) => slot.slotId === reservedSlot.slotId,
+          (slot) => ({
+            ...slot,
+            status: 'active',
+            taskId: dispatched.task.id,
+            workerId: dispatched.worker.workerId,
+            heartbeatAt: state.record.lastDispatchAt,
+            expiresAt: dispatched.task.lease?.expiresAt ?? computeWorkerPoolSlotExpiry(state.record),
+          }),
+        );
+        ensureActiveWorkerPoolSlot(state, state.activeAssignments.get(dispatched.worker.workerId)!);
         taskDispatcherByWorkerId.set(dispatched.worker.workerId, {
           dispatcherId: state.record.dispatcherId,
           taskId: dispatched.task.id,
         });
-        state.record.lastDispatchAt = new Date().toISOString();
         setTaskDispatcherSchedulerState(state, 'dispatching');
         syncTaskDispatcherRecord(state);
         emitTaskDispatcherOrchestrationEvent(state, 'dispatched', {
@@ -3414,6 +3668,8 @@ export function query(
       if (releaseActiveTasks) {
         for (const assignment of state.activeAssignments.values()) {
           taskDispatcherByWorkerId.delete(assignment.workerId);
+          releaseDispatcherWorkerSlot((slot) =>
+            slot.dispatcherId === state.record.dispatcherId && slot.workerId === assignment.workerId);
           try {
             getTaskManager(state.record.teamName).releaseLease(
               assignment.taskId,
@@ -4918,6 +5174,17 @@ export function query(
                 : typeof parsed.scheduler.ownerQueryInstanceId === 'string'
                   ? 'remote'
                   : 'unowned',
+            globalWorkerBudget:
+              typeof parsed.scheduler.globalWorkerBudget === 'number'
+                ? parsed.scheduler.globalWorkerBudget
+                : globalDispatcherWorkerBudget,
+            teamWorkerBudgets:
+              parsed.scheduler.teamWorkerBudgets && typeof parsed.scheduler.teamWorkerBudgets === 'object'
+                ? Object.fromEntries(
+                  Object.entries(parsed.scheduler.teamWorkerBudgets)
+                    .filter((entry): entry is [string, number] => typeof entry[0] === 'string' && typeof entry[1] === 'number'),
+                )
+                : { ...teamDispatcherWorkerBudgets },
             ...(typeof parsed.scheduler.claimedAt === 'string' ? { claimedAt: parsed.scheduler.claimedAt } : {}),
             ...(typeof parsed.scheduler.heartbeatAt === 'string' ? { heartbeatAt: parsed.scheduler.heartbeatAt } : {}),
             fairnessCursor:
@@ -4938,6 +5205,8 @@ export function query(
             ownerQueryInstanceId: null,
             ownerSessionId: sessionId,
             ownerScope: 'unowned',
+            globalWorkerBudget: globalDispatcherWorkerBudget,
+            teamWorkerBudgets: { ...teamDispatcherWorkerBudgets },
             fairnessCursor: null,
             updatedAt: '',
             queue: [],
@@ -4957,6 +5226,8 @@ export function query(
       ownerQueryInstanceId: unified.scheduler.ownerQueryInstanceId,
       ownerSessionId: unified.scheduler.ownerSessionId,
       ownerScope: unified.scheduler.ownerScope,
+      globalWorkerBudget: unified.scheduler.globalWorkerBudget,
+      teamWorkerBudgets: { ...unified.scheduler.teamWorkerBudgets },
       ...(unified.scheduler.claimedAt ? { claimedAt: unified.scheduler.claimedAt } : {}),
       ...(unified.scheduler.heartbeatAt ? { heartbeatAt: unified.scheduler.heartbeatAt } : {}),
       fairnessCursor: unified.scheduler.fairnessCursor,
@@ -5192,6 +5463,8 @@ export function query(
           ownerQueryInstanceId: null,
           ownerSessionId: sessionId,
           ownerScope: 'unowned',
+          globalWorkerBudget: globalDispatcherWorkerBudget,
+          teamWorkerBudgets: { ...teamDispatcherWorkerBudgets },
           fairnessCursor: null,
           updatedAt: '',
           queue: [],
@@ -5211,6 +5484,8 @@ export function query(
         ownerQueryInstanceId: snapshot.ownerQueryInstanceId,
         ownerSessionId: snapshot.ownerSessionId,
         ownerScope: snapshot.ownerScope,
+        globalWorkerBudget: snapshot.globalWorkerBudget,
+        teamWorkerBudgets: { ...snapshot.teamWorkerBudgets },
         ...(snapshot.claimedAt ? { claimedAt: snapshot.claimedAt } : {}),
         ...(snapshot.heartbeatAt ? { heartbeatAt: snapshot.heartbeatAt } : {}),
         fairnessCursor: snapshot.fairnessCursor,
@@ -5841,6 +6116,8 @@ export function query(
     const workerStop = input.stopWorker === false ? undefined : await queryObj.stopWorker(assignment.workerId);
     state.activeAssignments.delete(assignment.workerId);
     taskDispatcherByWorkerId.delete(assignment.workerId);
+    releaseDispatcherWorkerSlot((slot) =>
+      slot.dispatcherId === state.record.dispatcherId && slot.workerId === assignment.workerId);
 
     let taskRecord: TaskRecord | null = null;
     try {
@@ -7598,6 +7875,25 @@ interface PersistedTaskDispatcherEventMessage {
 interface PersistedOrchestrationTimelineLedgerFile {
   version: 1;
   items: SDKTimelineItem[];
+}
+
+interface PersistedWorkerPoolLedgerFile {
+  version: 1;
+  globalWorkerBudget: number | null;
+  teamWorkerBudgets: Record<string, number>;
+  slots: Array<{
+    slotId: string;
+    queryInstanceId: string;
+    sessionId: string;
+    dispatcherId: string;
+    teamName: string;
+    status: 'reserved' | 'active';
+    claimedAt: string;
+    heartbeatAt: string;
+    expiresAt: string;
+    taskId?: string;
+    workerId?: string;
+  }>;
 }
 
 interface PersistedOrchestrationLedgerFile {

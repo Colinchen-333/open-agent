@@ -144,6 +144,8 @@ export interface SchedulerControlPlaneState {
   ownerQueryInstanceId: string | null;
   ownerSessionId: string;
   ownerScope: 'local' | 'remote' | 'unowned';
+  globalWorkerBudget: number | null;
+  teamWorkerBudgets: Record<string, number>;
   claimedAt?: string;
   heartbeatAt?: string;
   fairnessCursor: string | null;
@@ -289,6 +291,8 @@ export function createDefaultAppState(overrides: Partial<AppState> = {}): AppSta
       ownerQueryInstanceId: null,
       ownerSessionId: '',
       ownerScope: 'unowned',
+      globalWorkerBudget: null,
+      teamWorkerBudgets: {},
       fairnessCursor: null,
       updatedAt: '',
       queue: [],

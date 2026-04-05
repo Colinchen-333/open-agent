@@ -471,6 +471,8 @@ export interface SchedulerControlPlaneSnapshot {
   ownerQueryInstanceId: string | null;
   ownerSessionId: string;
   ownerScope: 'local' | 'remote' | 'unowned';
+  globalWorkerBudget: number | null;
+  teamWorkerBudgets: Record<string, number>;
   claimedAt?: string;
   heartbeatAt?: string;
   fairnessCursor: string | null;

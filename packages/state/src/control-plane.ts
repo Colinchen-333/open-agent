@@ -228,6 +228,8 @@ export function syncSchedulerControlPlane(
       ownerQueryInstanceId: scheduler.ownerQueryInstanceId,
       ownerSessionId: scheduler.ownerSessionId,
       ownerScope: scheduler.ownerScope,
+      globalWorkerBudget: scheduler.globalWorkerBudget,
+      teamWorkerBudgets: { ...scheduler.teamWorkerBudgets },
       ...(scheduler.claimedAt ? { claimedAt: scheduler.claimedAt } : {}),
       ...(scheduler.heartbeatAt ? { heartbeatAt: scheduler.heartbeatAt } : {}),
       fairnessCursor: scheduler.fairnessCursor,

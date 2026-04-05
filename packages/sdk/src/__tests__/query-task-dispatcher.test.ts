@@ -1319,6 +1319,98 @@ describe('query() task dispatcher control plane', () => {
     }
   });
 
+  it('shares the worker budget across fresh queries in the same workspace', async () => {
+    const temp = makeTempHome('open-agent-sdk-task-dispatcher-cross-query-budget-');
+    const controlled = makeControlledCompletionProvider();
+    const primaryTeamName = `dispatcher-cross-query-primary-${Date.now()}`;
+    const secondaryTeamName = `dispatcher-cross-query-secondary-${Date.now()}`;
+
+    try {
+      const primary = query('dispatcher cross-query budget primary', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: controlled.provider,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        sessionId: randomUUID(),
+        globalDispatcherWorkerBudget: 1,
+      } as any);
+
+      await primary.createTeam({ name: primaryTeamName, setActive: true });
+      const primaryTask = await primary.createTask({
+        teamName: primaryTeamName,
+        subject: 'Primary task',
+        description: 'Occupies the shared workspace worker slot.',
+      });
+      const primaryDispatcher = await primary.startTaskDispatcher({
+        dispatcherId: `dispatcher-cross-query-primary-${Date.now()}`,
+        owner: 'dispatcher-owner',
+        teamName: primaryTeamName,
+        pollIntervalMs: 25,
+        leaseMs: 500,
+      });
+
+      await controlled.waitForStarted(1);
+      await waitForTask(primary, primaryTask.id, primaryTeamName, (task) => task.status === 'in_progress');
+
+      const secondary = query('dispatcher cross-query budget secondary', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: controlled.provider,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        sessionId: randomUUID(),
+        globalDispatcherWorkerBudget: 1,
+      } as any);
+
+      await secondary.createTeam({ name: secondaryTeamName, setActive: true });
+      const secondaryTask = await secondary.createTask({
+        teamName: secondaryTeamName,
+        subject: 'Secondary task',
+        description: 'Must wait for the shared workspace worker slot.',
+      });
+      const secondaryDispatcher = await secondary.startTaskDispatcher({
+        dispatcherId: `dispatcher-cross-query-secondary-${Date.now()}`,
+        owner: 'dispatcher-owner',
+        teamName: secondaryTeamName,
+        pollIntervalMs: 25,
+        leaseMs: 500,
+      });
+
+      const blockedSecondary = await waitForDispatcher(
+        secondary,
+        secondaryDispatcher.dispatcherId,
+        (item) => item.status === 'running' && item.schedulerState === 'waiting_for_global_worker_budget',
+      );
+      expect(blockedSecondary.lastBlockedReason).toBe('global_worker_budget');
+      const secondarySnapshot = await waitForOrchestrationSnapshot(
+        secondary,
+        secondaryTeamName,
+        (snapshot) =>
+          snapshot.summary.globalDispatcherWorkerBudget === 1
+          && snapshot.summary.availableDispatcherWorkerBudget === 0
+          && snapshot.summary.globalBudgetBlockedDispatcherCount >= 1,
+      );
+      expect(secondarySnapshot.scheduler.globalWorkerBudget).toBe(1);
+      expect((await secondary.getTask(secondaryTask.id, { teamName: secondaryTeamName }))?.status).toBe('pending');
+
+      controlled.releaseNext();
+      await controlled.waitForStarted(2);
+      await waitForTask(secondary, secondaryTask.id, secondaryTeamName, (task) => task.status === 'in_progress');
+      controlled.releaseNext();
+
+      await waitForTask(primary, primaryTask.id, primaryTeamName, (task) => task.status === 'completed');
+      await waitForTask(secondary, secondaryTask.id, secondaryTeamName, (task) => task.status === 'completed');
+
+      await primary.stopTaskDispatcher(primaryDispatcher.dispatcherId);
+      await secondary.stopTaskDispatcher(secondaryDispatcher.dispatcherId);
+      primary.close();
+      secondary.close();
+    } finally {
+      temp.cleanup();
+    }
+  });
+
   it('prevents a second fresh query from auto-recovering a dispatcher already owned by another live query', async () => {
     const temp = makeTempHome('open-agent-sdk-task-dispatcher-ownership-');
     const teamName = `dispatcher-team-${Date.now()}`;
