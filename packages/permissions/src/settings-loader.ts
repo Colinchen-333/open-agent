@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'fs';
+import { readFile } from 'node:fs/promises';
 import { join } from 'path';
-import { homedir } from 'os';
+import { homedir, platform } from 'os';
 import type { PermissionRule, SandboxConfig } from './types';
 import type { SettingSource } from '@open-agent/core';
 
@@ -139,4 +140,125 @@ export class SettingsLoader {
       target.sandbox = source.sandbox;
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// 6-Layer Settings Hierarchy
+// ---------------------------------------------------------------------------
+
+export interface LoadLayeredOptions {
+  /** Working directory (project root). */
+  cwd: string;
+  /** Override home directory (useful in tests). Defaults to `os.homedir()`. */
+  home?: string;
+  /** CLI flag settings — highest precedence. */
+  flagSettings?: Record<string, unknown>;
+  /** Path to a policy settings file (enterprise / IT-managed). */
+  policyPath?: string;
+}
+
+/**
+ * Read a JSON file, returning an empty object on any error (missing,
+ * malformed, permission-denied, etc.).
+ */
+async function readJsonSafe(path: string): Promise<Record<string, unknown>> {
+  try {
+    const content = await readFile(path, 'utf8');
+    return JSON.parse(content) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Recursively merge `source` into a *copy* of `target`.
+ * - Plain objects are merged recursively.
+ * - All other values (scalars, arrays) from `source` win outright.
+ */
+function deepMerge(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...target };
+  for (const key of Object.keys(source)) {
+    const s = source[key];
+    const t = result[key];
+    if (
+      s !== null &&
+      typeof s === 'object' &&
+      !Array.isArray(s) &&
+      t !== null &&
+      typeof t === 'object' &&
+      !Array.isArray(t)
+    ) {
+      result[key] = deepMerge(
+        t as Record<string, unknown>,
+        s as Record<string, unknown>,
+      );
+    } else {
+      result[key] = s;
+    }
+  }
+  return result;
+}
+
+/**
+ * Load and deep-merge settings across the 6-layer precedence stack.
+ *
+ * Precedence (lowest → highest):
+ *   defaults (empty object)
+ *   mdm      (/Library/Managed Preferences/com.anthropic.claude.json — macOS only)
+ *   user     (~/.claude/settings.json)
+ *   local    (<cwd>/.claude/local/settings.json)
+ *   project  (<cwd>/.claude/settings.json)
+ *   policy   (opts.policyPath, if supplied)
+ *   flag     (opts.flagSettings, if supplied — highest)
+ *
+ * Higher layers win on key conflicts. Plain-object values are deep-merged;
+ * all other values (scalars, arrays) from the higher layer replace the lower.
+ */
+export async function loadLayeredSettings(
+  opts: LoadLayeredOptions,
+): Promise<Record<string, unknown>> {
+  const home = opts.home ?? homedir();
+
+  // Build layers from lowest to highest precedence
+  const layers: Array<Record<string, unknown>> = [];
+
+  // Layer 6 (lowest): defaults
+  layers.push({});
+
+  // Layer 5: MDM — macOS only
+  if (platform() === 'darwin') {
+    layers.push(
+      await readJsonSafe('/Library/Managed Preferences/com.anthropic.claude.json'),
+    );
+  }
+
+  // Layer 4: user
+  layers.push(await readJsonSafe(join(home, '.claude', 'settings.json')));
+
+  // Layer 3: local
+  layers.push(
+    await readJsonSafe(join(opts.cwd, '.claude', 'local', 'settings.json')),
+  );
+
+  // Layer 2: project
+  layers.push(await readJsonSafe(join(opts.cwd, '.claude', 'settings.json')));
+
+  // Layer 1: policy
+  if (opts.policyPath) {
+    layers.push(await readJsonSafe(opts.policyPath));
+  }
+
+  // Layer 0 (highest): flag
+  if (opts.flagSettings) {
+    layers.push(opts.flagSettings);
+  }
+
+  // Fold all layers left-to-right; higher layers (later in array) win
+  return layers.reduce<Record<string, unknown>>(
+    (acc, layer) => deepMerge(acc, layer),
+    {},
+  );
 }

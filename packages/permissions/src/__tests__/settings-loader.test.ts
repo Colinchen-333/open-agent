@@ -1,8 +1,8 @@
-import { describe, it, expect, afterEach } from 'bun:test';
+import { describe, it, expect, afterEach, test } from 'bun:test';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
-import { SettingsLoader } from '../settings-loader.js';
+import { SettingsLoader, loadLayeredSettings } from '../settings-loader.js';
 
 function writeJson(filePath: string, data: unknown): void {
   mkdirSync(dirname(filePath), { recursive: true });
@@ -103,4 +103,119 @@ describe('SettingsLoader', () => {
     expect(loaded.permissions?.allow).toEqual([{ toolName: 'Read' }]);
     expect(loaded.permissions?.deny).toBeUndefined();
   });
+});
+
+// ---------------------------------------------------------------------------
+// loadLayeredSettings — 6-layer hierarchy
+// ---------------------------------------------------------------------------
+
+test('6-layer precedence: flag > policy > project > local > user > defaults', async () => {
+  const root = mkdtempSync(`${tmpdir()}/oa-settings-`);
+  const home = mkdtempSync(`${tmpdir()}/oa-home-`);
+  tempDirs.push(root, home);
+
+  const project = join(root, 'proj');
+  const local = join(project, '.claude', 'local');
+  const projSettings = join(project, '.claude');
+  const userSettings = join(home, '.claude');
+
+  mkdirSync(local, { recursive: true });
+  mkdirSync(projSettings, { recursive: true });
+  mkdirSync(userSettings, { recursive: true });
+
+  writeFileSync(
+    join(userSettings, 'settings.json'),
+    JSON.stringify({ model: 'user-model', verbose: true }),
+  );
+  writeFileSync(
+    join(projSettings, 'settings.json'),
+    JSON.stringify({ model: 'project-model' }),
+  );
+  writeFileSync(
+    join(local, 'settings.json'),
+    JSON.stringify({ permissionMode: 'plan' }),
+  );
+
+  const merged = await loadLayeredSettings({
+    cwd: project,
+    home,
+    flagSettings: { model: 'flag-model' },
+  });
+
+  expect(merged.model).toBe('flag-model');       // flag wins over project and user
+  expect(merged.permissionMode).toBe('plan');    // local wins over user
+  expect(merged.verbose).toBe(true);             // user contributes when no higher layer overrides
+});
+
+test('loadLayeredSettings: deep-merge nested objects across layers', async () => {
+  const root = mkdtempSync(`${tmpdir()}/oa-deep-`);
+  const home = mkdtempSync(`${tmpdir()}/oa-deep-home-`);
+  tempDirs.push(root, home);
+
+  const project = join(root, 'proj');
+  const projDir = join(project, '.claude');
+  const userDir = join(home, '.claude');
+
+  mkdirSync(projDir, { recursive: true });
+  mkdirSync(userDir, { recursive: true });
+
+  writeFileSync(
+    join(userDir, 'settings.json'),
+    JSON.stringify({ nested: { a: 1, b: 2 } }),
+  );
+  writeFileSync(
+    join(projDir, 'settings.json'),
+    JSON.stringify({ nested: { b: 99, c: 3 } }),
+  );
+
+  const merged = await loadLayeredSettings({ cwd: project, home });
+
+  // project layer wins on 'b', user layer contributes 'a', project adds 'c'
+  expect((merged.nested as Record<string, unknown>).a).toBe(1);
+  expect((merged.nested as Record<string, unknown>).b).toBe(99);
+  expect((merged.nested as Record<string, unknown>).c).toBe(3);
+});
+
+test('loadLayeredSettings: missing files are silently skipped', async () => {
+  const root = mkdtempSync(`${tmpdir()}/oa-missing-`);
+  const home = mkdtempSync(`${tmpdir()}/oa-missing-home-`);
+  tempDirs.push(root, home);
+
+  const project = join(root, 'proj-empty');
+  mkdirSync(project, { recursive: true });
+
+  // No settings files written — should return an empty object without throwing
+  const merged = await loadLayeredSettings({
+    cwd: project,
+    home,
+    flagSettings: { debug: true },
+  });
+
+  expect(merged.debug).toBe(true);
+  expect(Object.keys(merged).length).toBe(1);
+});
+
+test('loadLayeredSettings: policy layer sits between project and flag', async () => {
+  const root = mkdtempSync(`${tmpdir()}/oa-policy-`);
+  const home = mkdtempSync(`${tmpdir()}/oa-policy-home-`);
+  tempDirs.push(root, home);
+
+  const project = join(root, 'proj');
+  const projDir = join(project, '.claude');
+  const policyFile = join(root, 'policy.json');
+
+  mkdirSync(projDir, { recursive: true });
+
+  writeFileSync(join(projDir, 'settings.json'), JSON.stringify({ level: 'project' }));
+  writeFileSync(policyFile, JSON.stringify({ level: 'policy', enforced: true }));
+
+  const merged = await loadLayeredSettings({
+    cwd: project,
+    home,
+    policyPath: policyFile,
+    flagSettings: { level: 'flag' },
+  });
+
+  expect(merged.level).toBe('flag');          // flag beats policy
+  expect(merged.enforced).toBe(true);         // policy contributes when flag doesn't override
 });
