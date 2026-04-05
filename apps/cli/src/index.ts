@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { parseArgs, TerminalRenderer, REPL, emitStreamJson, emitStreamJsonInit, TerminalPermissionPrompter, handleSlashCommand } from '@open-agent/cli';
-import { ConversationLoop, SessionManager, ConfigLoader, buildSystemPrompt, isGitRepository, FileCheckpoint, buildTaskOrchestrationTemplates, loadPromptContext, buildSystemPromptRuntimeSnapshot } from '@open-agent/core';
+import { ConversationLoop, SessionManager, ConfigLoader, buildSystemPrompt, isGitRepository, FileCheckpoint, buildTaskOrchestrationTemplates, loadPromptContext, buildSystemPromptRuntimeSnapshot, loadOutputStyles, mergeOutputStyles, findOutputStyle, BUILTIN_OUTPUT_STYLES } from '@open-agent/core';
+import type { OutputStyle } from '@open-agent/core';
 import { createStore, createDefaultAppState } from '@open-agent/state';
 import type { AppState } from '@open-agent/state';
 import { renderApp } from '@open-agent/ink';
@@ -691,6 +692,8 @@ async function main(): Promise<void> {
   const isPrintMode = Boolean(args.print && args.prompt);
   const getAvailableTools = () => (isPrintMode ? [] : toolRegistry.list());
   let toolNames = getAvailableTools().map((tool) => tool.name);
+  // Mutable: set by /output-style and picked up by buildCliSystemPrompt on the next turn.
+  let activeCliOutputStyle: Pick<OutputStyle, 'name' | 'instructions' | 'keepCodingInstructions'> | undefined = undefined;
   const isGitRepo = isGitRepository(cwd);
   const loadCurrentPromptContext = () => loadPromptContext({
     cwd,
@@ -734,6 +737,7 @@ async function main(): Promise<void> {
         capabilitySnapshot: promptCapabilitySnapshot,
       }),
       outputStyle: cliOutputStyle,
+      activeOutputStyle: activeCliOutputStyle,
       knowledgeCutoff: 'August 2025',
     });
   };
@@ -1044,6 +1048,19 @@ async function main(): Promise<void> {
           })),
         getBackgroundAgent: agentManagementDeps.getBackgroundAgent,
         stopBackgroundAgent: agentManagementDeps.stopBackgroundAgent,
+        setOutputStyleName: (name: string) => {
+          // Resolve the style object and persist it in the REPL-scoped mutable.
+          // The resolution is fire-and-forget; buildCliSystemPrompt picks it up
+          // on the next turn boundary via refreshCliRuntimeTurnBoundary.
+          loadOutputStyles(cwd).then((loaded) => {
+            const all = mergeOutputStyles(loaded, BUILTIN_OUTPUT_STYLES);
+            activeCliOutputStyle = findOutputStyle(name, all);
+          }).catch(() => {
+            // Fall back to builtin only — still functional.
+            const all = mergeOutputStyles([], BUILTIN_OUTPUT_STYLES);
+            activeCliOutputStyle = findOutputStyle(name, all);
+          });
+        },
       });
       if (result) {
         if (result.shouldExit) break;
