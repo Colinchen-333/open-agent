@@ -9,3 +9,4 @@ export * from './settings-change-detector';
 export { PermissionEngine } from './engine';
 export { SettingsLoader } from './settings-loader';
 export type { SettingsFile, SettingsPermissions } from './settings-loader';
+export * from './sandbox-meta-policy';
