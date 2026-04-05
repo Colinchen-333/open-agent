@@ -1,0 +1,33 @@
+import { snip } from './snip.js';
+import { microcompact } from './microcompact.js';
+
+export { snip } from './snip.js';
+export type { SnipOptions } from './snip.js';
+export { microcompact } from './microcompact.js';
+export type { MicrocompactOptions } from './microcompact.js';
+
+export interface CompactPipelineOptions {
+  /** Number of recent assistant turns whose tool_results to preserve unchanged. */
+  keepLastN: number;
+  /** Maximum allowed size in chars for any single tool_result content string. */
+  maxResultSizeChars: number;
+}
+
+/**
+ * Run the layered auto-compact pipeline on a message array.
+ *
+ * Stages (in order):
+ *  1. snip   — replace tool_result bodies for old turns with a short placeholder
+ *  2. microcompact — truncate any remaining oversized tool_result strings
+ *
+ * Returns a new message array; inputs are never mutated.
+ */
+export function runCompactPipeline(
+  messages: any[],
+  opts: CompactPipelineOptions,
+): any[] {
+  let out = messages;
+  out = snip(out, { keepLastN: opts.keepLastN });
+  out = microcompact(out, { maxResultSizeChars: opts.maxResultSizeChars });
+  return out;
+}

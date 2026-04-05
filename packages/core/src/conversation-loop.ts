@@ -8,6 +8,7 @@ import { randomUUID } from 'crypto';
 import { basename } from 'path';
 import { SessionManager } from './session-manager.js';
 import { StreamingToolExecutor } from './tool-executor.js';
+import { runCompactPipeline } from './compact/index.js';
 
 /**
  * Minimal interface for permission checking — implemented by PermissionEngine
@@ -131,6 +132,25 @@ function normalizePermissionDenialInput(input: unknown): Record<string, unknown>
     return {};
   }
   return input as Record<string, unknown>;
+}
+
+/**
+ * Returns true when the provider error indicates the request payload is too
+ * large for the model's context window, signalling that a lightweight reactive
+ * compact should be applied before retrying.
+ */
+function isPromptTooLongError(e: unknown): boolean {
+  const msg = ((e as Error)?.message ?? String(e)).toLowerCase();
+  return (
+    msg.includes('prompt is too long') ||
+    msg.includes('prompt_too_long') ||
+    msg.includes('maximum context') ||
+    msg.includes('context.length') ||
+    msg.includes('token.limit') ||
+    msg.includes('too.many.tokens') ||
+    msg.includes('request.too.large') ||
+    msg.includes('max.context')
+  );
 }
 
 interface ToolUseSummaryEntry {
@@ -802,10 +822,21 @@ export class ConversationLoop {
 
         // If the error is a context-length exceeded error, try to compact and retry.
         const isContextError = /context.length|token.limit|too.many.tokens|request.too.large|max.context/i.test(msg)
-          || (msg.includes('400') && /tokens?/i.test(msg));
+          || (msg.includes('400') && /tokens?/i.test(msg))
+          || isPromptTooLongError(error);
         if (isContextError && this.messages.length > 4 && contextErrorRetryCount < 3) {
           contextErrorRetryCount++;
-          yield* this.compactWithEvents('auto');
+          // First attempt: apply the lightweight layered compact pipeline
+          // (snip old tool_result bodies + microcompact any remaining oversized
+          // results).  This avoids an LLM round-trip and completes instantly.
+          if (contextErrorRetryCount === 1) {
+            this.messages = runCompactPipeline(this.messages as any[], {
+              keepLastN: 2,
+              maxResultSizeChars: 50_000,
+            }) as Message[];
+          } else {
+            yield* this.compactWithEvents('auto');
+          }
           this.turnCount--; // Don't count the failed attempt as a turn
           continue;
         }
