@@ -179,4 +179,9 @@ export class McpSseClient {
   async disconnect(): Promise<void> {
     await this.client.close();
   }
+
+  /** Expose the underlying MCP SDK Client for notification handler wiring. */
+  getUnderlyingClient(): Client {
+    return this.client;
+  }
 }

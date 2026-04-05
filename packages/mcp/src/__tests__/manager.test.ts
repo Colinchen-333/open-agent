@@ -1,5 +1,35 @@
-import { describe, expect, it, test } from 'bun:test';
+import { describe, expect, it, mock, spyOn, test } from 'bun:test';
 import { McpManager } from '../manager';
+import type { ResourceNotificationEvent } from '../manager';
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Build an McpManager that has a single SDK-type (in-process) server named
+ * `serverName` in the 'connected' state. SDK servers have no underlying MCP
+ * SDK Client, so subscribeResource skips the RPC round-trip — perfect for
+ * unit tests that only need to verify the callback dispatch logic.
+ */
+async function makeManagerWithSdkServer(serverName = 'test-server'): Promise<McpManager> {
+  const manager = new McpManager();
+  await manager.addServer(serverName, {
+    type: 'sdk',
+    name: serverName,
+    instance: { tools: [] },
+  } as any);
+  return manager;
+}
+
+/**
+ * Cast manager to `any` so we can call private `_dispatchResourceNotification`
+ * directly from tests — simulates what the notification handler wiring would do
+ * when a real server sends a notification.
+ */
+function dispatch(manager: McpManager, serverName: string, event: ResourceNotificationEvent): void {
+  (manager as any)._dispatchResourceNotification(serverName, event);
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('McpManager readResource', () => {
   test('McpManager exposes readResource method', () => {
@@ -50,5 +80,107 @@ describe('McpManager SDK servers', () => {
 
     expect(manager.getAllTools()).toEqual(status?.tools ?? []);
     expect(await manager.callTool('demo', 'inspect', { value: 'ok' })).toEqual({ echoed: 'ok' });
+  });
+});
+
+// ── Resource subscription tests ───────────────────────────────────────────────
+
+describe('McpManager resource subscriptions', () => {
+  it('subscribeResource exposes the method', () => {
+    const manager = new McpManager();
+    expect(typeof manager.subscribeResource).toBe('function');
+  });
+
+  it('subscribeResource throws when server is not found', async () => {
+    const manager = new McpManager();
+    await expect(
+      manager.subscribeResource('missing', 'file:///foo', () => {}),
+    ).rejects.toThrow('MCP server not found or not connected: missing');
+  });
+
+  it('registers callback and fires on updated notification', async () => {
+    const manager = await makeManagerWithSdkServer('s1');
+    const events: ResourceNotificationEvent[] = [];
+
+    await manager.subscribeResource('s1', 'file:///doc.txt', (e) => events.push(e));
+
+    dispatch(manager, 's1', { type: 'updated', uri: 'file:///doc.txt' });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toEqual({ type: 'updated', uri: 'file:///doc.txt' });
+  });
+
+  it('does not fire callback for a different URI', async () => {
+    const manager = await makeManagerWithSdkServer('s2');
+    const events: ResourceNotificationEvent[] = [];
+
+    await manager.subscribeResource('s2', 'file:///a.txt', (e) => events.push(e));
+
+    // Dispatch an update for a different URI
+    dispatch(manager, 's2', { type: 'updated', uri: 'file:///b.txt' });
+
+    expect(events).toHaveLength(0);
+  });
+
+  it('list_changed notification fires all subscribers on the server', async () => {
+    const manager = await makeManagerWithSdkServer('s3');
+    const eventsA: ResourceNotificationEvent[] = [];
+    const eventsB: ResourceNotificationEvent[] = [];
+
+    await manager.subscribeResource('s3', 'file:///a.txt', (e) => eventsA.push(e));
+    await manager.subscribeResource('s3', 'file:///b.txt', (e) => eventsB.push(e));
+
+    dispatch(manager, 's3', { type: 'list_changed' });
+
+    expect(eventsA).toHaveLength(1);
+    expect(eventsA[0]).toEqual({ type: 'list_changed' });
+    expect(eventsB).toHaveLength(1);
+    expect(eventsB[0]).toEqual({ type: 'list_changed' });
+  });
+
+  it('list_changed does not fire subscribers on a different server', async () => {
+    const manager = new McpManager();
+    await manager.addServer('alpha', { type: 'sdk', name: 'alpha', instance: { tools: [] } } as any);
+    await manager.addServer('beta', { type: 'sdk', name: 'beta', instance: { tools: [] } } as any);
+
+    const events: ResourceNotificationEvent[] = [];
+    await manager.subscribeResource('alpha', 'file:///x.txt', (e) => events.push(e));
+
+    // Dispatch list_changed for a different server
+    dispatch(manager, 'beta', { type: 'list_changed' });
+
+    expect(events).toHaveLength(0);
+  });
+
+  it('unsubscribe function removes the subscription', async () => {
+    const manager = await makeManagerWithSdkServer('s4');
+    const events: ResourceNotificationEvent[] = [];
+
+    const unsubscribe = await manager.subscribeResource('s4', 'file:///watched.txt', (e) => events.push(e));
+
+    // Fire before unsubscribing — should be received
+    dispatch(manager, 's4', { type: 'updated', uri: 'file:///watched.txt' });
+    expect(events).toHaveLength(1);
+
+    // Unsubscribe and fire again — should NOT be received
+    await unsubscribe();
+    dispatch(manager, 's4', { type: 'updated', uri: 'file:///watched.txt' });
+    expect(events).toHaveLength(1); // still 1, not 2
+  });
+
+  it('callback that throws does not crash dispatch', async () => {
+    const manager = await makeManagerWithSdkServer('s5');
+    const goodEvents: ResourceNotificationEvent[] = [];
+
+    await manager.subscribeResource('s5', 'file:///bad.txt', () => {
+      throw new Error('handler exploded');
+    });
+    await manager.subscribeResource('s5', 'file:///good.txt', (e) => goodEvents.push(e));
+
+    // Both subscriptions are on the same server, dispatch list_changed hits both
+    dispatch(manager, 's5', { type: 'list_changed' });
+
+    // The good handler should still have fired despite the first one throwing
+    expect(goodEvents).toHaveLength(1);
   });
 });

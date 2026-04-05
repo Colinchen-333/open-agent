@@ -5,6 +5,10 @@ import type {
   McpHttpServerConfig,
 } from '@open-agent/core';
 import { isDeepStrictEqual } from 'util';
+import {
+  ResourceListChangedNotificationSchema,
+  ResourceUpdatedNotificationSchema,
+} from '@modelcontextprotocol/sdk/types.js';
 import { McpStdioClient } from './stdio-transport';
 import { McpHttpClient } from './http-transport';
 import { McpSseClient } from './sse-transport';
@@ -73,12 +77,25 @@ function hasServerConfigChanged(
 // Union type of all client types we maintain
 type AnyMcpClient = McpStdioClient | McpHttpClient | McpSseClient;
 
+/** Payload delivered to a resource subscription callback. */
+export type ResourceNotificationEvent =
+  | { type: 'updated'; uri: string }
+  | { type: 'list_changed' };
+
+interface ResourceSubscription {
+  serverName: string;
+  uri: string;
+  callback: (event: ResourceNotificationEvent) => void;
+}
+
 export class McpManager {
   private connections: Map<string, McpServerConnection> = new Map();
   private clients: Map<string, AnyMcpClient> = new Map();
   /** SDK-type servers store tool handlers here (keyed by serverName → toolName → handler) */
   private _sdkToolHandlers: Map<string, Map<string, (args: Record<string, unknown>, extra: unknown) => Promise<unknown>>> = new Map();
   private _setupChain: Promise<void> = Promise.resolve();
+  /** Active resource subscriptions. Key: `${serverName}:${uri}` */
+  private _subscriptions: Map<string, ResourceSubscription> = new Map();
 
   // ── Server lifecycle ──────────────────────────────────────────────────────
 
@@ -107,6 +124,7 @@ export class McpManager {
           : undefined;
         connection.tools = await client.listTools();
         connection.status = 'connected';
+        this._attachNotificationHandlers(name, client);
       } else {
         // SDK-type in-process server — extract tools from the instance property
         connection.status = 'connected';
@@ -373,7 +391,117 @@ export class McpManager {
     return client.readResource(uri);
   }
 
+  // ── Resource subscriptions ────────────────────────────────────────────────
+
+  /**
+   * Subscribe to updates for a specific resource on a named server.
+   *
+   * The callback receives either:
+   *   - `{ type: 'updated', uri }` when that specific resource changes, or
+   *   - `{ type: 'list_changed' }` when the server's resource list changes.
+   *
+   * Returns an async unsubscribe function. Call it to cancel the subscription
+   * and send an `resources/unsubscribe` RPC to the server.
+   */
+  async subscribeResource(
+    serverName: string,
+    uri: string,
+    callback: (event: ResourceNotificationEvent) => void,
+  ): Promise<() => Promise<void>> {
+    const conn = this.connections.get(serverName);
+    if (!conn || conn.status !== 'connected') {
+      throw new Error(`MCP server not found or not connected: ${serverName}`);
+    }
+
+    const key = `${serverName}:${uri}`;
+    this._subscriptions.set(key, { serverName, uri, callback });
+
+    // Send subscribeResource RPC to the server (stdio/sse have native SDK client;
+    // SDK-type in-process servers and HTTP clients have no persistent channel — skip).
+    const transportClient = this.clients.get(serverName);
+    const sdkClient = transportClient ? this._getUnderlyingClient(transportClient) : null;
+    if (sdkClient) {
+      try {
+        await sdkClient.subscribeResource({ uri });
+      } catch {
+        this._subscriptions.delete(key);
+        throw new Error(`Failed to subscribe to resource '${uri}' on server '${serverName}'`);
+      }
+    }
+
+    return async () => {
+      this._subscriptions.delete(key);
+      if (sdkClient) {
+        try {
+          await sdkClient.unsubscribeResource({ uri });
+        } catch {
+          // best-effort: server may already have dropped the subscription
+        }
+      }
+    };
+  }
+
+  /**
+   * Dispatch a resource notification to all matching subscription callbacks.
+   * Called internally when the transport receives a notification from the server.
+   */
+  private _dispatchResourceNotification(
+    serverName: string,
+    event: ResourceNotificationEvent,
+  ): void {
+    for (const sub of this._subscriptions.values()) {
+      if (sub.serverName !== serverName) continue;
+
+      if (event.type === 'list_changed') {
+        // list_changed fires for every subscriber on this server regardless of URI
+        try { sub.callback(event); } catch { /* don't let a bad handler crash dispatch */ }
+      } else if (event.type === 'updated' && sub.uri === event.uri) {
+        try { sub.callback(event); } catch { /* don't let a bad handler crash dispatch */ }
+      }
+    }
+  }
+
   // ── Private helpers ───────────────────────────────────────────────────────
+
+  /**
+   * Retrieve the underlying MCP SDK `Client` from a transport wrapper, if available.
+   * HTTP clients have no persistent underlying client, so this returns null for them.
+   */
+  private _getUnderlyingClient(client: AnyMcpClient): import('@modelcontextprotocol/sdk/client/index.js').Client | null {
+    if (client instanceof McpStdioClient || client instanceof McpSseClient) {
+      return client.getUnderlyingClient();
+    }
+    return null;
+  }
+
+  /**
+   * Attach MCP notification handlers to a transport client after it connects.
+   * Hooks into `notifications/resources/updated` and `notifications/resources/list_changed`.
+   */
+  private _attachNotificationHandlers(serverName: string, client: AnyMcpClient): void {
+    const sdkClient = this._getUnderlyingClient(client);
+    if (!sdkClient) return; // HTTP clients don't have persistent transport; skip
+
+    try {
+      sdkClient.setNotificationHandler(
+        ResourceUpdatedNotificationSchema,
+        (notification) => {
+          const uri = notification.params?.uri;
+          if (typeof uri === 'string') {
+            this._dispatchResourceNotification(serverName, { type: 'updated', uri });
+          }
+        },
+      );
+      sdkClient.setNotificationHandler(
+        ResourceListChangedNotificationSchema,
+        () => {
+          this._dispatchResourceNotification(serverName, { type: 'list_changed' });
+        },
+      );
+    } catch {
+      // Older SDK version without notification handler support — skip silently
+    }
+  }
 
   /**
    * Instantiate the correct transport client for the given config.
