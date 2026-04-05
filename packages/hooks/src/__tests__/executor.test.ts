@@ -15,6 +15,25 @@ function makePreToolInput() {
 }
 
 describe('HookExecutor', () => {
+  it('reports effective hook surface across shell and callback registrations', () => {
+    const executor = new HookExecutor();
+
+    executor.loadFromConfig({
+      Notification: [{
+        command: `printf '%s' '{"continue":true}'`,
+      }],
+    }, 'settings_json');
+    executor.registerCallbackHook('Notification', {
+      hooks: [async () => ({ continue: true })],
+    });
+
+    expect(executor.getHookSurface()).toEqual([{
+      event: 'Notification',
+      count: 2,
+      sources: ['callback', 'settings_json'],
+    }]);
+  });
+
   it('replaces shell hooks for one source without dropping other sources', async () => {
     const executor = new HookExecutor();
 

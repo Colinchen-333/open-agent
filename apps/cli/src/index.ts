@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { parseArgs, TerminalRenderer, REPL, emitStreamJson, emitStreamJsonInit, TerminalPermissionPrompter, handleSlashCommand } from '@open-agent/cli';
-import { ConversationLoop, SessionManager, ConfigLoader, buildSystemPrompt, isGitRepository, FileCheckpoint, buildTaskOrchestrationTemplates, loadPromptContext, buildRuntimeHookSurfaceSummary, buildSystemPromptRuntimeSnapshot } from '@open-agent/core';
+import { ConversationLoop, SessionManager, ConfigLoader, buildSystemPrompt, isGitRepository, FileCheckpoint, buildTaskOrchestrationTemplates, loadPromptContext, buildSystemPromptRuntimeSnapshot } from '@open-agent/core';
 import { createStore, createDefaultAppState } from '@open-agent/state';
 import type { AppState } from '@open-agent/state';
 import { renderApp } from '@open-agent/ink';
@@ -74,7 +74,7 @@ async function main(): Promise<void> {
   const cwd = args.cwd ? require('path').resolve(args.cwd) : process.cwd();
   const additionalDirectories = (args.addDirs ?? []).map((d: string) => require('path').resolve(cwd, d));
   const configLoader = new ConfigLoader();
-  const settings = configLoader.loadSettings(cwd);
+  let settings = configLoader.loadSettings(cwd);
 
   // ------------------------------------------------------------------
   // Model selection — CLI flag > settings.json > provider default
@@ -594,27 +594,7 @@ async function main(): Promise<void> {
     }
   }
 
-  const buildCliPromptHookSurface = () => buildRuntimeHookSurfaceSummary(
-    runtime.buildSnapshot().hooks,
-    existsSync(globalHooksPath)
-      ? {
-          source: 'global_hooks_json',
-          config: safeReadHookConfig(globalHooksPath),
-        }
-      : undefined,
-    existsSync(projectHooksPath)
-      ? {
-          source: 'project_hooks_json',
-          config: safeReadHookConfig(projectHooksPath),
-        }
-      : undefined,
-    settings.hooks && typeof settings.hooks === 'object'
-      ? {
-          source: 'settings_json',
-          config: settings.hooks as any,
-        }
-      : undefined,
-  );
+  const buildCliPromptHookSurface = () => _hookExecutor.getHookSurface();
 
   // Adapter: bridge HookExecutor's strict HookInput signature to the loose
   // Record<string, unknown> interface expected by ConversationLoop.
@@ -827,6 +807,16 @@ async function main(): Promise<void> {
   const settingsWatcher = cliPermissionRuntime.watchSettings(['user', 'project', 'local'], {
     onRefresh(nextSettings, source) {
       void (async () => {
+        settings = nextSettings as Settings;
+        try {
+          const nextHooks = nextSettings.hooks && typeof nextSettings.hooks === 'object'
+            ? nextSettings.hooks as any
+            : {};
+          _hookExecutor.replaceShellHooksFromConfig(nextHooks, 'settings_json');
+        } catch {
+          _hookExecutor.replaceShellHooksFromConfig({}, 'settings_json');
+        }
+
         await applyCliRuntimeSettingsRefresh({
           runtime,
           toolRegistry,
@@ -836,15 +826,6 @@ async function main(): Promise<void> {
           syncLoopTools: syncCliLoopTools,
           isPrintMode: false,
         }, nextSettings);
-
-        try {
-          const nextHooks = nextSettings.hooks && typeof nextSettings.hooks === 'object'
-            ? nextSettings.hooks as any
-            : {};
-          _hookExecutor.replaceShellHooksFromConfig(nextHooks, 'settings_json');
-        } catch {
-          _hookExecutor.replaceShellHooksFromConfig({}, 'settings_json');
-        }
 
         await hookExecutor.execute('ConfigChange', {
           hook_event_name: 'ConfigChange',
@@ -1098,18 +1079,6 @@ async function main(): Promise<void> {
     });
   } catch {
     // SessionEnd hooks are non-fatal.
-  }
-}
-
-function safeReadHookConfig(filePath: string): Record<string, unknown[]> | undefined {
-  try {
-    const raw = JSON.parse(readFileSync(filePath, 'utf-8'));
-    if (!raw || typeof raw !== 'object') {
-      return undefined;
-    }
-    return raw as Record<string, unknown[]>;
-  } catch {
-    return undefined;
   }
 }
 

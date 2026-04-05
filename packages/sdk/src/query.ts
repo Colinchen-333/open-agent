@@ -1606,7 +1606,7 @@ export function query(
     pluginRuntime.hookConfig,
     options.hooks,
   );
-  const buildPromptHookSurface = (): RuntimeHookSummary[] => buildRuntimeHookSurfaceSummary(
+  const buildPromptHookSurface = (): RuntimeHookSummary[] => hookExecutor?.getHookSurface() ?? buildRuntimeHookSurfaceSummary(
     pluginRuntime.hooks,
     {
       source: 'settings_json',

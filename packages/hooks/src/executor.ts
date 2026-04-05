@@ -84,6 +84,35 @@ export class HookExecutor {
     this.loadFromConfig(config, sourceId);
   }
 
+  getHookSurface(): Array<{ event: HookEvent; count: number; sources: string[] }> {
+    const events = new Set<HookEvent>([
+      ...this.shellHooks.keys(),
+      ...this.callbackHooks.keys(),
+    ]);
+
+    return [...events]
+      .sort((a, b) => a.localeCompare(b))
+      .map((event) => {
+        const shellHooks = this.shellHooks.get(event) ?? [];
+        const callbackHooks = this.callbackHooks.get(event) ?? [];
+        const callbackCount = callbackHooks.reduce((sum, matcher) => sum + matcher.hooks.length, 0);
+        const sources = new Set<string>();
+
+        for (const entry of shellHooks) {
+          sources.add(entry.sourceId ?? 'shell');
+        }
+        if (callbackCount > 0) {
+          sources.add('callback');
+        }
+
+        return {
+          event,
+          count: shellHooks.length + callbackCount,
+          sources: [...sources].sort(),
+        };
+      });
+  }
+
   // -------------------------------------------------------------------------
   // Execution
   // -------------------------------------------------------------------------
