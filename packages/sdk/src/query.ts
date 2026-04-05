@@ -1670,11 +1670,16 @@ export function query(
   const replaceConfiguredHooks = (): void => {
     const settingsHooks = loadedSettings?.hooks as Partial<Record<HookEvent, any[]>> | undefined;
     const queryOptionHooks = options.hooks;
+    // Agent-scoped hooks are merged for the lifetime of the query.
+    const agentHooks = (selectedAgent?.hooks && typeof selectedAgent.hooks === 'object' && !Array.isArray(selectedAgent.hooks))
+      ? selectedAgent.hooks as Partial<Record<HookEvent, any[]>>
+      : undefined;
     const hasSettingsHooks = Boolean(settingsHooks && Object.keys(settingsHooks).length > 0);
     const hasPluginHooks = Object.keys(pluginRuntime.hookConfig).length > 0;
     const hasQueryOptionHooks = Boolean(queryOptionHooks && Object.keys(queryOptionHooks).length > 0);
+    const hasAgentHooks = Boolean(agentHooks && Object.keys(agentHooks).length > 0);
 
-    if (!hasSettingsHooks && !hasPluginHooks && !hasQueryOptionHooks) {
+    if (!hasSettingsHooks && !hasPluginHooks && !hasQueryOptionHooks && !hasAgentHooks) {
       hookExecutor = undefined;
       return;
     }
@@ -1688,6 +1693,10 @@ export function query(
     }
     if (hasQueryOptionHooks) {
       nextHookExecutor.loadFromConfig(queryOptionHooks!, 'query_options');
+    }
+    if (hasAgentHooks) {
+      // Agent-scoped hooks are layered on top of all other hook sources.
+      nextHookExecutor.loadFromConfig(agentHooks!, 'agent_definition');
     }
     hookExecutor = nextHookExecutor;
   };
@@ -1758,6 +1767,20 @@ export function query(
     mcpReadyPromise = runtime.waitForMcpReady();
   }
 
+  // Validate requiredMcpServers declared by the selected agent.
+  // Fail fast before the first LLM call so callers get a clear error.
+  if (selectedAgent?.requiredMcpServers && selectedAgent.requiredMcpServers.length > 0) {
+    const availableMcpServerNames = new Set(Object.keys(configuredMcpServers));
+    const missingServers = selectedAgent.requiredMcpServers.filter(
+      (s) => !availableMcpServerNames.has(s),
+    );
+    if (missingServers.length > 0) {
+      throw new Error(
+        `Agent '${options.agent}' requires MCP servers that are not configured: ${missingServers.join(', ')}`,
+      );
+    }
+  }
+
   // (env and debug overrides already applied above, before provider resolution)
 
   // ------------------------------------------------------------------
@@ -1778,7 +1801,9 @@ export function query(
   // ------------------------------------------------------------------
   // Permission engine — wire from QueryOptions
   // ------------------------------------------------------------------
-  const requestedPermissionMode = options.permissionMode ?? selectedAgent?.mode ?? 'default';
+  // selectedAgent?.permissionMode (R5.5 parity field) takes precedence over
+  // selectedAgent?.mode (legacy alias).  options.permissionMode always wins.
+  const requestedPermissionMode = options.permissionMode ?? selectedAgent?.permissionMode ?? selectedAgent?.mode ?? 'default';
   if (
     requestedPermissionMode === 'bypassPermissions' &&
     options.allowDangerouslySkipPermissions !== true
@@ -2101,17 +2126,51 @@ export function query(
   // System prompt
   // ------------------------------------------------------------------
   const sources = new Set(settingSources);
+
+  // When the selected agent sets omitClaudeMd:true, suppress CLAUDE.md /
+  // AGENT.md injection and the project-memory block for this session.
+  const agentOmitsClaudeMd = selectedAgent?.omitClaudeMd === true;
+
   const loadCurrentPromptContext = () => loadPromptContext({
     cwd,
     includeGit: isGitRepo,
-    includeMemory: sources.has('project'),
-    includeAgentInstructions: sources.size > 0,
+    // omitClaudeMd suppresses both the memory dir and agent-instruction blocks.
+    includeMemory: agentOmitsClaudeMd ? false : sources.has('project'),
+    includeAgentInstructions: agentOmitsClaudeMd ? false : sources.size > 0,
     instructionSources: [
       ...(sources.has('user') ? ['user' as const] : []),
       ...(sources.has('project') ? ['project' as const] : []),
     ],
     additionalDirectories: options.additionalDirectories,
   });
+
+  // Resolve per-agent memory content once (synchronously).
+  // The memory field can be: a file path (absolute or ~/…) or inline markdown.
+  const resolveAgentMemoryContent = (): string | undefined => {
+    const raw = selectedAgent?.memory;
+    if (!raw) return undefined;
+    const isFilePath = raw.startsWith('/') || raw.startsWith('~');
+    if (isFilePath) {
+      try {
+        const resolved = raw.startsWith('~') ? raw.replace('~', homedir()) : raw;
+        return readFileSync(resolved, 'utf-8');
+      } catch {
+        // Memory file missing — continue without agent memory.
+        return undefined;
+      }
+    }
+    return raw; // inline content
+  };
+  const agentMemoryContent = resolveAgentMemoryContent();
+
+  // Warn when the selected agent prefers background dispatch but is being
+  // executed in the foreground (the caller owns the stream either way).
+  if (selectedAgent?.background === true) {
+    console.warn(
+      `[open-agent/sdk] Agent '${options.agent}' declares background:true — ` +
+      `it is running in the foreground because the caller did not use a background dispatch path.`,
+    );
+  }
 
   let activeModel = model;
   let sessionLifecycleStatus: SessionStateSnapshot['status'] = 'idle';
@@ -2170,6 +2229,12 @@ export function query(
 
     if (selectedAgent?.prompt) {
       nextPrompt += '\n\n' + selectedAgent.prompt;
+    }
+
+    // Inject per-agent memory as an additional context block immediately after
+    // the agent's own prompt instruction so the model sees it as persistent context.
+    if (agentMemoryContent) {
+      nextPrompt += '\n\n<agent-memory>\n' + agentMemoryContent + '\n</agent-memory>';
     }
 
     if (presetSystemPrompt?.type === 'preset' && presetSystemPrompt.append) {
