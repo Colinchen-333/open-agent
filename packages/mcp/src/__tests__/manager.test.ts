@@ -1,6 +1,7 @@
 import { describe, expect, it, mock, spyOn, test } from 'bun:test';
 import { McpManager } from '../manager';
 import type { ResourceNotificationEvent } from '../manager';
+import { McpServerState } from '../server-state';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -182,5 +183,92 @@ describe('McpManager resource subscriptions', () => {
 
     // The good handler should still have fired despite the first one throwing
     expect(goodEvents).toHaveLength(1);
+  });
+});
+
+// ── Per-server disable / enable / policy tests ────────────────────────────────
+
+/** Shared SDK server config for disable/enable tests. */
+const sdkConfig = (name: string) =>
+  ({ type: 'sdk', name, instance: { tools: [] } } as any);
+
+describe('McpManager per-server disable/enable', () => {
+  it('disableServer then addServer records status=disabled, no client created', async () => {
+    const manager = new McpManager();
+    manager.disableServer('foo');
+
+    const conn = await manager.addServer('foo', sdkConfig('foo'));
+
+    expect(conn.status).toBe('disabled');
+    expect(conn.enabled).toBe(false);
+    // No tools loaded for a disabled server
+    expect(conn.tools).toHaveLength(0);
+    // getStatus should reflect the disabled record
+    const found = manager.getStatus().find((s) => s.name === 'foo');
+    expect(found?.status).toBe('disabled');
+    // isServerDisabled should agree
+    expect(manager.isServerDisabled('foo')).toBe(true);
+  });
+
+  it('enableServer then addServer connects normally', async () => {
+    const manager = new McpManager();
+    manager.disableServer('bar');
+    manager.enableServer('bar');
+
+    const conn = await manager.addServer('bar', sdkConfig('bar'));
+
+    expect(conn.status).toBe('connected');
+    expect(conn.enabled).toBe(true);
+    expect(manager.isServerDisabled('bar')).toBe(false);
+  });
+
+  it('setServers respects disabled state: disabled server stays disabled', async () => {
+    const manager = new McpManager();
+    manager.disableServer('baz');
+
+    await manager.setServers({ baz: sdkConfig('baz') });
+
+    const conn = manager.getStatus().find((s) => s.name === 'baz');
+    expect(conn?.status).toBe('disabled');
+  });
+
+  it('getServerState returns the underlying McpServerState', () => {
+    const manager = new McpManager();
+    const state = manager.getServerState();
+    expect(state).toBeInstanceOf(McpServerState);
+  });
+});
+
+describe('McpManager policy-blocked servers', () => {
+  it('constructor policyBlockedServers prevents server from starting', async () => {
+    const manager = new McpManager({ policyBlockedServers: ['bar'] });
+
+    const conn = await manager.addServer('bar', sdkConfig('bar'));
+
+    expect(conn.status).toBe('disabled');
+    expect(conn.error).toMatch(/policy/i);
+    expect(manager.isServerDisabled('bar')).toBe(true);
+    expect(manager.getServerState().disabledReason('bar')).toBe('policy');
+  });
+
+  it('policy block cannot be lifted by enableServer', async () => {
+    const manager = new McpManager({ policyBlockedServers: ['locked'] });
+    // User attempt to enable
+    manager.enableServer('locked');
+
+    const conn = await manager.addServer('locked', sdkConfig('locked'));
+
+    expect(conn.status).toBe('disabled');
+    expect(manager.isServerDisabled('locked')).toBe(true);
+  });
+
+  it('non-blocked servers still connect normally when some are policy-blocked', async () => {
+    const manager = new McpManager({ policyBlockedServers: ['blocked'] });
+
+    const connBlocked = await manager.addServer('blocked', sdkConfig('blocked'));
+    const connFree = await manager.addServer('free', sdkConfig('free'));
+
+    expect(connBlocked.status).toBe('disabled');
+    expect(connFree.status).toBe('connected');
   });
 });

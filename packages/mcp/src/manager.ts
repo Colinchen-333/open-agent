@@ -14,6 +14,7 @@ import { McpHttpClient } from './http-transport';
 import { McpSseClient } from './sse-transport';
 import type { McpServerConnection, McpToolInfo, McpResourceInfo } from './types';
 import { normalizeMcpToolInfo } from './tool-info';
+import { McpServerState } from './server-state';
 
 function isAuthError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -88,6 +89,11 @@ interface ResourceSubscription {
   callback: (event: ResourceNotificationEvent) => void;
 }
 
+export interface McpManagerOptions {
+  /** Server names that are blocked by enterprise policy. Cannot be overridden by users. */
+  policyBlockedServers?: string[];
+}
+
 export class McpManager {
   private connections: Map<string, McpServerConnection> = new Map();
   private clients: Map<string, AnyMcpClient> = new Map();
@@ -96,6 +102,16 @@ export class McpManager {
   private _setupChain: Promise<void> = Promise.resolve();
   /** Active resource subscriptions. Key: `${serverName}:${uri}` */
   private _subscriptions: Map<string, ResourceSubscription> = new Map();
+  /** Per-server enable/disable state, survives reconnections. */
+  private serverState = new McpServerState();
+
+  constructor(options?: McpManagerOptions) {
+    if (options?.policyBlockedServers) {
+      for (const name of options.policyBlockedServers) {
+        this.serverState.policyBlock(name);
+      }
+    }
+  }
 
   // ── Server lifecycle ──────────────────────────────────────────────────────
 
@@ -104,6 +120,23 @@ export class McpManager {
    * Returns the resulting connection record.
    */
   async addServer(name: string, config: McpServerConfig): Promise<McpServerConnection> {
+    // Check per-server disable state before attempting any connection.
+    if (this.serverState.isDisabled(name)) {
+      const reason = this.serverState.disabledReason(name);
+      const connection: McpServerConnection = {
+        name,
+        config,
+        status: 'disabled',
+        tools: [],
+        enabled: false,
+        error: reason === 'policy'
+          ? 'Server is blocked by enterprise policy'
+          : 'Server has been disabled by the user',
+      };
+      this.connections.set(name, connection);
+      return connection;
+    }
+
     const connection: McpServerConnection = {
       name,
       config,
@@ -295,6 +328,35 @@ export class McpManager {
   /** Alias for `toggle` — matches Claude Code's API */
   async toggleServer(name: string, enabled: boolean): Promise<void> {
     return this.toggle(name, enabled);
+  }
+
+  // ── Per-server state (disable/enable/policy) ──────────────────────────────
+
+  /**
+   * Disable a server. If it is currently connected, the next call to
+   * `addServer` or `setServers` will skip connecting it and record it as
+   * 'disabled' instead.
+   */
+  disableServer(serverName: string): void {
+    this.serverState.disable(serverName);
+  }
+
+  /**
+   * Re-enable a user-disabled server. Policy blocks cannot be lifted by this
+   * method — call `getServerState().policyUnblock()` for that.
+   */
+  enableServer(serverName: string): void {
+    this.serverState.enable(serverName);
+  }
+
+  /** Returns true when the server is blocked (by user or policy). */
+  isServerDisabled(serverName: string): boolean {
+    return this.serverState.isDisabled(serverName);
+  }
+
+  /** Expose the underlying state object for snapshot / restore / UI. */
+  getServerState(): McpServerState {
+    return this.serverState;
   }
 
   /**

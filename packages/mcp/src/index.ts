@@ -7,7 +7,8 @@ export { McpStdioClient } from './stdio-transport';
 export { McpHttpClient } from './http-transport';
 export { McpSseClient } from './sse-transport';
 export { McpManager } from './manager';
-export type { ResourceNotificationEvent } from './manager';
+export type { ResourceNotificationEvent, McpManagerOptions } from './manager';
+export { McpServerState } from './server-state';
 export { parseMcpToolName, buildMcpToolName, isMcpToolName } from './normalization';
 export {
   parseMcpResourceRef,
