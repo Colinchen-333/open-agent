@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, test } from 'bun:test';
+import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { AgentExecutor } from '../agent-executor.js';
 import type { AgentDefinition } from '@open-agent/core';
 
@@ -498,6 +500,68 @@ describe('AgentExecutor', () => {
       expect(session.totalToolUseCount).toBeUndefined();
       expect(session.totalTokens).toBeUndefined();
       expect(session.usage).toBeUndefined();
+    });
+  });
+
+  describe('executeForked()', () => {
+    let tmpRoot: string;
+
+    beforeEach(() => {
+      tmpRoot = mkdtempSync(`${tmpdir()}/oa-fork-`);
+    });
+
+    afterEach(() => {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    });
+
+    test('persists messages to sidechain and does not mutate parent messages', async () => {
+      const parentMessages: unknown[] = [{ type: 'user', text: 'pre-fork' }];
+
+      const { agentId } = await executor.executeForked({
+        definition: mockDefinition,
+        provider: mockProvider as any,
+        tools: mockTools,
+        prompt: 'do a tiny thing',
+        cwd: '/tmp',
+        parentMessages,
+        root: tmpRoot,
+      });
+
+      // Parent messages must be untouched — fork isolation guarantee
+      expect(parentMessages).toHaveLength(1);
+      expect(parentMessages[0]).toEqual({ type: 'user', text: 'pre-fork' });
+
+      // Sidechain file must exist (fork_start record written at minimum)
+      const sidechainFile = `${tmpRoot}/sidechain/${agentId}/messages.jsonl`;
+      expect(existsSync(sidechainFile)).toBe(true);
+    });
+
+    test('returns agentId starting with "fork-"', async () => {
+      const { agentId } = await executor.executeForked({
+        definition: mockDefinition,
+        provider: mockProvider as any,
+        tools: mockTools,
+        prompt: 'fork id test',
+        cwd: '/tmp',
+        parentMessages: [],
+        root: tmpRoot,
+      });
+
+      expect(agentId.startsWith('fork-')).toBe(true);
+    });
+
+    test('outputFile matches sidechainPath for the returned agentId', async () => {
+      const { agentId, outputFile } = await executor.executeForked({
+        definition: mockDefinition,
+        provider: mockProvider as any,
+        tools: mockTools,
+        prompt: 'path check',
+        cwd: '/tmp',
+        parentMessages: [],
+        root: tmpRoot,
+      });
+
+      expect(outputFile).toBe(`${tmpRoot}/sidechain/${agentId}/messages.jsonl`);
     });
   });
 

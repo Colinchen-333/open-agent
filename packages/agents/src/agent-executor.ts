@@ -9,6 +9,8 @@ import type { ToolDefinition } from '@open-agent/tools';
 import type { SubagentStreamEvent } from './agent-runner.js';
 import { TeamManager } from './team-manager.js';
 import type { AgentRunner } from './agent-runner.js';
+import { SidechainWriter, sidechainPath } from './sidechain.js';
+import { createForkContext } from './fork-context.js';
 
 export type AgentState = 'spawning' | 'running' | 'idle' | 'completed' | 'failed' | 'shutdown';
 
@@ -62,6 +64,19 @@ export interface ExecuteOptions {
   onEvent?: (event: SubagentStreamEvent) => void;
   /** Optional abort signal for foreground runs. */
   abortSignal?: AbortSignal;
+}
+
+/**
+ * Additional options required for fork-mode execution.
+ * `parentMessages` is the parent's current message history — it will be
+ * snapshotted via `createForkContext` and must NOT be mutated.
+ * `root` is the directory under which the sidechain file is written:
+ *   <root>/sidechain/<agentId>/messages.jsonl
+ */
+export interface ExecuteForkedOptions extends ExecuteOptions {
+  parentMessages: unknown[];
+  root: string;
+  permissionMode?: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions' | 'dontAsk';
 }
 
 /**
@@ -131,6 +146,87 @@ export class AgentExecutor {
     }
     const { AgentRunner } = await import('./agent-runner.js');
     return AgentRunner;
+  }
+
+  /**
+   * Execute an agent in fork mode.
+   *
+   * Fork mode:
+   * - Snapshots the parent's permission/tool context so no parent mutations
+   *   after this call affect the forked session.
+   * - Persists every message the forked runner emits to a sidechain JSONL file
+   *   at `<root>/sidechain/<agentId>/messages.jsonl`.
+   * - Does NOT mutate `options.parentMessages` — callers can verify this
+   *   invariant after the call returns.
+   *
+   * Returns the forked agent ID and the path to the sidechain file.
+   */
+  async executeForked(
+    options: ExecuteForkedOptions,
+  ): Promise<{ agentId: string; outputFile: string }> {
+    const agentId = options.resume ?? `fork-${randomUUID()}`;
+    const scPath = sidechainPath(options.root, agentId);
+    const writer = new SidechainWriter(scPath);
+
+    // Snapshot parent context — parent mutations after this point are isolated.
+    const forkCtx = createForkContext({
+      permissionMode: options.permissionMode ?? 'default',
+      allowedTools: new Set<string>(options.tools.keys()),
+      messages: options.parentMessages,
+      agentType: options.agentType,
+    });
+
+    // Record fork start into sidechain
+    await writer.append({
+      type: 'fork_start',
+      agentId,
+      agentType: forkCtx.agentType,
+      parentSnapshotSize: forkCtx.messages.length,
+    });
+
+    // Wire sidechain writer into the runner's onMessage callback so every
+    // message (user/assistant/tool_result) is streamed to the sidechain file
+    // in addition to the regular session transcript.
+    const upstreamOnMessage = options.onEvent;
+    const forkedOptions: ExecuteOptions = {
+      ...options,
+      resume: agentId,
+      // Intercept onMessage via onEvent wrapper — we attach via the runner path below
+      onEvent: upstreamOnMessage,
+    };
+
+    // Patch onMessage by extending the runner factory indirectly: wrap the
+    // AgentRunner so its onMessage callback also writes to the sidechain.
+    const originalRunnerFactory = this.runnerFactory;
+    const AgentRunnerClass = await this.loadAgentRunnerFactory();
+
+    // Create a temporary wrapped factory for this single executeForked call.
+    const wrappedFactory = class WrappedForkedRunner {
+      private inner: InstanceType<typeof AgentRunnerClass>;
+      constructor(opts: ConstructorParameters<typeof AgentRunnerClass>[0]) {
+        const origOnMessage = opts.onMessage;
+        this.inner = new AgentRunnerClass({
+          ...opts,
+          onMessage: (msg: unknown) => {
+            origOnMessage?.(msg);
+            // Fire-and-forget write to sidechain (non-blocking)
+            writer.append(msg).catch(() => { /* non-fatal */ });
+          },
+        });
+      }
+      run(prompt: string) { return this.inner.run(prompt); }
+      getAgentId() { return this.inner.getAgentId(); }
+    } as unknown as AgentRunnerConstructor;
+
+    // Temporarily swap in the wrapped factory for this call
+    (this as any).runnerFactory = wrappedFactory;
+    try {
+      const { agentId: resolvedId } = await this.execute(forkedOptions);
+      return { agentId: resolvedId, outputFile: scPath };
+    } finally {
+      // Restore original factory (undefined or user-supplied)
+      (this as any).runnerFactory = originalRunnerFactory;
+    }
   }
 
   /**
