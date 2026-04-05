@@ -1,10 +1,11 @@
-import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { createBashTool } from '../bash.js';
 import { createTaskOutputTool } from '../task-management.js';
 import { BASH_SANDBOX_POLICY_FIELD, buildBashSandboxPolicy } from '../../../permissions/src/sandbox-adapter.js';
+import { closeBashPty } from '../bash-pty.js';
 
 describe('Bash tool', () => {
   let tmpDir: string;
@@ -271,6 +272,24 @@ describe('Bash tool', () => {
       }),
     }));
   });
+
+  // ---------------------------------------------------------------------------
+  // Persistent PTY — cwd and state across invocations
+  // ---------------------------------------------------------------------------
+
+  it('Bash tool preserves cwd across invocations in same session', async () => {
+    const sessionId = 'persist-test-pty-1';
+    // Clean up any residual PTY session from a previous run
+    afterEach(() => closeBashPty(sessionId));
+
+    const persistDir = join(tmpDir, 'oa-persist-pty');
+    mkdirSync(persistDir, { recursive: true });
+
+    const ctx = { cwd: '/tmp', sessionId };
+    await tool.execute({ command: `cd "${persistDir}"` }, ctx as any);
+    const r = await tool.execute({ command: 'pwd' }, ctx as any);
+    expect(r).toContain(persistDir);
+  }, 15_000);
 
   it('blocks denyRead targets at preflight and records read-path provenance', async () => {
     const ctx = makeStatefulCtx();

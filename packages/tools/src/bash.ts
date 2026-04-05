@@ -3,6 +3,7 @@ import { closeSync, existsSync, openSync, readFileSync } from 'fs';
 import { spawn } from 'child_process';
 import { resolve, sep } from 'path';
 import type { ToolDefinition, ToolContext, BashInput } from './types.js';
+import { getOrCreateBashPty } from './bash-pty.js';
 import { getBackgroundTasks } from './task-management.js';
 import {
   getBackgroundTask,
@@ -132,6 +133,73 @@ export function createBashTool(): ToolDefinition {
         throw error;
       }
       const sandboxEnv = buildSandboxEnv(sandboxPolicy);
+
+      // -------------------------------------------------------------------
+      // Persistent PTY path: for ordinary foreground commands that have no
+      // sandbox policy and are not run in the background, use a persistent
+      // node-pty shell so that cwd, env variables, shell functions, and
+      // aliases survive across consecutive Bash tool calls within the same
+      // agent session.
+      // -------------------------------------------------------------------
+      const usePersistentPty =
+        input.run_in_background !== true &&
+        !sandboxPolicy?.enforce &&
+        ctx.sessionId;
+
+      if (usePersistentPty) {
+        const ptySession = getOrCreateBashPty(ctx.sessionId, { cwd: effectiveCwd });
+
+        const sandboxExecutionStartedPty = buildSandboxExecutionRecord({
+          ctx,
+          command: input.command,
+          cwd: effectiveCwd,
+          runInBackground: false,
+          policy: sandboxPolicy,
+          outcome: 'started',
+          wrappedWithSandboxExec: false,
+          findings: collectSandboxFindings(sandboxPolicy),
+        });
+        appendSandboxExecutionDiagnostic(ctx, sandboxExecutionStartedPty);
+
+        let ptyResult: { stdout: string; exitCode: number | null };
+        let ptyOutcome: 'success' | 'failed' | 'timed_out';
+        let ptyKilled = false;
+
+        try {
+          ptyResult = await ptySession.exec(input.command, { timeout });
+          ptyOutcome = ptyResult.exitCode === 0 ? 'success' : 'failed';
+        } catch (err: unknown) {
+          const isTimeout = err instanceof Error && /timeout/i.test(err.message);
+          if (isTimeout) {
+            ptyKilled = true;
+            ptyResult = { stdout: '', exitCode: null };
+            ptyOutcome = 'timed_out';
+          } else {
+            throw err;
+          }
+        }
+
+        const ptyOutput = ptyResult.stdout ? truncate(ptyResult.stdout) : '(no output)';
+        const ptyExitInfo = (ptyResult.exitCode !== null && ptyResult.exitCode !== 0)
+          ? `\n(exit code: ${ptyResult.exitCode})` : '';
+        const ptyInterrupted = ptyKilled ? '\n(command timed out and was killed)' : '';
+
+        const sandboxExecutionDonePty = buildSandboxExecutionRecord({
+          ctx,
+          command: input.command,
+          cwd: effectiveCwd,
+          runInBackground: false,
+          policy: sandboxPolicy,
+          outcome: ptyOutcome,
+          wrappedWithSandboxExec: false,
+          exitCode: ptyResult.exitCode,
+          outputLength: ptyOutput.length,
+          findings: collectSandboxFindings(sandboxPolicy),
+        });
+        appendSandboxExecutionDiagnostic(ctx, sandboxExecutionDonePty);
+
+        return ptyOutput + ptyExitInfo + ptyInterrupted;
+      }
 
       // Use a UUID-based sentinel to avoid collisions with command output
       const CWD_SENTINEL = `___CWD_${randomUUID()}___`;

@@ -13,6 +13,9 @@
  *   { "type": "ready" }
  *   { "type": "result", "id": <number>, "stdout": <string>, "exitCode": <number|null> }
  *   { "type": "error",  "id": <number>, "message": <string> }
+ *
+ * When bash exits (e.g. due to `set -e`), the in-flight execCommand synthesises
+ * a result using the shell exit code and then exits the worker process.
  */
 
 'use strict';
@@ -54,8 +57,24 @@ shell.onData((chunk) => {
   buffer += chunk;
 });
 
-shell.onExit(() => {
-  process.exit(0);
+// Shell exit state — shared between the onExit callback and execCommand.
+let shellExitCode = null;
+let shellExited = false;
+
+// Callback invoked by execCommand when it completes while shellExited is true.
+// The exec function sets this so onExit can chain to it.
+let onExecDone = null;
+
+shell.onExit(({ exitCode }) => {
+  shellExited = true;
+  shellExitCode = typeof exitCode === 'number' ? exitCode : null;
+  // If there is an active exec, let it handle the exit.
+  // Otherwise, exit the worker process directly.
+  if (!onExecDone) {
+    setTimeout(() => process.exit(0), 50);
+  }
+  // Safety net — if the exec never finishes, still exit eventually.
+  setTimeout(() => process.exit(0), 2000);
 });
 
 // ---------------------------------------------------------------------------
@@ -90,6 +109,38 @@ function sendError(id, message) {
   process.stdout.write(JSON.stringify({ type: 'error', id, message }) + '\n');
 }
 
+/**
+ * Parse the accumulated PTY buffer to extract actual command output.
+ *
+ * The `beforeMarker` block looks like:
+ *   [echoed user command line(s)]
+ *   [actual stdout output]
+ *   [echoed sentinel write: __ec=$?; printf ...]
+ */
+function parseOutput(text, command, marker) {
+  const lines = text.split('\n');
+
+  // 1. Remove the sentinel echo — the last line containing '__ec=$?' or the marker
+  const sentinelEchoIdx = lines.findLastIndex(
+    (l) => l.includes('__ec=$?') || l.includes(marker)
+  );
+  const trimmedLines = sentinelEchoIdx !== -1
+    ? lines.slice(0, sentinelEchoIdx)
+    : lines;
+
+  // 2. Drop the echoed user command (first non-empty line that starts with the command)
+  const firstToken = command.trimStart().split(/[\s;|&]/)[0] || '';
+  let start = 0;
+  if (firstToken.length > 0 && trimmedLines.length > 0) {
+    const firstNonEmpty = trimmedLines.findIndex((l) => l.trim() !== '');
+    if (firstNonEmpty !== -1 && trimmedLines[firstNonEmpty].includes(firstToken)) {
+      start = firstNonEmpty + 1;
+    }
+  }
+
+  return trimmedLines.slice(start).join('\n').replace(/\n+$/, '');
+}
+
 async function execCommand(id, command, timeout) {
   // Ensure startup has completed
   await startupReady;
@@ -105,24 +156,59 @@ async function execCommand(id, command, timeout) {
 
   const deadline = Date.now() + timeout;
 
-  while (true) {
-    if (Date.now() > deadline) {
-      // Interrupt the running command
-      shell.write('\x03');
-      sendError(id, 'command timeout after ' + timeout + 'ms');
-      // Drain buffer briefly so the next command starts clean
-      await new Promise((r) => setTimeout(r, 200));
-      buffer = '';
-      return;
-    }
+  return new Promise((resolve) => {
+    // Register as the exec-done callback so onExit knows we're active.
+    onExecDone = () => {
+      onExecDone = null;
+      resolve();
+      // Exit the worker now that the result has been sent.
+      setTimeout(() => process.exit(0), 50);
+    };
 
-    const clean = buffer.replace(ANSI_RE, '');
+    const pollInterval = setInterval(() => {
+      // Timeout check
+      if (Date.now() > deadline) {
+        clearInterval(pollInterval);
+        if (!shellExited) shell.write('\x03');
+        sendError(id, 'command timeout after ' + timeout + 'ms');
+        // Allow a brief drain before proceeding
+        setTimeout(() => {
+          buffer = '';
+          onExecDone = null;
+          resolve();
+        }, 200);
+        return;
+      }
 
-    // The marker appears on its own line in the output (preceded by \n).
-    // This distinguishes the actual output from the PTY echo of the input.
-    const nlMarker = '\n' + marker;
-    const idx = clean.indexOf(nlMarker);
-    if (idx !== -1) {
+      // Shell exited while we were waiting — synthesise a result.
+      if (shellExited) {
+        clearInterval(pollInterval);
+        // Brief grace period for any last data
+        setTimeout(() => {
+          const clean = buffer.replace(ANSI_RE, '');
+          const stdout = parseOutput(clean, command, marker);
+          // Send the result first, then signal that the shell is done.
+          // The parent will mark the worker dead upon receiving shell-exited.
+          sendResult(id, stdout, shellExitCode);
+          process.stdout.write(JSON.stringify({ type: 'shell-exited' }) + '\n');
+          if (onExecDone) onExecDone = null;
+          resolve();
+          // Give the parent time to process stdout data before we exit.
+          // This is important because Bun processes child stdout asynchronously.
+          setTimeout(() => process.exit(0), 100);
+        }, 50);
+        return;
+      }
+
+      const clean = buffer.replace(ANSI_RE, '');
+
+      // The marker appears on its own line in the output (preceded by \n).
+      const nlMarker = '\n' + marker;
+      const idx = clean.indexOf(nlMarker);
+      if (idx === -1) return; // not done yet
+
+      clearInterval(pollInterval);
+
       const beforeMarker = clean.slice(0, idx);
       const afterMarker = clean.slice(idx + nlMarker.length);
 
@@ -130,43 +216,12 @@ async function execCommand(id, command, timeout) {
       const exitStr = afterMarker.split('\n')[0].trim();
       const exitCode = exitStr !== '' && /^\d+$/.test(exitStr) ? parseInt(exitStr, 10) : null;
 
-      // Parse the actual output.
-      //
-      // The `beforeMarker` block looks like:
-      //   [echoed user command line(s)]
-      //   [actual stdout output]
-      //   [echoed sentinel write: __ec=$?; printf ...]
-      //
-      // So we:
-      //   1. Drop the sentinel echo line from the end (it contains __ec=$?)
-      //   2. Drop the echoed user command from the beginning
-      const lines = beforeMarker.split('\n');
-
-      // 1. Remove the sentinel echo — the last line containing '__ec=$?'
-      const sentinelEchoIdx = lines.findLastIndex(
-        (l) => l.includes('__ec=$?') || l.includes(marker)
-      );
-      const trimmedLines = sentinelEchoIdx !== -1
-        ? lines.slice(0, sentinelEchoIdx)
-        : lines;
-
-      // 2. Drop the echoed user command (first non-empty line matching command start)
-      const firstToken = command.trimStart().split(/[\s;|&]/)[0] || '';
-      let start = 0;
-      if (firstToken.length > 0 && trimmedLines.length > 0) {
-        const firstNonEmpty = trimmedLines.findIndex((l) => l.trim() !== '');
-        if (firstNonEmpty !== -1 && trimmedLines[firstNonEmpty].includes(firstToken)) {
-          start = firstNonEmpty + 1;
-        }
-      }
-
-      const stdout = trimmedLines.slice(start).join('\n').replace(/\n+$/, '');
+      const stdout = parseOutput(beforeMarker, command, marker);
       sendResult(id, stdout, exitCode);
-      return;
-    }
-
-    await new Promise((r) => setTimeout(r, 10));
-  }
+      onExecDone = null;
+      resolve();
+    }, 10);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +231,9 @@ async function execCommand(id, command, timeout) {
 const rl = readline.createInterface({ input: process.stdin });
 
 rl.on('line', (line) => {
+  // Don't accept new commands after the shell has exited.
+  if (shellExited) return;
+
   let msg;
   try {
     msg = JSON.parse(line);

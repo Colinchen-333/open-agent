@@ -15,6 +15,11 @@
  *   { "type": "ready" }
  *   { "type": "result", "id": N, "stdout": "…", "exitCode": N | null }
  *   { "type": "error",  "id": N, "message": "…" }
+ *
+ * If the underlying bash shell exits (e.g. because a command called `exit` or
+ * `set -e` caused it to abort), the worker process also exits.  In that case
+ * BashPtySession transparently spawns a new worker on the next exec() call so
+ * the session remains usable (starting from a fresh shell in the original cwd).
  */
 
 import { spawn } from 'child_process';
@@ -62,7 +67,7 @@ try {
 const WORKER_PATH = resolve(_workerPath);
 
 // ---------------------------------------------------------------------------
-// BashPtySession
+// Internal worker wrapper (one per BashPtySession)
 // ---------------------------------------------------------------------------
 
 interface PendingExec {
@@ -74,11 +79,11 @@ interface PendingExec {
 
 let _globalSeq = 0;
 
-export class BashPtySession {
-  private readonly worker: ReturnType<typeof spawn>;
-  private readonly pending = new Map<number, PendingExec>();
-  private readonly readyPromise: Promise<void>;
-  private closed = false;
+class PtyWorker {
+  readonly process: ReturnType<typeof spawn>;
+  readonly pending = new Map<number, PendingExec>();
+  readonly readyPromise: Promise<void>;
+  dead = false;
 
   constructor(opts: BashPtyOptions) {
     const env: Record<string, string> = {
@@ -89,38 +94,40 @@ export class BashPtySession {
       PTY_ENV: JSON.stringify(opts.env ?? {}),
     };
 
-    this.worker = spawn('node', [WORKER_PATH], {
+    this.process = spawn('node', [WORKER_PATH], {
       stdio: ['pipe', 'pipe', 'inherit'],
       env,
     });
 
-    // Set up readline interface for incoming messages
-    const rl = createInterface({ input: this.worker.stdout! });
+    const rl = createInterface({ input: this.process.stdout! });
     rl.on('line', (line) => this._handleLine(line));
 
-    this.worker.on('exit', () => {
-      // Reject all pending commands
-      for (const pending of this.pending.values()) {
-        clearTimeout(pending.timeoutHandle);
-        pending.reject(new Error('PTY worker exited unexpectedly'));
-      }
-      this.pending.clear();
-      this.closed = true;
+    this.process.on('exit', () => {
+      this.dead = true;
+      // Give the result message a chance to arrive via stdout before rejecting.
+      // The worker sends the result message just before exiting, and Node/Bun
+      // may deliver the exit event before the final stdout data is processed.
+      setTimeout(() => {
+        for (const p of this.pending.values()) {
+          clearTimeout(p.timeoutHandle);
+          p.reject(new Error('PTY shell exited unexpectedly'));
+        }
+        this.pending.clear();
+      }, 800);
     });
 
-    // readyPromise resolves when the worker sends { "type": "ready" }
-    this.readyPromise = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(
-        () => reject(new Error('PTY worker did not send ready within 5s')),
+    this.readyPromise = new Promise<void>((res, rej) => {
+      const t = setTimeout(
+        () => rej(new Error('PTY worker did not send ready within 5s')),
         5000,
       );
       const handler = (line: string) => {
         let msg: { type?: string };
         try { msg = JSON.parse(line); } catch { return; }
         if (msg.type === 'ready') {
-          clearTimeout(timeout);
+          clearTimeout(t);
           rl.off('line', handler);
-          resolve();
+          res();
         }
       };
       rl.on('line', handler);
@@ -128,69 +135,106 @@ export class BashPtySession {
   }
 
   private _handleLine(line: string): void {
-    let msg: { type?: string; id?: number; stdout?: string; exitCode?: number | null; message?: string };
-    try {
-      msg = JSON.parse(line);
-    } catch {
+    let msg: {
+      type?: string;
+      id?: number;
+      stdout?: string;
+      exitCode?: number | null;
+      message?: string;
+    };
+    try { msg = JSON.parse(line); } catch { return; }
+
+    if (msg.type === 'shell-exited') {
+      // The bash shell has exited; mark this worker dead immediately so the
+      // next exec() call creates a fresh worker rather than writing to a dead shell.
+      this.dead = true;
       return;
     }
 
     if (msg.type === 'result' || msg.type === 'error') {
-      const pending = this.pending.get(msg.id!);
-      if (!pending) return;
+      const p = this.pending.get(msg.id!);
+      if (!p) return;
       this.pending.delete(msg.id!);
-      clearTimeout(pending.timeoutHandle);
-
+      clearTimeout(p.timeoutHandle);
       if (msg.type === 'result') {
-        pending.resolve({ stdout: msg.stdout ?? '', exitCode: msg.exitCode ?? null });
+        p.resolve({ stdout: msg.stdout ?? '', exitCode: msg.exitCode ?? null });
       } else {
-        pending.reject(new Error(msg.message ?? 'unknown PTY error'));
+        p.reject(new Error(msg.message ?? 'unknown PTY error'));
       }
     }
+  }
+
+  kill(): void {
+    this.dead = true;
+    try { this.process.stdin!.write(JSON.stringify({ cmd: 'kill' }) + '\n'); } catch { /* ignore */ }
+    this.process.kill();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// BashPtySession — public API
+// ---------------------------------------------------------------------------
+
+export class BashPtySession {
+  private readonly opts: BashPtyOptions;
+  private worker: PtyWorker;
+  private _closed = false;
+
+  constructor(opts: BashPtyOptions) {
+    this.opts = opts;
+    this.worker = new PtyWorker(opts);
   }
 
   /**
    * Execute `command` inside the persistent shell and return its stdout and
    * exit code.  Shell state (cwd, env, functions, aliases) persists across
    * calls.
+   *
+   * If the underlying bash process exited (e.g. due to `exit` or an unhandled
+   * `set -e` failure) a new worker is spawned automatically so the session
+   * remains usable.
    */
   async exec(
     command: string,
     opts: BashPtyExecOptions = {},
   ): Promise<BashPtyResult> {
-    if (this.closed) {
-      throw new Error('BashPtySession is closed');
-    }
+    if (this._closed) throw new Error('BashPtySession is closed');
 
-    await this.readyPromise;
+    // Yield to allow any pending I/O callbacks (like the `shell-exited` readline
+    // line or the process `exit` event) to fire before we check the dead flag.
+    // We use setTimeout(0) rather than setImmediate because the shell-exited
+    // message may arrive in a separate I/O chunk from the result, so setImmediate
+    // alone may not be sufficient.
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    // Auto-restart if the previous shell died.
+    if (this.worker.dead || this.worker.process.exitCode !== null) {
+      this.worker = new PtyWorker(this.opts);
+    }
 
     const timeout = opts.timeout ?? 60_000;
     const id = ++_globalSeq;
+    const worker = this.worker;
+
+    await worker.readyPromise;
 
     return new Promise<BashPtyResult>((resolve, reject) => {
-      // Worker-side timeout is the authoritative one; we add a small safety
-      // margin (500ms) on the Bun side so we get the worker's error message.
+      // Safety timeout on Bun side (worker-side timeout + 500ms margin)
       const safetyTimeout = setTimeout(() => {
-        this.pending.delete(id);
+        worker.pending.delete(id);
         reject(new Error(`command timeout after ${timeout}ms`));
       }, timeout + 500);
 
-      this.pending.set(id, { id, resolve, reject, timeoutHandle: safetyTimeout });
+      worker.pending.set(id, { id, resolve, reject, timeoutHandle: safetyTimeout });
 
-      const msg = JSON.stringify({ cmd: 'exec', id, command, timeout });
-      this.worker.stdin!.write(msg + '\n');
+      worker.process.stdin!.write(JSON.stringify({ cmd: 'exec', id, command, timeout }) + '\n');
     });
   }
 
   /** Terminate the underlying PTY worker process. */
   async close(): Promise<void> {
-    if (this.closed) return;
-    this.closed = true;
-    try {
-      this.worker.stdin!.write(JSON.stringify({ cmd: 'kill' }) + '\n');
-    } catch {
-      // ignore write errors during close
-    }
+    if (this._closed) return;
+    this._closed = true;
     this.worker.kill();
   }
 }
