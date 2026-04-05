@@ -9,6 +9,8 @@ import { basename } from 'path';
 import { SessionManager } from './session-manager.js';
 import { StreamingToolExecutor } from './tool-executor.js';
 import { runCompactPipeline } from './compact/index.js';
+import { fileHistory } from './file-history.js';
+import { feature } from './feature-flags.js';
 
 /**
  * Minimal interface for permission checking — implemented by PermissionEngine
@@ -310,6 +312,20 @@ export class ConversationLoop {
     // Filter out _transient messages so they are not replayed on resume.
     if (options.initialMessages && options.initialMessages.length > 0) {
       this.messages = options.initialMessages.filter(m => !(m as any)._transient);
+    }
+
+    // Wire file-history persistence so snapshots survive process restarts.
+    if (feature('FILE_HISTORY')) {
+      const { cwd, sessionId } = options;
+      // Rehydrate any snapshots previously written to the JSONL transcript.
+      const prior = this.sessionManager.readFileHistorySnapshots(cwd, sessionId);
+      if (prior.length > 0) {
+        fileHistory.hydrate(sessionId, prior);
+      }
+      // Attach adapter so future trackEdit calls append to the transcript.
+      fileHistory.setPersistence(
+        this.sessionManager.createFileHistoryPersistence(cwd, sessionId),
+      );
     }
   }
 

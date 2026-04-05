@@ -365,6 +365,141 @@ describe('SessionManager', () => {
     const ids = sessions.map((s) => s.id);
     expect(ids.indexOf(b.id)).toBeLessThan(ids.indexOf(a.id));
   });
+
+  // ---------------------------------------------------------------------------
+  // appendFileHistorySnapshot / readFileHistorySnapshots
+  // ---------------------------------------------------------------------------
+
+  it('appendFileHistorySnapshot writes a type:file_history_snapshot line to the transcript', () => {
+    const session = sm.createSession(cwd, 'snap-model');
+    const snap: import('../file-history.js').FileSnapshot = {
+      sessionId: session.id,
+      messageUuid: 'turn-snap-1',
+      filePath: '/some/file.ts',
+      prevContent: 'old content',
+      timestamp: 12345,
+    };
+
+    sm.appendFileHistorySnapshot(cwd, session.id, snap);
+
+    const raw = sm.readTranscript(cwd, session.id);
+    expect(raw).toHaveLength(1);
+    const entry = raw[0] as Record<string, unknown>;
+    expect(entry['type']).toBe('file_history_snapshot');
+    expect(entry['sessionId']).toBe(session.id);
+    expect(entry['messageUuid']).toBe('turn-snap-1');
+    expect(entry['filePath']).toBe('/some/file.ts');
+    expect(entry['prevContent']).toBe('old content');
+    expect(entry['timestamp']).toBe(12345);
+  });
+
+  it('readFileHistorySnapshots reads back snapshots written by appendFileHistorySnapshot', () => {
+    const session = sm.createSession(cwd, 'snap-round-trip-model');
+
+    const snap1: import('../file-history.js').FileSnapshot = {
+      sessionId: session.id,
+      messageUuid: 'turn-1',
+      filePath: '/a.ts',
+      prevContent: 'version-a',
+      timestamp: 100,
+    };
+    const snap2: import('../file-history.js').FileSnapshot = {
+      sessionId: session.id,
+      messageUuid: 'turn-2',
+      filePath: '/b.ts',
+      prevContent: null,
+      timestamp: 200,
+    };
+
+    sm.appendFileHistorySnapshot(cwd, session.id, snap1);
+    // Mix in a non-snapshot line to verify filtering works
+    sm.appendToTranscript(cwd, session.id, { type: 'user', message: { role: 'user', content: 'hi' } });
+    sm.appendFileHistorySnapshot(cwd, session.id, snap2);
+
+    const snaps = sm.readFileHistorySnapshots(cwd, session.id);
+    expect(snaps).toHaveLength(2);
+    expect(snaps[0]!.filePath).toBe('/a.ts');
+    expect(snaps[0]!.prevContent).toBe('version-a');
+    expect(snaps[1]!.filePath).toBe('/b.ts');
+    expect(snaps[1]!.prevContent).toBeNull();
+    expect(snaps[1]!.timestamp).toBe(200);
+  });
+
+  it('readFileHistorySnapshots skips malformed snapshot lines gracefully', () => {
+    const session = sm.createSession(cwd, 'snap-malformed-model');
+
+    // Valid snapshot
+    sm.appendFileHistorySnapshot(cwd, session.id, {
+      sessionId: session.id,
+      messageUuid: 'turn-ok',
+      filePath: '/ok.ts',
+      prevContent: 'ok',
+      timestamp: 1,
+    });
+    // Snapshot missing required fields — should be skipped
+    sm.appendToTranscript(cwd, session.id, { type: 'file_history_snapshot', sessionId: session.id });
+    // Snapshot with wrong type on required field
+    sm.appendToTranscript(cwd, session.id, {
+      type: 'file_history_snapshot',
+      sessionId: 123,          // wrong type
+      messageUuid: 'turn-bad',
+      filePath: '/bad.ts',
+    });
+    // Another valid snapshot
+    sm.appendFileHistorySnapshot(cwd, session.id, {
+      sessionId: session.id,
+      messageUuid: 'turn-ok-2',
+      filePath: '/ok2.ts',
+      prevContent: null,
+      timestamp: 2,
+    });
+
+    const snaps = sm.readFileHistorySnapshots(cwd, session.id);
+    expect(snaps).toHaveLength(2);
+    expect(snaps[0]!.messageUuid).toBe('turn-ok');
+    expect(snaps[1]!.messageUuid).toBe('turn-ok-2');
+  });
+
+  it('createFileHistoryPersistence + trackEdit end-to-end: snapshot appears in JSONL and rehydrates', async () => {
+    const { FileHistoryStore } = await import('../file-history.js');
+    const { mkdtempSync: tmpMk, rmSync: tmpRm, writeFileSync: tmpWrite } = await import('fs');
+    const { tmpdir: td } = await import('os');
+    const { join: pjoin } = await import('path');
+
+    const tmpDir = tmpMk(pjoin(td(), 'oa-fh-e2e-'));
+    try {
+      const session = sm.createSession(cwd, 'e2e-model');
+      const store1 = new FileHistoryStore();
+
+      // Wire persistence
+      store1.setPersistence(sm.createFileHistoryPersistence(cwd, session.id));
+
+      // Track a file edit
+      const filePath = pjoin(tmpDir, 'e2e.ts');
+      tmpWrite(filePath, 'original', 'utf-8');
+      await store1.trackEdit(session.id, 'turn-e2e', filePath);
+
+      // Verify the JSONL contains the snapshot line
+      const raw = sm.readTranscript(cwd, session.id);
+      const snapEntry = raw.find((e) => (e as any).type === 'file_history_snapshot');
+      expect(snapEntry).toBeDefined();
+      expect((snapEntry as any).filePath).toBe(filePath);
+      expect((snapEntry as any).prevContent).toBe('original');
+
+      // Rehydrate into a fresh store
+      const store2 = new FileHistoryStore();
+      const prior = sm.readFileHistorySnapshots(cwd, session.id);
+      store2.hydrate(session.id, prior);
+
+      const listed = store2.list(session.id);
+      expect(listed).toHaveLength(1);
+      expect(listed[0]!.filePath).toBe(filePath);
+      expect(listed[0]!.prevContent).toBe('original');
+      expect(listed[0]!.messageUuid).toBe('turn-e2e');
+    } finally {
+      tmpRm(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
 
 test('SessionManager persists transcript as JSONL under projects/<hash>/sessions/', async () => {

@@ -102,4 +102,5 @@ export {
   FileHistoryStore,
   fileHistory,
   type FileSnapshot,
+  type FileHistoryPersistence,
 } from './file-history.js';

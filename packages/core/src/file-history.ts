@@ -8,10 +8,37 @@ export interface FileSnapshot {
   timestamp: number;
 }
 
+/**
+ * Persistence adapter called when a new snapshot is captured.
+ * The implementation is responsible for durable storage (e.g. appending to
+ * the session JSONL transcript).  Wire via `FileHistoryStore.setPersistence`.
+ */
+export interface FileHistoryPersistence {
+  /** Called synchronously after each new snapshot is pushed to the in-memory store. */
+  onSnapshotCreated?: (snap: FileSnapshot) => void | Promise<void>;
+}
+
 const MAX_SNAPSHOTS_PER_SESSION = 100;
 
 export class FileHistoryStore {
   private snapshotsBySession = new Map<string, FileSnapshot[]>();
+  private persistence?: FileHistoryPersistence;
+
+  /**
+   * Wire a persistence adapter.  Called by SessionManager (or ConversationLoop)
+   * during session setup.  Pass `undefined` to remove an existing adapter.
+   */
+  setPersistence(persistence: FileHistoryPersistence | undefined): void {
+    this.persistence = persistence;
+  }
+
+  /**
+   * Rehydrate snapshots from persisted records (e.g. read from session JSONL
+   * on resume).  Does NOT fire the persistence hook to avoid duplicate writes.
+   */
+  hydrate(sessionId: string, snapshots: FileSnapshot[]): void {
+    this.snapshotsBySession.set(sessionId, [...snapshots]);
+  }
 
   /**
    * Capture current file content (if any) as a snapshot, then return.
@@ -56,6 +83,11 @@ export class FileHistoryStore {
     // FIFO eviction
     if (snapList.length > MAX_SNAPSHOTS_PER_SESSION) {
       snapList.splice(0, snapList.length - MAX_SNAPSHOTS_PER_SESSION);
+    }
+
+    // Notify persistence adapter so the snapshot can be durably stored.
+    if (this.persistence?.onSnapshotCreated) {
+      await Promise.resolve(this.persistence.onSnapshotCreated(snap));
     }
   }
 

@@ -268,6 +268,102 @@ describe('FileHistoryStore', () => {
     expect(snaps.length).toBe(1);
     expect(store.list('sess1').length).toBe(1);
   });
+
+  // ---------------------------------------------------------------------------
+  // setPersistence — hook is called on trackEdit
+  // ---------------------------------------------------------------------------
+
+  it('setPersistence: onSnapshotCreated is called when a new snapshot is created', async () => {
+    const filePath = join(tmpDir, 'persist-test.txt');
+    writeFileSync(filePath, 'hello', 'utf-8');
+
+    const captured: FileSnapshot[] = [];
+    store.setPersistence({
+      onSnapshotCreated: (snap) => {
+        captured.push(snap);
+      },
+    });
+
+    await store.trackEdit('sess-p', 'turn-1', filePath);
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.filePath).toBe(filePath);
+    expect(captured[0]!.prevContent).toBe('hello');
+    expect(captured[0]!.sessionId).toBe('sess-p');
+    expect(captured[0]!.messageUuid).toBe('turn-1');
+  });
+
+  it('setPersistence: hook is NOT called when dedup skips the snapshot', async () => {
+    const filePath = join(tmpDir, 'persist-dedup.txt');
+    writeFileSync(filePath, 'same content', 'utf-8');
+
+    const captured: FileSnapshot[] = [];
+    store.setPersistence({ onSnapshotCreated: (snap) => { captured.push(snap); } });
+
+    await store.trackEdit('sess-p2', 'turn-1', filePath);
+    // Second call with unchanged content in the same turn — should be deduped
+    await store.trackEdit('sess-p2', 'turn-1', filePath);
+
+    expect(captured).toHaveLength(1);
+  });
+
+  it('setPersistence: passing undefined removes the persistence hook', async () => {
+    const filePath = join(tmpDir, 'persist-remove.txt');
+    writeFileSync(filePath, 'data', 'utf-8');
+
+    const captured: FileSnapshot[] = [];
+    store.setPersistence({ onSnapshotCreated: (snap) => { captured.push(snap); } });
+    store.setPersistence(undefined);
+
+    await store.trackEdit('sess-p3', 'turn-1', filePath);
+
+    expect(captured).toHaveLength(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // hydrate — seeds the store from a snapshot array
+  // ---------------------------------------------------------------------------
+
+  it('hydrate() seeds the store so list() returns the provided snapshots', () => {
+    const snaps: FileSnapshot[] = [
+      { sessionId: 'sess-h', messageUuid: 'turn-1', filePath: '/a.ts', prevContent: 'v1', timestamp: 1000 },
+      { sessionId: 'sess-h', messageUuid: 'turn-2', filePath: '/b.ts', prevContent: null, timestamp: 2000 },
+    ];
+
+    store.hydrate('sess-h', snaps);
+
+    const listed = store.list('sess-h');
+    expect(listed).toHaveLength(2);
+    expect(listed[0]!.filePath).toBe('/a.ts');
+    expect(listed[1]!.prevContent).toBeNull();
+  });
+
+  it('hydrate() replaces any pre-existing snapshots for the session', async () => {
+    const filePath = join(tmpDir, 'hydrate-replace.txt');
+    writeFileSync(filePath, 'old', 'utf-8');
+
+    await store.trackEdit('sess-hr', 'turn-old', filePath);
+    expect(store.list('sess-hr')).toHaveLength(1);
+
+    store.hydrate('sess-hr', [
+      { sessionId: 'sess-hr', messageUuid: 'turn-new', filePath: '/x.ts', prevContent: 'new', timestamp: 9999 },
+    ]);
+
+    const listed = store.list('sess-hr');
+    expect(listed).toHaveLength(1);
+    expect(listed[0]!.messageUuid).toBe('turn-new');
+  });
+
+  it('hydrate() does NOT fire the persistence hook (no infinite loop)', async () => {
+    const captured: FileSnapshot[] = [];
+    store.setPersistence({ onSnapshotCreated: (snap) => { captured.push(snap); } });
+
+    store.hydrate('sess-hydrate-nohook', [
+      { sessionId: 'sess-hydrate-nohook', messageUuid: 'turn-1', filePath: '/z.ts', prevContent: 'c', timestamp: 1 },
+    ]);
+
+    expect(captured).toHaveLength(0);
+  });
 });
 
 // Re-export the type to avoid unused-import error on the cast above

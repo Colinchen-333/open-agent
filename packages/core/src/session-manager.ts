@@ -13,6 +13,7 @@ import { homedir } from 'os';
 import type { SDKMessage } from './types.js';
 import type { Message } from '@open-agent/providers';
 import { resolveSessionPath, SessionJsonlWriter, readJsonlSession } from './session-io.js';
+import type { FileSnapshot, FileHistoryPersistence } from './file-history.js';
 
 export interface SessionInfo {
   id: string;
@@ -438,6 +439,68 @@ export class SessionManager {
       }
     }
     return parsed;
+  }
+
+  // ---------------------------------------------------------------------------
+  // File history snapshot persistence helpers
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Append a file history snapshot to the session JSONL transcript as a
+   * `{ type: 'file_history_snapshot', ... }` line.  Called by the
+   * `FileHistoryPersistence` adapter created in `createFileHistoryPersistence`.
+   */
+  appendFileHistorySnapshot(cwd: string, sessionId: string, snap: FileSnapshot): void {
+    const record = {
+      type: 'file_history_snapshot',
+      sessionId: snap.sessionId,
+      messageUuid: snap.messageUuid,
+      filePath: snap.filePath,
+      prevContent: snap.prevContent,
+      timestamp: snap.timestamp,
+    };
+    this.appendToTranscript(cwd, sessionId, record);
+  }
+
+  /**
+   * Read the session JSONL and return any `file_history_snapshot` lines as
+   * `FileSnapshot` objects.  Malformed or incomplete lines are silently skipped.
+   */
+  readFileHistorySnapshots(cwd: string, sessionId: string): FileSnapshot[] {
+    const transcript = this.readTranscript(cwd, sessionId);
+    const snaps: FileSnapshot[] = [];
+    for (const entry of transcript) {
+      if (!entry || typeof entry !== 'object') continue;
+      const e = entry as Record<string, unknown>;
+      if (e['type'] !== 'file_history_snapshot') continue;
+      if (
+        typeof e['sessionId'] === 'string' &&
+        typeof e['messageUuid'] === 'string' &&
+        typeof e['filePath'] === 'string'
+      ) {
+        snaps.push({
+          sessionId: e['sessionId'],
+          messageUuid: e['messageUuid'],
+          filePath: e['filePath'],
+          prevContent: typeof e['prevContent'] === 'string' ? e['prevContent'] : null,
+          timestamp: typeof e['timestamp'] === 'number' ? e['timestamp'] : Date.now(),
+        });
+      }
+    }
+    return snaps;
+  }
+
+  /**
+   * Create a `FileHistoryPersistence` adapter that appends each new snapshot
+   * to this session's JSONL transcript.  Wire into `FileHistoryStore` via
+   * `fileHistory.setPersistence(...)`.
+   */
+  createFileHistoryPersistence(cwd: string, sessionId: string): FileHistoryPersistence {
+    return {
+      onSnapshotCreated: (snap) => {
+        this.appendFileHistorySnapshot(cwd, sessionId, snap);
+      },
+    };
   }
 
   private formatTaskNotificationMessage(entry: Record<string, unknown>): string {
