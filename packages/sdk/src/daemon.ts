@@ -100,8 +100,7 @@ export function watchScheduledTasks(opts: {
       // Wait for file change or abort
       await new Promise<void>((r) => {
         resolve = r;
-        const onAbort = () => r();
-        opts.signal.addEventListener('abort', onAbort, { once: true });
+        opts.signal.addEventListener('abort', () => r(), { once: true });
         setTimeout(r, 10_000); // poll every 10s as fallback
       });
     }
