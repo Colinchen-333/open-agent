@@ -190,6 +190,70 @@ describe('createCliPermissionRuntime', () => {
     }
   });
 
+  it('setHookExecutor passes through to rawPermissionEngine and survives refresh', async () => {
+    const temp = makeTempCwd('open-agent-cli-hook-executor-');
+    try {
+      writeSettings(temp.cwd, {});
+
+      const runtime = createCliPermissionRuntime({ cwd: temp.cwd, mode: 'default' });
+
+      const calls: Array<{ event: string; input: unknown }> = [];
+      runtime.permissionEngine.setHookExecutor({
+        async run(event, input) {
+          calls.push({ event, input });
+          return {};
+        },
+      });
+
+      // The raw engine should now have the executor wired in.
+      expect(typeof (runtime.rawPermissionEngine as any).hookExecutor).toBe('object');
+
+      // After a settings refresh the new raw engine must also carry the executor.
+      runtime.refreshFromSettings();
+      expect(typeof (runtime.rawPermissionEngine as any).hookExecutor).toBe('object');
+    } finally {
+      temp.cleanup();
+    }
+  });
+
+  it('setLLMProvider passes through to rawPermissionEngine and survives refresh', () => {
+    const temp = makeTempCwd('open-agent-cli-llm-provider-');
+    try {
+      writeSettings(temp.cwd, {});
+
+      const runtime = createCliPermissionRuntime({ cwd: temp.cwd, mode: 'default' });
+
+      const fakeProvider = { async classify(_: string) { return 'APPROVE'; } };
+      runtime.permissionEngine.setLLMProvider(fakeProvider);
+
+      expect((runtime.rawPermissionEngine as any).llmProvider).toBe(fakeProvider);
+
+      // Survives engine rebuild on settings refresh.
+      runtime.refreshFromSettings();
+      expect((runtime.rawPermissionEngine as any).llmProvider).toBe(fakeProvider);
+    } finally {
+      temp.cleanup();
+    }
+  });
+
+  it('setRecentUserMessages forwards directly to rawPermissionEngine', () => {
+    const temp = makeTempCwd('open-agent-cli-recent-msgs-');
+    try {
+      writeSettings(temp.cwd, {});
+
+      const runtime = createCliPermissionRuntime({ cwd: temp.cwd, mode: 'default' });
+
+      runtime.permissionEngine.setRecentUserMessages(['approve everything', 'yes please']);
+
+      expect((runtime.rawPermissionEngine as any).recentUserMessages).toEqual([
+        'approve everything',
+        'yes please',
+      ]);
+    } finally {
+      temp.cleanup();
+    }
+  });
+
   it('invokes watch refresh callbacks with reloaded settings payload', () => {
     const settingsQueue: SettingsFile[] = [
       {

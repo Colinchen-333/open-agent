@@ -48,6 +48,9 @@ export interface CliPermissionRuntime {
     setMode(mode: string): void;
     getSummary(): ReturnType<PermissionEngine['getSummary']>;
     getPermissionPromptToolName(): string | undefined;
+    setHookExecutor(executor: Parameters<PermissionEngine['setHookExecutor']>[0]): void;
+    setLLMProvider(provider: Parameters<PermissionEngine['setLLMProvider']>[0]): void;
+    setRecentUserMessages(messages: string[]): void;
   };
   rawPermissionEngine: PermissionEngine;
   refreshFromSettings(): SettingsFile;
@@ -167,6 +170,11 @@ export function createCliPermissionRuntime({
   let rawPermissionEngine = new PermissionEngine({ mode: currentMode });
   const sessionPermissionUpdates: CliSessionPermissionUpdate[] = [];
 
+  // Stored so they can be re-applied whenever refreshFromSettings() rebuilds
+  // the underlying PermissionEngine instance.
+  let storedHookExecutor: Parameters<PermissionEngine['setHookExecutor']>[0] | undefined;
+  let storedLLMProvider: Parameters<PermissionEngine['setLLMProvider']>[0] | undefined;
+
   const getPermissionEngine = (): PermissionEngine => rawPermissionEngine;
 
   const replaySessionPermissionUpdates = (engine: PermissionEngine): void => {
@@ -183,6 +191,12 @@ export function createCliPermissionRuntime({
     }
   };
 
+  /** Re-wire hookExecutor/llmProvider onto a freshly built engine. */
+  const reapplyRuntimeDependencies = (engine: PermissionEngine): void => {
+    if (storedHookExecutor) engine.setHookExecutor(storedHookExecutor);
+    if (storedLLMProvider) engine.setLLMProvider(storedLLMProvider);
+  };
+
   const refreshFromSettings = (): SettingsFile => {
     const settings = settingsLoader.load(cwd);
     const nextEngine = new PermissionEngine({ mode: currentMode });
@@ -194,6 +208,7 @@ export function createCliPermissionRuntime({
       permissionPromptToolName,
     });
     replaySessionPermissionUpdates(nextEngine);
+    reapplyRuntimeDependencies(nextEngine);
     currentMode = nextEngine.getMode();
     rawPermissionEngine = nextEngine;
     return settings;
@@ -231,6 +246,17 @@ export function createCliPermissionRuntime({
       },
       getSummary: () => rawPermissionEngine.getSummary(),
       getPermissionPromptToolName: () => rawPermissionEngine.getPermissionPromptToolName(),
+      setHookExecutor: (executor: Parameters<PermissionEngine['setHookExecutor']>[0]) => {
+        storedHookExecutor = executor;
+        rawPermissionEngine.setHookExecutor(executor);
+      },
+      setLLMProvider: (provider: Parameters<PermissionEngine['setLLMProvider']>[0]) => {
+        storedLLMProvider = provider;
+        rawPermissionEngine.setLLMProvider(provider);
+      },
+      setRecentUserMessages: (messages: string[]) => {
+        rawPermissionEngine.setRecentUserMessages(messages);
+      },
     },
     get rawPermissionEngine() {
       return rawPermissionEngine;

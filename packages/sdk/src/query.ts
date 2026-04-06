@@ -15,7 +15,7 @@ import type {
   SDKTaskNotificationMessage,
   SDKPromptSuggestionMessage,
 } from '@open-agent/core';
-import { ConversationLoop, SessionManager, buildSystemPrompt, buildSystemPromptBlocks, FileCheckpoint, isGitRepository, buildTaskOrchestrationTemplates, loadPromptContext, buildSystemPromptRuntimeSnapshot, buildRuntimeHookSurfaceSummary, HOOK_EVENTS, loadOutputStyles, mergeOutputStyles, findOutputStyle, BUILTIN_OUTPUT_STYLES, createLLMSummarizer } from '@open-agent/core';
+import { ConversationLoop, SessionManager, buildSystemPrompt, buildSystemPromptBlocks, FileCheckpoint, isGitRepository, buildTaskOrchestrationTemplates, loadPromptContext, buildSystemPromptRuntimeSnapshot, buildRuntimeHookSurfaceSummary, HOOK_EVENTS, loadOutputStyles, mergeOutputStyles, findOutputStyle, BUILTIN_OUTPUT_STYLES, createLLMSummarizer, feature } from '@open-agent/core';
 import type { OutputStyle } from '@open-agent/core';
 import {
   createStore,
@@ -1965,6 +1965,11 @@ export function query(
     mode: currentPermissionMode,
     ...(resolveSandboxConfigFromSettings() ? { sandbox: resolveSandboxConfigFromSettings() } : {}),
   });
+
+  // Stored so they survive permissionEngine rebuilds triggered by settings refresh.
+  let sdkStoredHookExecutor: { run(event: string, input: unknown): Promise<any> } | undefined;
+  let sdkStoredLLMProvider: { classify(prompt: string): Promise<string> } | undefined;
+
   const rebuildPermissionEngine = (settings: SettingsFile | null): PermissionEngine => {
     const nextEngine = new PermissionEngine({
       mode: currentPermissionMode,
@@ -1979,6 +1984,9 @@ export function query(
     if (options.permissionPromptToolName) {
       nextEngine.setPermissionPromptToolName(options.permissionPromptToolName);
     }
+    // Re-apply runtime dependencies that survive engine rebuilds.
+    if (sdkStoredHookExecutor) nextEngine.setHookExecutor(sdkStoredHookExecutor);
+    if (sdkStoredLLMProvider) nextEngine.setLLMProvider(sdkStoredLLMProvider);
     currentPermissionMode = nextEngine.getMode();
     return nextEngine;
   };
@@ -2004,6 +2012,9 @@ export function query(
     addRule: (behavior: 'allow' | 'deny' | 'ask', rule: { toolName: string; ruleContent?: string }) => void;
     removeRule?: (behavior: 'allow' | 'deny' | 'ask', rule: { toolName: string; ruleContent?: string }) => void;
     setMode?: (mode: string) => void;
+    setHookExecutor?: (executor: { run(event: string, input: unknown): Promise<any> }) => void;
+    setLLMProvider?: (provider: { classify(prompt: string): Promise<string> }) => void;
+    setRecentUserMessages?: (messages: string[]) => void;
   } = permissionEngine as any;
 
   const attachBashSandboxPolicy = (
@@ -2157,6 +2168,17 @@ export function query(
         permissionMode: currentPermissionMode,
       }));
       syncAppPermissionControlPlane();
+    },
+    setHookExecutor: (executor: { run(event: string, input: unknown): Promise<any> }) => {
+      sdkStoredHookExecutor = executor;
+      permissionEngine.setHookExecutor(executor);
+    },
+    setLLMProvider: (llmProvider: { classify(prompt: string): Promise<string> }) => {
+      sdkStoredLLMProvider = llmProvider;
+      permissionEngine.setLLMProvider(llmProvider);
+    },
+    setRecentUserMessages: (messages: string[]) => {
+      permissionEngine.setRecentUserMessages(messages);
     },
   };
 
@@ -2967,6 +2989,30 @@ export function query(
       upsertWorkerStoreRecord(toWorkerRecord(session));
     }
   };
+
+  // Wire hookExecutor into the permission engine so the PreToolUseHooks
+  // pipeline stage fires real hooks instead of being a no-op.
+  effectivePermissionEngine.setHookExecutor?.({
+    run: (event: string, input: unknown) =>
+      effectiveHookExecutor.execute(event, input as Record<string, unknown>),
+  });
+
+  // Wire LLM provider for the transcript classifier when enabled.
+  if (feature('TRANSCRIPT_CLASSIFIER')) {
+    effectivePermissionEngine.setLLMProvider?.({
+      classify: async (prompt: string): Promise<string> => {
+        let result = '';
+        const stream = provider.chat(
+          [{ role: 'user', content: prompt }],
+          { model: activeModel, systemPrompt: '', maxTokens: 50 },
+        );
+        for await (const event of stream) {
+          if (event.type === 'text_delta') result += (event as any).text ?? '';
+        }
+        return result;
+      },
+    });
+  }
 
   const loop = new ConversationLoop({
     provider,

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { parseArgs, TerminalRenderer, REPL, emitStreamJson, emitStreamJsonInit, TerminalPermissionPrompter, handleSlashCommand } from '@open-agent/cli';
-import { ConversationLoop, SessionManager, ConfigLoader, buildSystemPrompt, buildSystemPromptBlocks, isGitRepository, FileCheckpoint, buildTaskOrchestrationTemplates, loadPromptContext, buildSystemPromptRuntimeSnapshot, loadOutputStyles, mergeOutputStyles, findOutputStyle, BUILTIN_OUTPUT_STYLES, createLLMSummarizer } from '@open-agent/core';
+import { ConversationLoop, SessionManager, ConfigLoader, buildSystemPrompt, buildSystemPromptBlocks, isGitRepository, FileCheckpoint, buildTaskOrchestrationTemplates, loadPromptContext, buildSystemPromptRuntimeSnapshot, loadOutputStyles, mergeOutputStyles, findOutputStyle, BUILTIN_OUTPUT_STYLES, createLLMSummarizer, feature } from '@open-agent/core';
 import type { OutputStyle } from '@open-agent/core';
 import { createStore, createDefaultAppState } from '@open-agent/state';
 import type { AppState } from '@open-agent/state';
@@ -652,6 +652,32 @@ async function main(): Promise<void> {
   // Now that hookExecutor is ready, initialise AgentExecutor so subagent
   // lifecycle hooks (SubagentStart / SubagentStop) are wired in.
   agentExecutor = new AgentExecutor(hookExecutor);
+
+  // Wire hookExecutor into the permission engine so the PreToolUseHooks
+  // pipeline stage fires real hooks instead of being a no-op.
+  // The wrapper's setHookExecutor stores and re-applies across engine rebuilds.
+  permissionEngine.setHookExecutor({
+    run: (event: string, input: unknown) =>
+      hookExecutor.execute(event, input as Record<string, unknown>),
+  });
+
+  // Wire the LLM provider for the transcript classifier stage when the
+  // TRANSCRIPT_CLASSIFIER feature flag is enabled.
+  if (feature('TRANSCRIPT_CLASSIFIER')) {
+    permissionEngine.setLLMProvider({
+      classify: async (prompt: string): Promise<string> => {
+        let result = '';
+        const stream = provider.chat(
+          [{ role: 'user', content: prompt }],
+          { model, systemPrompt: '', maxTokens: 50 },
+        );
+        for await (const event of stream) {
+          if (event.type === 'text_delta') result += (event as any).text ?? '';
+        }
+        return result;
+      },
+    });
+  }
 
   // Fire SessionStart hook — all setup is complete.
   const sessionSource: 'startup' | 'resume' = args.resume || args.continue ? 'resume' : 'startup';
