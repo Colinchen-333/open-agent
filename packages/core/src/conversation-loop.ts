@@ -318,6 +318,12 @@ export class ConversationLoop {
   private lastCompactReductionRatio: number | undefined;
   /** Counts consecutive compacts that reduced size by < 15%. Resets to 0 on an effective compact. */
   private consecutiveIneffectiveCompacts = 0;
+  /**
+   * Deferred tools that have been explicitly activated by ToolSearch.
+   * Once a tool name is added here it passes the `!t.shouldDefer` filter on
+   * every subsequent turn, making the tool callable by the model.
+   */
+  private activatedDeferredTools = new Set<string>();
 
   constructor(options: ConversationLoopOptions) {
     this.options = options;
@@ -654,8 +660,10 @@ export class ConversationLoop {
       // Build the tool spec list from the registered tools map.
       // Deferred tools (shouldDefer: true) are only discoverable via ToolSearch
       // and must not be presented to the model in the initial tool list.
+      // Exception: once ToolSearch has activated a deferred tool via
+      // activateDeferredTool(), it is included in all subsequent turns.
       const toolSpecs = Array.from(this.options.tools.values())
-        .filter((t) => !t.shouldDefer)
+        .filter((t) => !t.shouldDefer || this.activatedDeferredTools.has(t.name))
         .map((t) => ({
           name: t.name,
           description: t.description,
@@ -1470,6 +1478,7 @@ export class ConversationLoop {
           fileReadTracker: this.fileReadTracker,
           getAppState: this.options.getAppState,
           setAppState: this.options.setAppState,
+          activateDeferredTool: (name: string) => this.activateDeferredTool(name),
         },
         sessionId,
       );
@@ -1753,6 +1762,30 @@ export class ConversationLoop {
   /** Add a single tool to the live tool map (e.g. after ToolSearch selects one). */
   addTool(tool: ToolDefinition): void {
     this.options.tools.set(tool.name, tool);
+  }
+
+  /**
+   * Mark a deferred tool as activated so it appears in the tool list on every
+   * subsequent turn.  Called by ToolSearch after it discovers and returns a
+   * deferred tool's schema to the model.
+   */
+  activateDeferredTool(name: string): void {
+    this.activatedDeferredTools.add(name);
+  }
+
+  /**
+   * Returns the tool spec list that would be sent to the provider on the next
+   * turn, applying the shouldDefer / activatedDeferredTools filter.
+   * Primarily used in tests.
+   */
+  getToolSpecs(): Array<{ name: string; description: string; input_schema: Record<string, any> }> {
+    return Array.from(this.options.tools.values())
+      .filter((t) => !t.shouldDefer || this.activatedDeferredTools.has(t.name))
+      .map((t) => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.inputSchema,
+      }));
   }
 
   /**

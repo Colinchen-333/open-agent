@@ -197,6 +197,12 @@ export interface ToolContext {
   getAppState?: () => any;
   /** Reactive state store updater — provided when a store is wired in. */
   setAppState?: (updater: (prev: any) => any) => void;
+  /**
+   * Marks a deferred tool as activated so ConversationLoop includes it in
+   * subsequent turns' tool lists.  Provided by ConversationLoop; may be absent
+   * in lightweight test contexts.
+   */
+  activateDeferredTool?: (name: string) => void;
 }
 
 /**

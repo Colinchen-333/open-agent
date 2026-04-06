@@ -1035,4 +1035,91 @@ describe('ConversationLoop', () => {
       expect(loop.getTurnCount()).toBe(0);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Deferred tool activation (R15 regression fix)
+  // ---------------------------------------------------------------------------
+
+  describe('deferred tool activation', () => {
+    function makeDeferredTool(name: string): ToolDefinition {
+      return {
+        name,
+        description: `Deferred tool ${name}`,
+        shouldDefer: true,
+        inputSchema: { type: 'object', properties: {} },
+        execute: async () => 'ok',
+      };
+    }
+
+    function makeNormalTool(name: string): ToolDefinition {
+      return {
+        name,
+        description: `Normal tool ${name}`,
+        inputSchema: { type: 'object', properties: {} },
+        execute: async () => 'ok',
+      };
+    }
+
+    it('getToolSpecs excludes deferred tools before activation', () => {
+      const tools = new Map<string, ToolDefinition>([
+        ['NormalTool', makeNormalTool('NormalTool')],
+        ['mcp__test__hidden', makeDeferredTool('mcp__test__hidden')],
+      ]);
+      const provider = makeMockProvider([textResponse('done')]);
+      const loop = new ConversationLoop(baseOptions(provider, tools));
+
+      const specs = loop.getToolSpecs();
+      expect(specs.find((t) => t.name === 'NormalTool')).toBeDefined();
+      expect(specs.find((t) => t.name === 'mcp__test__hidden')).toBeUndefined();
+    });
+
+    it('getToolSpecs includes a deferred tool after activateDeferredTool()', () => {
+      const tools = new Map<string, ToolDefinition>([
+        ['NormalTool', makeNormalTool('NormalTool')],
+        ['mcp__test__hidden', makeDeferredTool('mcp__test__hidden')],
+      ]);
+      const provider = makeMockProvider([textResponse('done')]);
+      const loop = new ConversationLoop(baseOptions(provider, tools));
+
+      // Before activation
+      expect(loop.getToolSpecs().find((t) => t.name === 'mcp__test__hidden')).toBeUndefined();
+
+      // Activate
+      loop.activateDeferredTool('mcp__test__hidden');
+
+      // After activation
+      expect(loop.getToolSpecs().find((t) => t.name === 'mcp__test__hidden')).toBeDefined();
+    });
+
+    it('activated tool appears in chat options on the next turn', async () => {
+      const seenOptions: any[] = [];
+      const provider: LLMProvider = {
+        name: 'recording',
+        async *chat(_msgs, opts) {
+          seenOptions.push(opts);
+          yield { type: 'text_delta', text: 'done' };
+          yield { type: 'message_end', message: {}, usage: { input_tokens: 5, output_tokens: 5 } };
+        },
+        async listModels() { return []; },
+      };
+
+      const tools = new Map<string, ToolDefinition>([
+        ['mcp__svc__action', makeDeferredTool('mcp__svc__action')],
+      ]);
+      const loop = new ConversationLoop(baseOptions(provider, tools));
+
+      // First run — deferred tool should NOT be in options
+      await collectMessages(loop.run('first'));
+      const firstTools: string[] = (seenOptions[0]?.tools ?? []).map((t: any) => t.name);
+      expect(firstTools).not.toContain('mcp__svc__action');
+
+      // Activate the tool (simulating what ToolSearch does)
+      loop.activateDeferredTool('mcp__svc__action');
+
+      // Second run — now the tool MUST appear
+      await collectMessages(loop.run('second'));
+      const secondTools: string[] = (seenOptions[1]?.tools ?? []).map((t: any) => t.name);
+      expect(secondTools).toContain('mcp__svc__action');
+    });
+  });
 });

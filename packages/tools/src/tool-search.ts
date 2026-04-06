@@ -52,7 +52,7 @@ export function createToolSearchTool(opts: ToolSearchDeps | ToolSearchRegistry):
         },
         required: ['query'],
       },
-      async execute(input: any, _ctx: ToolContext) {
+      async execute(input: any, ctx: ToolContext) {
         const query: string = String(input.query ?? '').trim();
         const max: number = (input.max_results as number) ?? 5;
         const qTokens = tokenize(query);
@@ -65,7 +65,13 @@ export function createToolSearchTool(opts: ToolSearchDeps | ToolSearchRegistry):
           }
         }
         scored.sort((a, b) => b.score - a.score);
-        return { matches: scored.slice(0, max) };
+        const matches = scored.slice(0, max);
+        // Activate each matched deferred tool so ConversationLoop includes it
+        // in all subsequent turns' tool lists.
+        for (const m of matches) {
+          ctx.activateDeferredTool?.(m.name);
+        }
+        return { matches };
       },
     });
   }
@@ -93,7 +99,7 @@ export function createToolSearchTool(opts: ToolSearchDeps | ToolSearchRegistry):
       },
       required: ['query'],
     },
-    async execute(input: any, _ctx: ToolContext) {
+    async execute(input: any, ctx: ToolContext) {
       const query: string = String(input.query ?? '').trim();
       const maxResults: number = (input.max_results as number) ?? 5;
 
@@ -104,6 +110,10 @@ export function createToolSearchTool(opts: ToolSearchDeps | ToolSearchRegistry):
         }
         const tool = await deps.selectTool(toolName);
         if (tool) {
+          // Activate the tool so ConversationLoop includes it in subsequent turns.
+          if (tool.shouldDefer) {
+            ctx.activateDeferredTool?.(tool.name);
+          }
           return `Tool "${toolName}" loaded successfully. It is now available for use.`;
         }
         return `Tool "${toolName}" not found. Try ToolSearch with keywords first, then run select:<tool_name>.`;
