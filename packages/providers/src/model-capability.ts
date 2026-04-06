@@ -153,6 +153,24 @@ const REGISTRY: Record<string, ModelCapability> = {
     supportsPromptCaching: false,
   },
 
+  // ── OpenAI o3 ────────────────────────────────────────────────────────────
+  'o3': {
+    contextWindow: 200_000,
+    maxOutput: 100_000,
+    supportsThinking: true,
+    supportsVision: true,
+    supportsPromptCaching: false,
+  },
+
+  // ── OpenAI o4-mini ───────────────────────────────────────────────────────
+  'o4-mini': {
+    contextWindow: 200_000,
+    maxOutput: 100_000,
+    supportsThinking: true,
+    supportsVision: true,
+    supportsPromptCaching: false,
+  },
+
   // ── Zhipu GLM-4.7 ────────────────────────────────────────────────────────
   'glm-4.7': {
     contextWindow: 128_000,

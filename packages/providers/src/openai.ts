@@ -506,50 +506,35 @@ export class OpenAIProvider implements LLMProvider {
   }
 
   async listModels(): Promise<ModelInfo[]> {
-    return [
-      {
-        value: 'gpt-4o',
-        displayName: 'GPT-4o',
-        description: 'Most capable OpenAI model',
-        supportsThinking: false,
-        supportsEffort: false,
-        supportsStructuredOutput: true,
-        supportsImages: true,
-        supportsServerTools: false,
-      },
-      {
-        value: 'gpt-4o-mini',
-        displayName: 'GPT-4o Mini',
-        description: 'Fast and cost-effective',
-        supportsThinking: false,
-        supportsEffort: false,
-        supportsStructuredOutput: true,
-        supportsImages: true,
-        supportsServerTools: false,
-      },
-      {
-        value: 'o3',
-        displayName: 'o3',
-        description: 'Advanced reasoning model',
-        supportsThinking: false,
-        supportsEffort: true,
-        supportedEffortLevels: ['low', 'medium', 'high'],
-        supportsStructuredOutput: true,
-        supportsImages: true,
-        supportsServerTools: false,
-      },
-      {
-        value: 'o4-mini',
-        displayName: 'o4-mini',
-        description: 'Fast reasoning model',
-        supportsThinking: false,
-        supportsEffort: true,
-        supportedEffortLevels: ['low', 'medium', 'high'],
-        supportsStructuredOutput: true,
-        supportsImages: true,
-        supportsServerTools: false,
-      },
+    // Only advertise models that have capability data in the registry.
+    // This avoids presenting unsupported options to the user.
+    const KNOWN: Array<{ value: string; displayName: string; description: string }> = [
+      { value: 'gpt-4o',     displayName: 'GPT-4o',     description: 'Most capable OpenAI model' },
+      { value: 'gpt-4o-mini', displayName: 'GPT-4o Mini', description: 'Fast and cost-effective' },
+      { value: 'gpt-5',      displayName: 'GPT-5',       description: 'Frontier model with extended thinking' },
+      { value: 'o3',         displayName: 'o3',          description: 'Advanced reasoning model' },
+      { value: 'o4-mini',    displayName: 'o4-mini',     description: 'Fast reasoning model' },
+      { value: 'glm-4.7',    displayName: 'GLM-4.7',     description: 'Zhipu coding model (coding plan)' },
+      { value: 'glm-4',      displayName: 'GLM-4',       description: 'Zhipu general model' },
+      { value: 'glm-4-flash', displayName: 'GLM-4 Flash', description: 'Zhipu fast model' },
     ];
+
+    return KNOWN.map(({ value, displayName, description }) => {
+      const cap = getModelCapability(value);
+      return {
+        value,
+        displayName,
+        description,
+        supportsThinking: cap?.supportsThinking ?? false,
+        supportsEffort: cap?.supportsThinking ?? false,
+        ...(cap?.supportsThinking
+          ? { supportedEffortLevels: ['low', 'medium', 'high'] as const }
+          : {}),
+        supportsStructuredOutput: cap !== null,
+        supportsImages: cap?.supportsVision ?? false,
+        supportsServerTools: false,
+      };
+    });
   }
 
   async getCapabilities(model?: string) {
@@ -561,8 +546,10 @@ export class OpenAIProvider implements LLMProvider {
       ...(model ? { model } : {}),
       // Thinking: native when the model supports reasoning_effort, otherwise unsupported
       thinking: (modelSupportsThinking ? 'native' : 'unsupported') as 'native' | 'unsupported',
-      // All OpenAI-compatible endpoints support JSON schema structured output
-      structuredOutput: 'native' as const,
+      // Structured output: 'native' for known registry models, 'unsupported' for unknown models.
+      // Unknown models (no registry entry) report 'unsupported' to avoid sending parameters
+      // that the endpoint may reject (e.g. custom OpenAI-compatible third-party servers).
+      structuredOutput: (cap ? 'native' : 'unsupported') as 'native' | 'unsupported',
       toolUse: 'native' as const,
       serverTools: 'unsupported' as const,
       supportsAdaptiveThinking: false,

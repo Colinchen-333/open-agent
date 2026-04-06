@@ -592,38 +592,52 @@ export class PermissionEngine {
    * so that existing rules like `"git status"` continue to work unchanged.
    */
   private matchesGlobPattern(value: string, pattern: string): boolean {
-    // No wildcards — use cheap prefix check first, then substring fallback
+    // No wildcards — use cheap prefix check only (no substring fallback to
+    // prevent patterns like "git *" from matching mid-command occurrences).
     if (!pattern.includes('*') && !pattern.includes('?')) {
-      return value.startsWith(pattern) || value.includes(pattern);
+      return value.startsWith(pattern);
     }
-    // Translate glob wildcards to regex equivalents
+    // Translate glob wildcards to a fully-anchored regex so that the pattern
+    // must match the ENTIRE value, not just a substring of it.
+    // e.g. "git *" → /^git .*$/i matches "git push origin main" but NOT
+    // "echo git status && rm -rf /" which does not start with "git ".
     const regexSource = pattern
       .replace(/[.+^${}()|[\]\\]/g, '\\$&') // escape all regex meta-chars
       .replace(/\*/g, '.*')                   // * → any sequence
       .replace(/\?/g, '.');                   // ? → any single character
     try {
-      return new RegExp(`^${regexSource}$`, 'i').test(value) ||
-             new RegExp(regexSource, 'i').test(value);
+      return new RegExp(`^${regexSource}$`, 'i').test(value);
     } catch {
-      return value.includes(pattern);
+      return value.startsWith(pattern);
     }
   }
 
   /**
-   * Try ruleContent first as a glob pattern (which degrades to prefix for
-   * patterns without wildcards), then as a RegExp.
-   * Invalid regexes fall back to a substring test.
+   * Try ruleContent first as a glob pattern (anchored when wildcards are
+   * present, prefix-only when there are no wildcards), then as a raw RegExp
+   * for backward compatibility with patterns that use regex syntax without
+   * glob wildcards (e.g. "python:*" where * is a regex quantifier).
+   *
+   * IMPORTANT: The raw RegExp fallback is ONLY applied when the pattern
+   * contains no glob wildcard characters (* or ?).  Patterns with wildcards
+   * are handled exclusively by the anchored glob pass to prevent unanchored
+   * substring matches from bypassing allow/deny rules.
+   * Invalid regexes return false.
    */
   private matchesStringPattern(value: string, pattern: string): boolean {
-    // Glob matching handles the plain-prefix case as well
     if (this.matchesGlobPattern(value, pattern)) {
       return true;
     }
-    // Also try interpreting as a raw RegExp for backward compatibility
+    // Raw RegExp fallback is only safe when there are no glob wildcards.
+    // If the pattern contains * or ?, the anchored glob pass is authoritative
+    // and we must NOT fall through to an unanchored regex interpretation.
+    if (pattern.includes('*') || pattern.includes('?')) {
+      return false;
+    }
     try {
       return new RegExp(pattern).test(value);
     } catch {
-      return value.includes(pattern);
+      return false;
     }
   }
 

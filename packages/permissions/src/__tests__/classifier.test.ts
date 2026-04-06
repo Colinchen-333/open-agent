@@ -104,4 +104,56 @@ describe('classifier', () => {
     expect(called).toBe(false);
     expect(decision?.approved).toBe(true);
   });
+
+  // ── Security: strict approval phrase checks ─────────────────────────────
+
+  test('negation "do not continue" is NOT treated as approval', async () => {
+    const decision = await classifyPermissionRequest(
+      { toolName: 'Bash', input: { command: 'rm -rf /' }, toolUseId: 'sec-1' },
+      { recentUserMessages: ['do not continue'] },
+    );
+    expect(decision).toBeNull();
+  });
+
+  test('negation "不要继续" is NOT treated as approval', async () => {
+    const decision = await classifyPermissionRequest(
+      { toolName: 'Bash', input: { command: 'rm -rf /' }, toolUseId: 'sec-2' },
+      { recentUserMessages: ['不要继续'] },
+    );
+    expect(decision).toBeNull();
+  });
+
+  test('long message containing "yes" does NOT auto-approve', async () => {
+    const longMessage =
+      'I was reviewing the code and yes I think there might be an issue with the logic here';
+    const decision = await classifyPermissionRequest(
+      { toolName: 'Bash', input: { command: 'rm -rf /' }, toolUseId: 'sec-3' },
+      { recentUserMessages: [longMessage] },
+    );
+    expect(decision).toBeNull();
+  });
+
+  test('"yes" exactly (short message) IS approved', async () => {
+    const decision = await classifyPermissionRequest(
+      { toolName: 'Bash', input: { command: 'echo hello' }, toolUseId: 'sec-4' },
+      { recentUserMessages: ['yes'] },
+    );
+    expect(decision?.approved).toBe(true);
+  });
+
+  test('"好的" exactly IS approved', async () => {
+    const decision = await classifyPermissionRequest(
+      { toolName: 'Bash', input: { command: 'echo hello' }, toolUseId: 'sec-5' },
+      { recentUserMessages: ['好的'] },
+    );
+    expect(decision?.approved).toBe(true);
+  });
+
+  test('"never stop" is NOT treated as approval despite containing no approval phrase', async () => {
+    const decision = await classifyPermissionRequest(
+      { toolName: 'Bash', input: { command: 'rm -rf /' }, toolUseId: 'sec-6' },
+      { recentUserMessages: ['never stop'] },
+    );
+    expect(decision).toBeNull();
+  });
 });

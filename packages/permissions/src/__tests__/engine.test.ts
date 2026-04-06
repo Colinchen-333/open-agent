@@ -339,10 +339,12 @@ describe('PermissionEngine', () => {
     });
 
     it('suspends dangerous allow rules in acceptEdits mode and restores them when leaving', async () => {
+      // Note: "python *" (space wildcard) is the correct glob pattern for python commands.
+      // It is classified as a dangerous allow rule by isDangerousBashAllowRule.
       const engine = new PermissionEngine({
         mode: 'default',
         allowRules: [
-          { toolName: 'Bash', ruleContent: 'python:*' },
+          { toolName: 'Bash', ruleContent: 'python *' },
           { toolName: 'Bash', ruleContent: 'git status' },
           { toolName: 'Task' },
         ],
@@ -356,7 +358,7 @@ describe('PermissionEngine', () => {
       const acceptSummary = engine.getSummary();
       expect(acceptSummary.allowRules).toEqual([{ toolName: 'Bash', ruleContent: 'git status' }]);
       expect(acceptSummary.suspendedAllowRules).toEqual(expect.arrayContaining([
-        { toolName: 'Bash', ruleContent: 'python:*' },
+        { toolName: 'Bash', ruleContent: 'python *' },
         { toolName: 'Task' },
       ]));
       expect((await engine.evaluate(req('Bash', { command: 'python -c "print(1)"' }))).behavior).toBe('ask');
@@ -367,7 +369,7 @@ describe('PermissionEngine', () => {
       const restoredSummary = engine.getSummary();
       expect(restoredSummary.suspendedAllowRules).toEqual([]);
       expect(restoredSummary.allowRules).toEqual(expect.arrayContaining([
-        { toolName: 'Bash', ruleContent: 'python:*' },
+        { toolName: 'Bash', ruleContent: 'python *' },
         { toolName: 'Bash', ruleContent: 'git status' },
         { toolName: 'Task' },
       ]));
@@ -391,11 +393,11 @@ describe('PermissionEngine', () => {
     it('removeRule also clears suspended dangerous allow rules', async () => {
       const engine = new PermissionEngine({
         mode: 'acceptEdits',
-        allowRules: [{ toolName: 'Bash', ruleContent: 'python:*' }],
+        allowRules: [{ toolName: 'Bash', ruleContent: 'python *' }],
       });
 
-      expect(engine.getSummary().suspendedAllowRules).toEqual([{ toolName: 'Bash', ruleContent: 'python:*' }]);
-      engine.removeRule('allow', { toolName: 'Bash', ruleContent: 'python:*' });
+      expect(engine.getSummary().suspendedAllowRules).toEqual([{ toolName: 'Bash', ruleContent: 'python *' }]);
+      engine.removeRule('allow', { toolName: 'Bash', ruleContent: 'python *' });
       expect(engine.getSummary().suspendedAllowRules).toEqual([]);
       engine.setMode('default');
       expect(engine.getSummary().allowRules).toEqual([]);
@@ -464,7 +466,7 @@ describe('PermissionEngine', () => {
     test('pushMode with plan suspends dangerous allow rules, popMode restores them', async () => {
       const engine = new PermissionEngine({
         mode: 'default',
-        allowRules: [{ toolName: 'Bash', ruleContent: 'python:*' }],
+        allowRules: [{ toolName: 'Bash', ruleContent: 'python *' }],
       });
       // In default mode the allow rule fires
       expect((await engine.evaluate(req('Bash', { command: 'python -c "1"' }))).behavior).toBe('allow');
@@ -1108,6 +1110,46 @@ describe('PermissionEngine', () => {
       });
       expect((await engine.evaluate(req('Read', { file_path: '/secret/token.txt' }))).behavior).toBe('deny');
       expect((await engine.evaluate(req('Read', { file_path: '/tmp/safe.txt' }))).behavior).toBe('allow');
+    });
+
+    // ── Security: anchored glob matching ────────────────────────────────────
+
+    it('SECURITY: "echo git status && rm -rf /" does NOT match allow rule "git *"', async () => {
+      // Without anchoring, the old code matched because the command contains "git "
+      // somewhere in the middle. The anchored regex must reject this.
+      const engine = new PermissionEngine({
+        mode: 'default',
+        allowRules: [{ toolName: 'Bash', ruleContent: 'git *' }],
+      });
+      const result = await engine.evaluate(
+        req('Bash', { command: 'echo git status && rm -rf /' }),
+      );
+      // Must NOT be allowed — should fallthrough to ask or bash policy
+      expect(result.behavior).not.toBe('allow');
+    });
+
+    it('SECURITY: "git push origin main" DOES match allow rule "git *"', async () => {
+      const engine = new PermissionEngine({
+        mode: 'default',
+        allowRules: [{ toolName: 'Bash', ruleContent: 'git *' }],
+      });
+      const result = await engine.evaluate(
+        req('Bash', { command: 'git push origin main' }),
+      );
+      expect(result.behavior).toBe('allow');
+    });
+
+    it('SECURITY: wildcard rule "npm *" does NOT match "echo npm install && rm -rf /"', async () => {
+      // Without anchoring, the old code would match because "npm " appears as a substring.
+      // With anchored regex, "echo npm install && rm -rf /" does not start with "npm ".
+      const engine = new PermissionEngine({
+        mode: 'default',
+        allowRules: [{ toolName: 'Bash', ruleContent: 'npm *' }],
+      });
+      const result = await engine.evaluate(
+        req('Bash', { command: 'echo npm install && rm -rf /' }),
+      );
+      expect(result.behavior).not.toBe('allow');
     });
   });
 });

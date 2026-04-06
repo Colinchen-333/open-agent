@@ -36,4 +36,30 @@ describe('model capability registry', () => {
   test('getContextWindowForModel returns correct window for glm-4.7', () => {
     expect(getContextWindowForModel('glm-4.7')).toBe(128_000);
   });
+
+  // ── New models: o3 and o4-mini ──────────────────────────────────────────
+
+  test('o3 is in the registry with thinking support', () => {
+    const cap = getModelCapability('o3');
+    expect(cap).not.toBeNull();
+    expect(cap!.supportsThinking).toBe(true);
+    expect(cap!.contextWindow).toBe(200_000);
+    expect(cap!.maxOutput).toBe(100_000);
+  });
+
+  test('o4-mini is in the registry with thinking support', () => {
+    const cap = getModelCapability('o4-mini');
+    expect(cap).not.toBeNull();
+    expect(cap!.supportsThinking).toBe(true);
+    expect(cap!.contextWindow).toBe(200_000);
+    expect(cap!.maxOutput).toBe(100_000);
+  });
+
+  test('supportsThinking is true for o3', () => {
+    expect(supportsThinking('o3')).toBe(true);
+  });
+
+  test('supportsThinking is true for o4-mini', () => {
+    expect(supportsThinking('o4-mini')).toBe(true);
+  });
 });

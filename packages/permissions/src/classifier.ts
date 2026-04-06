@@ -118,5 +118,25 @@ function extractInputText(input: unknown): string {
 
 function containsApprovalPhrase(text: string): boolean {
   const normalized = text.trim().toLowerCase();
-  return APPROVAL_PHRASES.some((phrase) => normalized.includes(phrase));
+
+  // Negation guard: if the message contains negation words before or alongside
+  // approval phrases, treat the whole message as non-approving.
+  const NEGATION_WORDS = ["not", "don't", "dont", "no", "never", "stop", "cancel", "不要", "不", "别"];
+  if (NEGATION_WORDS.some((neg) => normalized.includes(neg))) {
+    return false;
+  }
+
+  // Only match short messages — long messages that happen to contain "ok" or
+  // "yes" should NOT auto-approve arbitrary tool calls.
+  if (normalized.length > 50) return false;
+
+  // Require the entire message (after trim) to be the approval phrase, or the
+  // message to start/end with the phrase followed/preceded by whitespace.
+  // This prevents "do not continue" or "echo ok && rm -rf /" from matching.
+  return APPROVAL_PHRASES.some(
+    (phrase) =>
+      normalized === phrase ||
+      normalized.startsWith(phrase + ' ') ||
+      normalized.endsWith(' ' + phrase),
+  );
 }

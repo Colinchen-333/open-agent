@@ -692,10 +692,16 @@ describe('OpenAIProvider: getCapabilities()', () => {
     expect(caps.thinking).toBe('unsupported');
   });
 
-  it('returns structuredOutput=native for all models', async () => {
+  it('returns structuredOutput=native for known registry models', async () => {
     const provider = new OpenAIProvider({ apiKey: 'test-key' });
     const caps = await provider.getCapabilities('gpt-4o');
     expect(caps.structuredOutput).toBe('native');
+  });
+
+  it('returns structuredOutput=unsupported for unknown models', async () => {
+    const provider = new OpenAIProvider({ apiKey: 'test-key' });
+    const caps = await provider.getCapabilities('unknown-custom-model-xyz');
+    expect(caps.structuredOutput).toBe('unsupported');
   });
 
   it('returns toolUse=native and serverTools=unsupported', async () => {
@@ -709,5 +715,46 @@ describe('OpenAIProvider: getCapabilities()', () => {
     const provider = new OpenAIProvider({ apiKey: 'test-key' });
     const caps = await provider.getCapabilities();
     expect(caps.provider).toBe('openai');
+  });
+
+  it('returns thinking=native and effort levels for o3', async () => {
+    const provider = new OpenAIProvider({ apiKey: 'test-key' });
+    const caps = await provider.getCapabilities('o3');
+    expect(caps.thinking).toBe('native');
+    expect(caps.supportedEffortLevels).toEqual(['low', 'medium', 'high']);
+  });
+
+  it('returns thinking=native and effort levels for o4-mini', async () => {
+    const provider = new OpenAIProvider({ apiKey: 'test-key' });
+    const caps = await provider.getCapabilities('o4-mini');
+    expect(caps.thinking).toBe('native');
+    expect(caps.supportedEffortLevels).toEqual(['low', 'medium', 'high']);
+  });
+});
+
+describe('OpenAIProvider: listModels()', () => {
+  it('includes o3 and o4-mini in the model list', async () => {
+    const provider = new OpenAIProvider({ apiKey: 'test-key' });
+    const models = await provider.listModels();
+    const names = models.map((m) => m.value);
+    expect(names).toContain('o3');
+    expect(names).toContain('o4-mini');
+  });
+
+  it('all listed models have capability data (supportsThinking is a boolean)', async () => {
+    const provider = new OpenAIProvider({ apiKey: 'test-key' });
+    const models = await provider.listModels();
+    for (const m of models) {
+      expect(typeof m.supportsThinking).toBe('boolean');
+    }
+  });
+
+  it('o3 and o4-mini are listed with supportsEffort=true', async () => {
+    const provider = new OpenAIProvider({ apiKey: 'test-key' });
+    const models = await provider.listModels();
+    const o3 = models.find((m) => m.value === 'o3');
+    const o4mini = models.find((m) => m.value === 'o4-mini');
+    expect(o3?.supportsEffort).toBe(true);
+    expect(o4mini?.supportsEffort).toBe(true);
   });
 });
