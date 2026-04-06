@@ -113,3 +113,10 @@ export {
 export * from './keybindings';
 export * from './output-styles.js';
 export { createLLMSummarizer } from './compact/llm-summarizer.js';
+export {
+  recordSidechainTranscript,
+  partitionTranscript,
+  isSidechainEntry,
+  extractAgentMessages,
+  type SidechainEntry,
+} from './sidechain.js';
