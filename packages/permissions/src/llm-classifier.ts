@@ -47,11 +47,12 @@ Respond with exactly one word: APPROVE or DENY`;
       const response = await provider.classify(prompt);
       const normalized = response.trim().toUpperCase();
 
-      if (normalized.includes('APPROVE')) {
-        return { approved: true, rationale: `LLM classifier approved: ${request.toolName}` };
-      }
+      // Check DENY first to avoid "DENY. Do not approve." being matched as APPROVE.
       if (normalized.includes('DENY')) {
         return { approved: false, rationale: `LLM classifier denied: ${request.toolName}` };
+      }
+      if (normalized.includes('APPROVE')) {
+        return { approved: true, rationale: `LLM classifier approved: ${request.toolName}` };
       }
       // Ambiguous response — pass through
       return null;

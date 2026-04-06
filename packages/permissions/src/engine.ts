@@ -375,8 +375,11 @@ export class PermissionEngine {
       allowedPrompts: this.getAllowedPrompts(),
       llmProvider: this.llmProvider,
     } satisfies ClassifierContext);
-    if (decision?.approved) {
+    if (decision?.approved === true) {
       return { behavior: 'allow', reason: `classifier: ${decision.rationale}` };
+    }
+    if (decision?.approved === false) {
+      return { behavior: 'deny', reason: `classifier: ${decision.rationale}` };
     }
     return undefined;
   }

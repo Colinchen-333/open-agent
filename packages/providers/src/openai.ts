@@ -291,17 +291,40 @@ export class OpenAIProvider implements LLMProvider {
 
       let oaiMessages = convertMessages(messages, options.systemPrompt);
 
-      // Truncate if necessary, keeping system messages intact.
+      // Truncate if necessary, keeping system messages and tool_calls pairs intact.
       if (maxInputTokens > 0) {
         let estimatedTokens = estimateOaiMessageTokens(oaiMessages);
         if (estimatedTokens > maxInputTokens) {
           // Split into system and non-system messages, then trim from the
           // oldest non-system messages until we are under budget.
+          // Messages are removed in atomic pairs to avoid stranding a 'tool'
+          // message without its preceding 'assistant' tool_calls message (which
+          // the OpenAI API rejects with a 400 error).
           const systemMessages = oaiMessages.filter((m) => m.role === 'system');
           const nonSystemMessages = oaiMessages.filter((m) => m.role !== 'system');
 
           while (nonSystemMessages.length > 1 && estimatedTokens > maxInputTokens) {
-            nonSystemMessages.shift();
+            const candidate = nonSystemMessages[0];
+            if (!candidate) break;
+
+            if (candidate.role === 'assistant' && (candidate as any).tool_calls?.length > 0) {
+              // Remove the assistant tool_calls message together with all immediately
+              // following 'tool' result messages that belong to it.
+              nonSystemMessages.shift();
+              while (nonSystemMessages.length > 0 && nonSystemMessages[0]?.role === 'tool') {
+                nonSystemMessages.shift();
+              }
+            } else if (candidate.role === 'tool') {
+              // Orphaned 'tool' message (its assistant was already removed) — skip it
+              // together with any adjacent tool messages.
+              nonSystemMessages.shift();
+              while (nonSystemMessages.length > 0 && nonSystemMessages[0]?.role === 'tool') {
+                nonSystemMessages.shift();
+              }
+            } else {
+              nonSystemMessages.shift();
+            }
+
             estimatedTokens = estimateOaiMessageTokens([...systemMessages, ...nonSystemMessages]);
           }
 

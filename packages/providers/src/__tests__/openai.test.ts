@@ -505,6 +505,102 @@ describe('OpenAIProvider: context window truncation', () => {
     const sentMessages = calls[0].messages;
     expect(sentMessages.length).toBe(2);
   });
+
+  it('removes assistant+tool_calls and their tool results as an atomic pair during truncation', async () => {
+    // Build a history that, when truncated, would otherwise leave an orphaned 'tool' message.
+    // The safe truncation must remove the assistant+tool_calls message together with
+    // all immediately-following tool result messages.
+    const { provider, calls } = makeCapturingProvider();
+
+    // We need enough tokens to force truncation.
+    // Use maxTokens=127_990 with glm-4.7 (contextWindow=128_000) → maxInputTokens≈10.
+    // The messages (excluding system) have ~50+ tokens so truncation fires.
+    const longPad = 'X'.repeat(60); // ~15 tokens each
+
+    // Simulate an older assistant turn that used a tool.
+    // In OAI format this becomes: assistant (tool_calls) + tool (result).
+    const messages: Message[] = [
+      { role: 'system', content: 'sys' },
+      // Old assistant message with a tool call
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 'tc-old-1', name: 'Bash', input: { command: 'ls' } },
+        ] as any,
+      },
+      // Old tool result for that tool call
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 'tc-old-1', content: longPad },
+        ] as any,
+      },
+      // Current user message
+      { role: 'user', content: 'what should I do next?' },
+    ];
+
+    await collect(provider.chat(messages, {
+      model: 'glm-4.7',
+      maxTokens: 127_990, // forces truncation
+    }));
+
+    const sentMessages = calls[0].messages;
+
+    // System message must survive
+    expect(sentMessages.some((m: any) => m.role === 'system')).toBe(true);
+
+    // No 'tool' message should exist without a preceding assistant message that has tool_calls.
+    const toolMessages = sentMessages.filter((m: any) => m.role === 'tool');
+    for (const toolMsg of toolMessages) {
+      const idx = sentMessages.indexOf(toolMsg);
+      const preceding = idx > 0 ? sentMessages[idx - 1] : null;
+      expect(preceding?.role).toBe('assistant');
+      expect(Array.isArray(preceding?.tool_calls)).toBe(true);
+    }
+  });
+
+  it('does not strand a tool message when its assistant was removed', async () => {
+    // This is the key regression guard: after truncation there must never be
+    // a role:'tool' message whose directly-preceding message is not role:'assistant'
+    // with tool_calls — that would cause a 400 from the OpenAI API.
+    const { provider, calls } = makeCapturingProvider();
+
+    const longPad = 'Y'.repeat(200); // ~50 tokens
+
+    const messages: Message[] = [
+      { role: 'system', content: 'sys' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 'tc-1', name: 'Read', input: { file_path: '/foo' } },
+        ] as any,
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 'tc-1', content: longPad },
+        ] as any,
+      },
+      { role: 'user', content: 'summarise the file' },
+    ];
+
+    await collect(provider.chat(messages, {
+      model: 'glm-4.7',
+      maxTokens: 127_990,
+    }));
+
+    const sentMessages = calls[0].messages;
+
+    // Invariant: every 'tool' message must be immediately preceded by an 'assistant'
+    // message that has a non-empty tool_calls array.
+    for (let i = 0; i < sentMessages.length; i++) {
+      if (sentMessages[i].role === 'tool') {
+        const prev = i > 0 ? sentMessages[i - 1] : null;
+        expect(prev?.role).toBe('assistant');
+        expect((prev as any)?.tool_calls?.length).toBeGreaterThan(0);
+      }
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

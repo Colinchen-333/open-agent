@@ -1122,4 +1122,87 @@ describe('ConversationLoop', () => {
       expect(secondTools).toContain('mcp__svc__action');
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Snip signal consumption
+  // ---------------------------------------------------------------------------
+
+  describe('snip signal consumption', () => {
+    /** Build a tool that returns the { _action: 'snip', snipCount, message } object. */
+    function makeSnipTool(count: number): ToolDefinition {
+      return {
+        name: 'Snip',
+        description: 'Trim history',
+        inputSchema: { type: 'object', properties: {}, required: [] },
+        shouldDefer: true,
+        async execute(_input: unknown) {
+          return {
+            snipCount: count,
+            _action: 'snip' as const,
+            message: `Requested removal of ${count} oldest message(s).`,
+          };
+        },
+      } as unknown as ToolDefinition;
+    }
+
+    it('trims this.messages by snipCount when Snip tool returns _action:snip', async () => {
+      const snipToolId = 'snip-tool-id';
+      const seenMessages: Message[][] = [];
+
+      // Provider: first call triggers Snip tool; second call is a text response.
+      const provider = makeRecordingProvider(
+        [
+          toolUseResponse(snipToolId, 'Snip', { count: 2 }),
+          textResponse('Done after snip.'),
+        ],
+        seenMessages,
+      );
+
+      const tools = new Map<string, ToolDefinition>([
+        ['Snip', makeSnipTool(2)],
+      ]);
+
+      // Build a loop with a non-trivial initial history so there's something to snip.
+      // We inject two pre-existing messages so snipCount=2 removes exactly those.
+      const loop = new ConversationLoop(baseOptions(provider, tools));
+      loop.setMessages([
+        { role: 'user', content: 'older user message 1' },
+        { role: 'assistant', content: 'older assistant reply 1' },
+      ] as Message[]);
+
+      await collectMessages(loop.run('please snip history'));
+
+      // After the Snip tool executed and snipCount=2 was processed, the two
+      // pre-seeded messages should have been removed from the loop history.
+      // The second LLM call (seenMessages[1]) should NOT contain the old messages.
+      const secondCallMessages: Message[] = seenMessages[1] ?? [];
+      const hasOldMsg1 = secondCallMessages.some(
+        (m) => typeof m.content === 'string' && m.content.includes('older user message 1'),
+      );
+      const hasOldMsg2 = secondCallMessages.some(
+        (m) => typeof m.content === 'string' && m.content.includes('older assistant reply 1'),
+      );
+      expect(hasOldMsg1).toBe(false);
+      expect(hasOldMsg2).toBe(false);
+    });
+
+    it('clamps snipCount to messages.length — never throws on over-large count', async () => {
+      const snipToolId = 'snip-clamp-id';
+      // snipCount of 9999 should not throw even when history is small
+      const provider = makeMockProvider([
+        toolUseResponse(snipToolId, 'Snip', { count: 9999 }),
+        textResponse('Survived the over-trim.'),
+      ]);
+
+      const tools = new Map<string, ToolDefinition>([
+        ['Snip', makeSnipTool(9999)],
+      ]);
+      const loop = new ConversationLoop(baseOptions(provider, tools));
+
+      // Should complete without throwing
+      const messages = await collectMessages(loop.run('trim everything'));
+      const result = messages.find((m) => m.type === 'result') as any;
+      expect(result?.subtype).toBe('success');
+    });
+  });
 });

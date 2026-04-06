@@ -1679,6 +1679,24 @@ export class ConversationLoop {
       // Accumulate permission denials across all turns for the final result.
       allPermissionDenials.push(...permissionDenials);
 
+      // ── Snip signal — trim oldest messages before appending new tool results.
+      // The Snip tool returns { _action: 'snip', snipCount: N } (JSON-stringified).
+      // Scan tool results and, if any carries the signal, splice from messages[0].
+      for (const tr of toolResults) {
+        const raw = typeof tr.content === 'string' ? tr.content : null;
+        if (raw) {
+          try {
+            const parsed = JSON.parse(raw);
+            if (parsed?._action === 'snip' && typeof parsed?.snipCount === 'number') {
+              const count = Math.min(parsed.snipCount, this.messages.length);
+              this.messages.splice(0, count);
+            }
+          } catch {
+            // Not JSON — not a snip result
+          }
+        }
+      }
+
       // Feed the tool results back as a user message so the LLM can continue.
       this.messages.push({ role: 'user', content: toolResults });
 

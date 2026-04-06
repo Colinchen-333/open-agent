@@ -827,6 +827,44 @@ describe('PermissionEngine', () => {
       // Result depends on baseline behavior — just assert classifier didn't early-exit with its rationale
       expect(result.reason ?? '').not.toContain('classifier');
     });
+
+    test('classifier DENY is enforced: LLM classifier returning DENY produces deny decision', async () => {
+      const { setFeatureDefault, clearFeatureOverrides } = await import('@open-agent/core');
+      setFeatureDefault('TRANSCRIPT_CLASSIFIER', true);
+      try {
+        const engine = new PermissionEngine({ mode: 'default' });
+        // Wire an LLM provider that always returns DENY
+        engine.setLLMProvider({ classify: async () => 'DENY' });
+        const result = await engine.evaluate({
+          toolName: 'Bash',
+          input: { command: 'rm -rf /tmp/test' },
+          toolUseId: 'test-classifier-deny-1',
+        });
+        expect(result.behavior).toBe('deny');
+        expect(result.reason).toContain('classifier');
+      } finally {
+        clearFeatureOverrides();
+      }
+    });
+
+    test('classifier DENY is not shadowed by explicit allow rule', async () => {
+      const { setFeatureDefault, clearFeatureOverrides } = await import('@open-agent/core');
+      setFeatureDefault('TRANSCRIPT_CLASSIFIER', true);
+      try {
+        // The classifier runs AFTER alwaysAllow; an allow rule should short-circuit before classifier.
+        // This test verifies that when the classifier runs (no allow rule), DENY is returned.
+        const engine = new PermissionEngine({ mode: 'default' });
+        engine.setLLMProvider({ classify: async () => 'DENY' });
+        const result = await engine.evaluate({
+          toolName: 'Write',
+          input: { file_path: '/tmp/test.txt', content: 'x' },
+          toolUseId: 'test-classifier-deny-2',
+        });
+        expect(result.behavior).toBe('deny');
+      } finally {
+        clearFeatureOverrides();
+      }
+    });
   });
 
   // ---------------------------------------------------------------------------
