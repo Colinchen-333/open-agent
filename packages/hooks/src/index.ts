@@ -6,3 +6,4 @@ export type { HookEvent } from '@open-agent/core';
 
 export * from './types';
 export { HookExecutor } from './executor';
+export * from './camel-case-compat';

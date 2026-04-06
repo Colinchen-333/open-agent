@@ -1,5 +1,6 @@
 import type { HookEvent } from '@open-agent/core';
 import { spawnProcess } from '@open-agent/core';
+import { withCamelCaseAliases } from './camel-case-compat';
 import type {
   HookCallbackMatcher,
   HookDefinition,
@@ -238,7 +239,9 @@ export class HookExecutor {
     input: HookInput,
     timeoutMs: number,
   ): Promise<HookOutput> {
-    const inputJson = JSON.stringify(input);
+    // Enrich with camelCase aliases so hooks written for either convention work.
+    const enrichedInput = withCamelCaseAliases(input);
+    const inputJson = JSON.stringify(enrichedInput);
 
     // Build convenience env vars so shell hooks can access common fields without
     // parsing the full HOOK_INPUT JSON.
@@ -261,7 +264,7 @@ export class HookExecutor {
       env: extraEnv,
     });
 
-    // Write input JSON to the process stdin and close the stream so the
+    // Write enriched JSON to the process stdin and close the stream so the
     // process receives EOF after reading.
     proc.writeStdin(inputJson);
     proc.closeStdin();
@@ -314,7 +317,9 @@ export class HookExecutor {
    * process exit.
    */
   private async executeShellHookAsync(hook: HookDefinition, input: HookInput): Promise<void> {
-    const inputJson = JSON.stringify(input);
+    // Enrich with camelCase aliases so hooks written for either convention work.
+    const enrichedInput = withCamelCaseAliases(input);
+    const inputJson = JSON.stringify(enrichedInput);
 
     const extraEnv: Record<string, string> = {
       HOOK_INPUT: inputJson,

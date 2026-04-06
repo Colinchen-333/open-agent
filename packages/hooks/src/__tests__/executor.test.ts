@@ -111,3 +111,33 @@ test('shell hook receives stdin JSON with all HookInput fields', async () => {
   expect(captured.tool_input).toEqual({ command: 'ls' });
   expect(captured.tool_use_id).toBe('use-1');
 });
+
+test('shell hook receives camelCase aliases in stdin JSON', async () => {
+  const executor = new HookExecutor();
+  const script = `cat > /tmp/hook-camel-test.json && echo '{"continue": true}'`;
+  executor.loadFromConfig({
+    PreToolUse: [{ command: script, timeout: 5 }],
+  });
+  await executor.execute('PreToolUse', {
+    session_id: 'sess-1',
+    transcript_path: '/tmp/t',
+    cwd: '/',
+    hook_event_name: 'PreToolUse',
+    tool_name: 'Bash',
+    tool_input: { command: 'echo test' },
+    tool_use_id: 'use-camel',
+  });
+  const captured = JSON.parse(require('node:fs').readFileSync('/tmp/hook-camel-test.json', 'utf8'));
+  // camelCase aliases present
+  expect(captured.hookEvent).toBe('PreToolUse');
+  expect(captured.sessionId).toBe('sess-1');
+  expect(captured.toolName).toBe('Bash');
+  expect(captured.toolUse).toBeDefined();
+  expect(captured.toolUse.id).toBe('use-camel');
+  expect(captured.toolUse.input).toEqual({ command: 'echo test' });
+  // snake_case originals also present (backward compat)
+  expect(captured.hook_event_name).toBe('PreToolUse');
+  expect(captured.tool_name).toBe('Bash');
+  expect(captured.tool_input).toEqual({ command: 'echo test' });
+  expect(captured.tool_use_id).toBe('use-camel');
+});
