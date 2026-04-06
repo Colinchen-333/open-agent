@@ -163,3 +163,12 @@ export {
   type SessionMetrics,
   type PerformanceMetric,
 } from './analytics.js';
+export {
+  InProcessTransport,
+  CallbackTransport,
+  BridgeSession,
+  createBridgeMessage,
+  type BridgeMessageType,
+  type BridgeMessage,
+  type BridgeTransport,
+} from './bridge.js';
