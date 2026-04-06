@@ -36,6 +36,30 @@ export {
   type SdkMcpServerInstance,
 } from './mcp-helpers.js';
 
+// V2 Session API (lightweight, self-contained)
+export {
+  createSession as v2CreateSession,
+  resumeSession as v2ResumeSession,
+  prompt as v2Prompt,
+  type V2Session,
+  type V2SessionOptions,
+  type V2SessionState,
+  type V2ResultMessage,
+  type V2UserMessage,
+} from './v2-session.js';
+
+// Enhanced tool builder with annotations
+export {
+  tool as toolWithAnnotations,
+  createSdkMcpServer as createAnnotatedMcpServer,
+  type SdkToolDefinition,
+  type SdkMcpServerOptions,
+  type SdkMcpServerInstance as AnnotatedMcpServerInstance,
+} from './tool-builder.js';
+
+// Session mutation helpers (rename, tag, fork at file level)
+export { renameSession, tagSession, forkSession as forkSessionFile } from './session-mutations.js';
+
 // Re-export the most commonly needed core types so consumers do not have to
 // depend on @open-agent/core directly.
 export type {
