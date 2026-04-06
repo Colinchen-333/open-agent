@@ -125,6 +125,18 @@ export class PermissionEngine {
   /** Recent user messages from the transcript. Populated by ConversationLoop after each user turn. */
   private recentUserMessages: string[] = [];
 
+  /** Hook executor for PreToolUse stage. Set via setHookExecutor(). */
+  private hookExecutor?: { run(event: string, input: unknown): Promise<any> };
+
+  /** LLM provider for the classifier stage. Set via setLLMProvider(). */
+  private llmProvider?: import('./llm-classifier.js').LLMClassifierProvider;
+
+  /** Session ID forwarded to hook payloads. */
+  private sessionId?: string;
+
+  /** Working directory forwarded to hook payloads. */
+  private cwd?: string;
+
   /** @internal test instrumentation — set to a callback to observe pipeline stage execution order */
   public __trace?: (stage: PipelineStage) => void;
 
@@ -295,12 +307,53 @@ export class PermissionEngine {
   /**
    * Stage 4 — preToolUseHooks
    *
-   * Placeholder for future pre-tool-use hook integration. Currently returns
-   * undefined so the pipeline always continues to the classifier stage.
+   * Executes registered PreToolUse hooks via the hookExecutor (if set).
+   * A hook result of "approve" short-circuits to allow; "block" or
+   * continue=false short-circuits to deny. Any other result (or an error)
+   * passes through to the next stage.
    */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  private async stagePreToolUseHooks(_ctx: PipelineContext): Promise<PermissionDecision | undefined> {
+  private async stagePreToolUseHooks(ctx: PipelineContext): Promise<PermissionDecision | undefined> {
+    if (!this.hookExecutor) return undefined;
+
+    try {
+      const hookResult = await this.hookExecutor.run('PreToolUse', {
+        session_id: this.sessionId ?? '',
+        transcript_path: '',
+        cwd: this.cwd ?? process.cwd(),
+        hook_event_name: 'PreToolUse',
+        tool_name: ctx.request.toolName,
+        tool_input: ctx.request.input,
+        tool_use_id: ctx.request.toolUseId ?? '',
+      });
+
+      if (hookResult?.decision === 'approve') {
+        return { behavior: 'allow', reason: 'PreToolUse hook approved' };
+      }
+      if (hookResult?.decision === 'block' || hookResult?.continue === false) {
+        return { behavior: 'deny', reason: hookResult?.stopReason ?? 'PreToolUse hook blocked' };
+      }
+    } catch {
+      // Hook execution failure — pass through
+    }
+
     return undefined;
+  }
+
+  /**
+   * Attach a hook executor to the engine. The executor's `run` method is
+   * called during stagePreToolUseHooks with the event name and tool context.
+   */
+  setHookExecutor(executor: { run(event: string, input: unknown): Promise<any> }): void {
+    this.hookExecutor = executor;
+  }
+
+  /**
+   * Attach an LLM provider for the classifier stage. When set (and the
+   * TRANSCRIPT_CLASSIFIER feature flag is on), the classifier will fall
+   * through to the model after the rule-based checks.
+   */
+  setLLMProvider(provider: import('./llm-classifier.js').LLMClassifierProvider): void {
+    this.llmProvider = provider;
   }
 
   /**
@@ -317,9 +370,10 @@ export class PermissionEngine {
    */
   private async stageClassifier(ctx: PipelineContext): Promise<PermissionDecision | undefined> {
     if (!feature('TRANSCRIPT_CLASSIFIER')) return undefined;
-    const decision = classifyPermissionRequest(ctx.request, {
+    const decision = await classifyPermissionRequest(ctx.request, {
       recentUserMessages: this.recentUserMessages,
       allowedPrompts: this.getAllowedPrompts(),
+      llmProvider: this.llmProvider,
     } satisfies ClassifierContext);
     if (decision?.approved) {
       return { behavior: 'allow', reason: `classifier: ${decision.rationale}` };

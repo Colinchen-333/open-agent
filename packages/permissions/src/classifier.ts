@@ -1,10 +1,13 @@
 import type { PermissionRequest } from './types';
+import { type LLMClassifierProvider, createLLMClassifier } from './llm-classifier.js';
 
 export interface ClassifierContext {
   /** Recent user messages from the transcript (newest last). Max 10 recommended. */
   recentUserMessages?: string[];
   /** Allowed prompts registered via ExitPlanModeV2. */
   allowedPrompts?: ReadonlyArray<{ tool: string; prompt: string }>;
+  /** Optional LLM provider for model-backed classification. */
+  llmProvider?: LLMClassifierProvider;
 }
 
 export interface ClassifierDecision {
@@ -36,12 +39,13 @@ const APPROVAL_PHRASES = [
  *   1. Tool is annotated readOnly → approve with rationale "read-only tool"
  *   2. Tool matches an allowedPrompt entry where the prompt keywords appear in the request input → approve
  *   3. Most recent user message contains an approval phrase → approve
- *   4. Otherwise → return null (pass-through; let the pipeline continue to prompt stage)
+ *   4. LLM-backed classification (if context.llmProvider is set) → delegate to model
+ *   5. Otherwise → return null (pass-through; let the pipeline continue to prompt stage)
  */
-export function classifyPermissionRequest(
+export async function classifyPermissionRequest(
   request: PermissionRequest,
   context: ClassifierContext,
-): ClassifierDecision | null {
+): Promise<ClassifierDecision | null> {
   // Rule 1: readOnly annotation
   if (request.annotations?.readOnly === true) {
     return { approved: true, rationale: 'read-only tool' };
@@ -61,6 +65,13 @@ export function classifyPermissionRequest(
     if (latest && containsApprovalPhrase(latest)) {
       return { approved: true, rationale: 'user explicitly approved in recent message' };
     }
+  }
+
+  // Rule 4: LLM-backed classification (if provider available)
+  if (context.llmProvider) {
+    const llmClassify = createLLMClassifier(context.llmProvider);
+    const llmDecision = await llmClassify(request, context);
+    if (llmDecision) return llmDecision;
   }
 
   return null;

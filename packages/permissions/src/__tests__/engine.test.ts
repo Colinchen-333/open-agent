@@ -828,4 +828,71 @@ describe('PermissionEngine', () => {
       expect(result.reason ?? '').not.toContain('classifier');
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // preToolUseHooks (stagePreToolUseHooks)
+  // ---------------------------------------------------------------------------
+
+  describe('preToolUseHooks', () => {
+    test('setHookExecutor: hook returning approve short-circuits to allow', async () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      engine.setHookExecutor({
+        run: async () => ({ decision: 'approve' }),
+      });
+      // Write would normally require ask in default mode; hook should override to allow.
+      const result = await engine.evaluate(req('Write', { file_path: '/tmp/hook-test.ts', content: 'hi' }));
+      expect(result.behavior).toBe('allow');
+      expect(result.reason).toContain('PreToolUse hook approved');
+    });
+
+    test('setHookExecutor: hook returning block short-circuits to deny', async () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      engine.setHookExecutor({
+        run: async () => ({ decision: 'block', stopReason: 'policy violation' }),
+      });
+      // Read is normally allowed; hook should override to deny.
+      const result = await engine.evaluate(req('Read', { file_path: '/tmp/safe.txt' }));
+      expect(result.behavior).toBe('deny');
+      expect(result.reason).toContain('policy violation');
+    });
+
+    test('setHookExecutor: hook returning continue=false short-circuits to deny', async () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      engine.setHookExecutor({
+        run: async () => ({ continue: false }),
+      });
+      const result = await engine.evaluate(req('Bash', { command: 'ls' }));
+      expect(result.behavior).toBe('deny');
+      expect(result.reason).toContain('PreToolUse hook blocked');
+    });
+
+    test('setHookExecutor: hook returning neutral result passes through to next stage', async () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      engine.setHookExecutor({
+        run: async () => ({ decision: 'neutral' }),
+      });
+      // Bash 'ls' is read-only in default mode — pipeline should reach prompt stage and allow.
+      const result = await engine.evaluate(req('Bash', { command: 'ls' }));
+      expect(result.behavior).toBe('allow');
+    });
+
+    test('setHookExecutor: hook error is swallowed and pipeline continues', async () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      engine.setHookExecutor({
+        run: async () => {
+          throw new Error('hook crashed');
+        },
+      });
+      // Pipeline should survive the error and still reach a decision.
+      const result = await engine.evaluate(req('Read', { file_path: '/tmp/x.txt' }));
+      expect(['allow', 'ask', 'deny']).toContain(result.behavior);
+    });
+
+    test('no hookExecutor: stagePreToolUseHooks is a no-op', async () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      // No executor set — Read should be allowed by the safe-tools path.
+      const result = await engine.evaluate(req('Read', { file_path: '/tmp/x.txt' }));
+      expect(result.behavior).toBe('allow');
+    });
+  });
 });
