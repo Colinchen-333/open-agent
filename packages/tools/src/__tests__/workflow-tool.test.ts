@@ -106,7 +106,7 @@ describe('WorkflowTool', () => {
 
   // ---- load by name ----
 
-  test('returns workflow steps and message when found by name', async () => {
+  test('returns workflow steps array and instruction when found by name', async () => {
     setFeatureDefault('WORKFLOW_SCRIPTS', true);
     const cwd = tmp();
     writeWorkflowMd(
@@ -118,8 +118,86 @@ describe('WorkflowTool', () => {
     const result = await tool.execute({ name: 'release' }, makeCtx(cwd));
     expect(result.name).toBe('release');
     expect(result.description).toBe('Release workflow');
-    expect(result.steps).toContain('1. Tag commit');
-    expect(result.message).toContain('release');
+    expect(Array.isArray(result.steps)).toBe(true);
+    expect(result.steps.some((s: string) => s.includes('Tag commit'))).toBe(true);
+    expect(result.totalSteps).toBe(result.steps.length);
+    expect(result.instruction).toContain(`${result.totalSteps}`);
+  });
+
+  // ---- step parsing ----
+
+  test('workflow with 3 numbered steps produces steps array of length 3', async () => {
+    setFeatureDefault('WORKFLOW_SCRIPTS', true);
+    const cwd = tmp();
+    writeWorkflowMd(
+      cwd,
+      'three-step',
+      '---\ndescription: Three steps\n---\n1. First step\n2. Second step\n3. Third step',
+    );
+    const tool = createWorkflowTool();
+    const result = await tool.execute({ name: 'three-step' }, makeCtx(cwd));
+    expect(result.steps).toHaveLength(3);
+    expect(result.totalSteps).toBe(3);
+    expect(result.instruction).toContain('3');
+  });
+
+  test('workflow with heading-delimited steps is parsed correctly', async () => {
+    setFeatureDefault('WORKFLOW_SCRIPTS', true);
+    const cwd = tmp();
+    writeWorkflowMd(
+      cwd,
+      'heading-wf',
+      '---\ndescription: Headings\n---\n## Setup\nInstall deps\n## Build\nRun build\n## Deploy\nPush to prod',
+    );
+    const tool = createWorkflowTool();
+    const result = await tool.execute({ name: 'heading-wf' }, makeCtx(cwd));
+    expect(result.steps).toHaveLength(3);
+  });
+
+  // ---- step parameter ----
+
+  test('step parameter returns only the requested step (1-based)', async () => {
+    setFeatureDefault('WORKFLOW_SCRIPTS', true);
+    const cwd = tmp();
+    writeWorkflowMd(
+      cwd,
+      'resume-wf',
+      '---\ndescription: Resume test\n---\n1. Alpha\n2. Beta\n3. Gamma',
+    );
+    const tool = createWorkflowTool();
+    const result = await tool.execute({ name: 'resume-wf', step: 2 }, makeCtx(cwd));
+    expect(result.step).toBe(2);
+    expect(result.content).toContain('Beta');
+    expect(result.totalSteps).toBe(3);
+    expect(result.instruction).toContain('2');
+    expect(result.steps).toBeUndefined();
+  });
+
+  test('step parameter returns first step correctly', async () => {
+    setFeatureDefault('WORKFLOW_SCRIPTS', true);
+    const cwd = tmp();
+    writeWorkflowMd(
+      cwd,
+      'step-first',
+      '---\ndescription: Step first\n---\n1. Alpha\n2. Beta\n3. Gamma',
+    );
+    const tool = createWorkflowTool();
+    const result = await tool.execute({ name: 'step-first', step: 1 }, makeCtx(cwd));
+    expect(result.content).toContain('Alpha');
+  });
+
+  test('step parameter out of range returns error', async () => {
+    setFeatureDefault('WORKFLOW_SCRIPTS', true);
+    const cwd = tmp();
+    writeWorkflowMd(
+      cwd,
+      'short-wf',
+      '---\ndescription: Short\n---\n1. Only step',
+    );
+    const tool = createWorkflowTool();
+    const result = await tool.execute({ name: 'short-wf', step: 5 }, makeCtx(cwd));
+    expect(result.error).toContain('out of range');
+    expect(result.error).toContain('5');
   });
 
   // ---- not found ----
@@ -155,6 +233,7 @@ describe('WorkflowTool', () => {
 
     const loadResult = await tool.execute({ name: 'no-desc' }, makeCtx(cwd));
     expect(loadResult.description).toBe('');
-    expect(loadResult.steps).toContain('No frontmatter at all.');
+    expect(Array.isArray(loadResult.steps)).toBe(true);
+    expect(loadResult.steps.join('\n')).toContain('No frontmatter at all.');
   });
 });
