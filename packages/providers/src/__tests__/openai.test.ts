@@ -378,6 +378,78 @@ describe('OpenAIProvider: structured output (responseFormat)', () => {
 
     expect(calls[0].response_format).toBeUndefined();
   });
+
+  it('forwards responseFormat json_schema with explicit json_schema descriptor (name + schema)', async () => {
+    const { provider, calls } = makeCapturingProvider();
+
+    await collect(provider.chat(
+      [{ role: 'user', content: 'Give me JSON' }],
+      {
+        model: 'gpt-4o',
+        responseFormat: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'my_output',
+            schema: {
+              type: 'object',
+              properties: { count: { type: 'number' } },
+              required: ['count'],
+            },
+          },
+        },
+      },
+    ));
+
+    expect(calls.length).toBeGreaterThan(0);
+    const rf = calls[0].response_format;
+    expect(rf).toBeDefined();
+    expect(rf.type).toBe('json_schema');
+    expect(rf.json_schema.name).toBe('my_output');
+    expect(rf.json_schema.strict).toBe(true);
+    expect(rf.json_schema.schema.properties.count).toEqual({ type: 'number' });
+  });
+
+  it('uses caller-provided strict=false when set in json_schema descriptor', async () => {
+    const { provider, calls } = makeCapturingProvider();
+
+    await collect(provider.chat(
+      [{ role: 'user', content: 'Give me JSON' }],
+      {
+        model: 'gpt-4o',
+        responseFormat: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'relaxed_output',
+            schema: { type: 'object' },
+            strict: false,
+          },
+        },
+      },
+    ));
+
+    const rf = calls[0].response_format;
+    expect(rf.json_schema.name).toBe('relaxed_output');
+    expect(rf.json_schema.strict).toBe(false);
+  });
+
+  it('forwards responseFormat json_object as { type: "json_object" }', async () => {
+    const { provider, calls } = makeCapturingProvider();
+
+    await collect(provider.chat(
+      [{ role: 'user', content: 'Give me any JSON' }],
+      {
+        model: 'gpt-4o',
+        responseFormat: { type: 'json_object' },
+      },
+    ));
+
+    expect(calls.length).toBeGreaterThan(0);
+    const rf = calls[0].response_format;
+    expect(rf).toBeDefined();
+    expect(rf.type).toBe('json_object');
+    // json_object mode has no json_schema sub-object
+    expect(rf.json_schema).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------

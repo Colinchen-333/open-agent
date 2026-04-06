@@ -67,8 +67,23 @@ export interface ChatOptions {
   stopSequences?: string[];
   /** AbortSignal to cancel the in-flight HTTP request (Ctrl+C support). */
   signal?: AbortSignal;
-  /** Structured output format (e.g. JSON schema). */
-  responseFormat?: { type: 'json_schema'; schema: Record<string, unknown> };
+  /** Structured output format (e.g. JSON schema or plain JSON object mode). */
+  responseFormat?:
+    | {
+        type: 'json_schema';
+        /** Full json_schema descriptor — name and schema are forwarded to the API verbatim. */
+        json_schema: { name: string; schema: Record<string, unknown>; strict?: boolean };
+      }
+    | {
+        type: 'json_schema';
+        /**
+         * Legacy flat shape (schema only, no name).
+         * The provider synthesises `name: 'structured_output'` and `strict: true`.
+         * @deprecated Prefer the `json_schema` field form above.
+         */
+        schema: Record<string, unknown>;
+      }
+    | { type: 'json_object' };
   /**
    * Controls which tool the model is allowed to call.
    * - 'auto': model decides (default when tools are present)

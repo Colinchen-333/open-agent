@@ -362,17 +362,38 @@ export class OpenAIProvider implements LLMProvider {
         ...(toolChoiceValue !== undefined
           ? { tool_choice: toolChoiceValue as OpenAI.Chat.Completions.ChatCompletionToolChoiceOption }
           : {}),
-        // Structured output (JSON schema)
-        ...(options.responseFormat && {
-          response_format: {
-            type: 'json_schema' as const,
-            json_schema: {
-              name: 'structured_output',
-              strict: true,
-              schema: options.responseFormat.schema,
-            },
-          },
-        }),
+        // Structured output — three supported shapes:
+        //   1. { type: 'json_schema', json_schema: { name, schema, strict? } }
+        //      Full passthrough: name, schema, and optional strict are forwarded verbatim.
+        //   2. { type: 'json_schema', schema: ... }  (legacy flat form)
+        //      Provider synthesises name='structured_output' and strict=true.
+        //   3. { type: 'json_object' }
+        //      Plain JSON mode — model outputs valid JSON but no schema is enforced.
+        ...(options.responseFormat?.type === 'json_schema' && 'json_schema' in options.responseFormat
+          ? {
+              response_format: {
+                type: 'json_schema' as const,
+                json_schema: {
+                  name: options.responseFormat.json_schema.name,
+                  strict: options.responseFormat.json_schema.strict ?? true,
+                  schema: options.responseFormat.json_schema.schema,
+                },
+              },
+            }
+          : options.responseFormat?.type === 'json_schema' && 'schema' in options.responseFormat
+          ? {
+              response_format: {
+                type: 'json_schema' as const,
+                json_schema: {
+                  name: 'structured_output',
+                  strict: true,
+                  schema: (options.responseFormat as { type: 'json_schema'; schema: Record<string, unknown> }).schema,
+                },
+              },
+            }
+          : options.responseFormat?.type === 'json_object'
+          ? { response_format: { type: 'json_object' as const } }
+          : {}),
         // Reasoning effort for o-series and gpt-5 class models
         ...(reasoningEffort !== undefined ? { reasoning_effort: reasoningEffort } : {}),
       };

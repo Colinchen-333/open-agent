@@ -424,13 +424,16 @@ describe('ChatOptions responseFormat', () => {
     expect(opts.responseFormat?.type).toBe('json_schema');
   });
 
-  it('schema is accessible from responseFormat', () => {
+  it('schema is accessible from responseFormat (legacy flat shape)', () => {
     const schema = { type: 'object', properties: { result: { type: 'string' } } };
     const opts: ChatOptions = {
       model: 'claude-sonnet-4-6',
       responseFormat: { type: 'json_schema', schema },
     };
-    expect(opts.responseFormat?.schema).toEqual(schema);
+    // Narrow the union to the legacy flat form before accessing .schema
+    const rf = opts.responseFormat;
+    expect(rf?.type).toBe('json_schema');
+    expect(rf && 'schema' in rf ? rf.schema : undefined).toEqual(schema);
   });
 
   it('responseFormat is optional (defaults to undefined)', () => {

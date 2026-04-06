@@ -266,11 +266,27 @@ export class AnthropicProvider implements LLMProvider {
         ? Math.max(options.maxTokens ?? 16384, budgetTokens + 4096)
         : (options.maxTokens ?? 8192);
 
-      // If responseFormat is specified, instruct the model to output JSON
+      // If responseFormat is specified, instruct the model to output JSON.
+      // Supports three shapes:
+      //   { type: 'json_schema', json_schema: { name, schema } }  — full descriptor
+      //   { type: 'json_schema', schema: ... }                    — legacy flat form
+      //   { type: 'json_object' }                                 — plain JSON mode (no schema)
       let effectiveSystem = system;
       if (options.responseFormat) {
-        const schemaStr = JSON.stringify(options.responseFormat.schema);
-        effectiveSystem = (effectiveSystem ?? '') + `\n\nYou MUST respond with valid JSON matching this schema:\n${schemaStr}`;
+        const rf = options.responseFormat;
+        const jsonSchema =
+          rf.type === 'json_schema' && 'json_schema' in rf
+            ? rf.json_schema.schema
+            : rf.type === 'json_schema' && 'schema' in rf
+            ? (rf as { type: 'json_schema'; schema: Record<string, unknown> }).schema
+            : null; // json_object mode — no schema to embed
+        if (jsonSchema !== null) {
+          const schemaStr = JSON.stringify(jsonSchema);
+          effectiveSystem = (effectiveSystem ?? '') + `\n\nYou MUST respond with valid JSON matching this schema:\n${schemaStr}`;
+        } else {
+          // json_object mode: instruct the model to output valid JSON without schema constraint
+          effectiveSystem = (effectiveSystem ?? '') + `\n\nYou MUST respond with valid JSON.`;
+        }
       }
 
       // Enable prompt caching on system prompt and tool definitions.
@@ -288,14 +304,22 @@ export class AnthropicProvider implements LLMProvider {
       if (options.systemPromptBlocks && options.systemPromptBlocks.length > 0) {
         // If responseFormat appended JSON instructions, attach them as an
         // extra dynamic block so the boundary placement stays correct.
-        const blocks = options.responseFormat
-          ? [
-              ...options.systemPromptBlocks,
-              {
-                text: `\n\nYou MUST respond with valid JSON matching this schema:\n${JSON.stringify(options.responseFormat.schema)}`,
-                section: 'dynamic' as const,
-              },
-            ]
+        let rfExtraBlock: { text: string; section: 'dynamic' } | null = null;
+        if (options.responseFormat) {
+          const rf = options.responseFormat;
+          const jsonSchema =
+            rf.type === 'json_schema' && 'json_schema' in rf
+              ? rf.json_schema.schema
+              : rf.type === 'json_schema' && 'schema' in rf
+              ? (rf as { type: 'json_schema'; schema: Record<string, unknown> }).schema
+              : null;
+          const instrText = jsonSchema !== null
+            ? `\n\nYou MUST respond with valid JSON matching this schema:\n${JSON.stringify(jsonSchema)}`
+            : `\n\nYou MUST respond with valid JSON.`;
+          rfExtraBlock = { text: instrText, section: 'dynamic' as const };
+        }
+        const blocks = rfExtraBlock
+          ? [...options.systemPromptBlocks, rfExtraBlock]
           : options.systemPromptBlocks;
         systemParam = buildAnthropicSystemParam(blocks);
       } else if (effectiveSystem) {
