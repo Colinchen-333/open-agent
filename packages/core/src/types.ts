@@ -98,7 +98,7 @@ export interface AgentDefinition {
   criticalSystemReminder_EXPERIMENTAL?: string;
   name?: string;
   mode?: PermissionMode;
-  isolation?: 'worktree' | 'none';
+  isolation?: 'worktree' | 'fork' | 'none';
   timeoutMs?: number;
   allowBackgroundExecution?: boolean;
 

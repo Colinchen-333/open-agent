@@ -5293,35 +5293,52 @@ export function query(
       worktreeBranch = wt.branch;
     }
 
-    try {
-      const { agentId } = await sdkAgentExecutor.executeInBackground({
-        definition: agentDef,
-        agentType: subagentType,
-        provider,
-        tools: new Map(toolRegistry.list().map((tool) => [tool.name, tool])),
-        prompt: promptText,
-        cwd: effectiveAgentCwd,
-        name: input.name ?? resumedSession?.name,
-        model: input.model ?? resumedSession?.model ?? resolveAgentModel(agentDef.model) ?? model,
-        maxTurns: input.maxTurns,
-        mode: input.mode ?? resumedSession?.mode ?? agentDef.mode,
-        teamName,
-        isolation: input.isolation,
-        runInBackground: true,
-        resume,
-        parentSessionId: sessionId,
-        ...(worktreePath ? { worktreePath } : {}),
-        ...(worktreePath ? {
-          onWorktreeCleanup: async (wtPath: string, hasChanges: boolean) => {
-            if (!hasChanges) await cleanupWorktree(wtPath);
-          },
-        } : {}),
-        onEvent: (event: SubagentStreamEvent) => {
-          emitStandaloneOrchestrationEvent(teamName && !event.teamName
-            ? { ...event, teamName }
-            : event);
+    // Fork isolation: snapshot parent messages and dispatch through executeForked so
+    // the worker starts from the parent's conversation history rather than a blank slate.
+    const useForkForWorker =
+      input.isolation === 'fork' &&
+      typeof sdkAgentExecutor.executeForked === 'function';
+
+    const workerBaseOptions = {
+      definition: agentDef,
+      agentType: subagentType,
+      provider,
+      tools: new Map(toolRegistry.list().map((tool) => [tool.name, tool])),
+      prompt: promptText,
+      cwd: effectiveAgentCwd,
+      name: input.name ?? resumedSession?.name,
+      model: input.model ?? resumedSession?.model ?? resolveAgentModel(agentDef.model) ?? model,
+      maxTurns: input.maxTurns,
+      mode: input.mode ?? resumedSession?.mode ?? agentDef.mode,
+      teamName,
+      isolation: input.isolation,
+      runInBackground: true,
+      resume,
+      parentSessionId: sessionId,
+      ...(worktreePath ? { worktreePath } : {}),
+      ...(worktreePath ? {
+        onWorktreeCleanup: async (wtPath: string, hasChanges: boolean) => {
+          if (!hasChanges) await cleanupWorktree(wtPath);
         },
-      });
+      } : {}),
+      onEvent: (event: SubagentStreamEvent) => {
+        emitStandaloneOrchestrationEvent(teamName && !event.teamName
+          ? { ...event, teamName }
+          : event);
+      },
+    };
+
+    try {
+      const { agentId } = useForkForWorker
+        ? await sdkAgentExecutor.executeForked({
+            ...workerBaseOptions,
+            // loop.getMessages() is safe here: this callback runs inside the
+            // conversation turn where the worker is being spawned, so the loop
+            // state is stable.
+            parentMessages: loop.getMessages(),
+            root: effectiveAgentCwd,
+          })
+        : await sdkAgentExecutor.executeInBackground(workerBaseOptions);
       const session = sdkAgentExecutor.getAgent(agentId);
       if (!session) {
         throw new Error(`Worker ${agentId} was launched but its session could not be loaded.`);

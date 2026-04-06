@@ -165,6 +165,31 @@ async function main(): Promise<void> {
         worktreePath,
       };
 
+      // Fork isolation: snapshot parent messages and run in an isolated sidechain.
+      // Checked before runInBackground so fork takes precedence over background dispatch.
+      if (isolation === 'fork' && typeof agentExecutor.executeForked === 'function') {
+        const { agentId, outputFile } = await agentExecutor.executeForked({
+          ...executeOptions,
+          parentMessages: loop.getMessages(),
+          root: effectiveCwd,
+        });
+        return JSON.stringify({
+          status: 'async_launched',
+          agentId,
+          description: name ?? subagentType,
+          prompt,
+          outputFile,
+          canReadOutputFile: true,
+          task_event: {
+            type: 'system',
+            subtype: 'task_started',
+            task_id: agentId,
+            description: name ?? subagentType,
+            task_type: 'agent',
+          },
+        });
+      }
+
       if (runInBackground) {
         const { agentId, outputFile } = await agentExecutor.executeInBackground(executeOptions);
         return JSON.stringify({
