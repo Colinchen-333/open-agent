@@ -226,8 +226,10 @@ function extractRelevantInput(toolName: string, input: unknown): string | null {
   const i = input as Record<string, unknown>;
 
   // File-system tools: match against the target path.
-  if (['Write', 'Edit', 'Read', 'FileWrite', 'FileEdit', 'FileRead'].includes(toolName)) {
-    return typeof i.file_path === 'string' ? i.file_path : null;
+  if (['Write', 'Edit', 'Read', 'FileWrite', 'FileEdit', 'FileRead', 'NotebookEdit'].includes(toolName)) {
+    return typeof i.file_path === 'string' ? i.file_path
+      : typeof i.notebook_path === 'string' ? i.notebook_path
+      : null;
   }
 
   // Search tools: match against the search pattern or query string.
@@ -242,12 +244,8 @@ function extractRelevantInput(toolName: string, input: unknown): string | null {
     return typeof i.url === 'string' ? i.url : null;
   }
 
-  // Generic fallback: first 200 chars of the JSON-serialised input.
-  try {
-    return JSON.stringify(i).slice(0, 200);
-  } catch {
-    return null;
-  }
+  // Fail-closed: unknown tools don't get auto-approved via allowedPrompts.
+  return null;
 }
 
 function containsApprovalPhrase(text: string): boolean {

@@ -587,6 +587,18 @@ async function main(): Promise<void> {
   const permissionPrompter = wrapCliPermissionPrompter(new TerminalPermissionPrompter());
 
   // ------------------------------------------------------------------
+  // Re-register plan mode tools using the engine-aware variant so that
+  // EnterPlanMode calls engine.clearAllowedPrompts() and both tools
+  // integrate with the permission engine's mode stack (pushMode/popMode).
+  // We use rawPermissionEngine (the full PermissionEngine instance) rather
+  // than the PermissionChecker facade, because the facade only exposes the
+  // setMode/getSummary surface and not the mode-stack API.
+  // This overwrites the legacy PlanModeDeps versions registered earlier.
+  // ------------------------------------------------------------------
+  toolRegistry.register(createEnterPlanModeTool({ engine: cliPermissionRuntime.rawPermissionEngine }));
+  toolRegistry.register(createExitPlanModeTool({ engine: cliPermissionRuntime.rawPermissionEngine }));
+
+  // ------------------------------------------------------------------
   // File checkpoint — records file states before Write/Edit operations
   // so the user can /rewind to any prior state.
   // ------------------------------------------------------------------

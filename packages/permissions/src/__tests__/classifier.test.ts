@@ -230,4 +230,49 @@ describe('classifier', () => {
     expect(decision?.approved).toBe(true);
     expect(decision?.rationale).toContain('update README');
   });
+
+  // ── NotebookEdit allowedPrompt scoping ─────────────────────────────────────
+
+  test('NotebookEdit with allowedPrompt scoped to specific notebook is approved', async () => {
+    // The prompt names "analysis.ipynb" which appears in notebook_path — approved.
+    const decision = await classifyPermissionRequest(
+      {
+        toolName: 'NotebookEdit',
+        input: { notebook_path: 'notebooks/analysis.ipynb', new_source: 'print("hi")' },
+        toolUseId: 'nb-1',
+      },
+      { allowedPrompts: [{ tool: 'NotebookEdit', prompt: 'update analysis notebook' }] },
+    );
+    expect(decision?.approved).toBe(true);
+    expect(decision?.rationale).toContain('update analysis notebook');
+  });
+
+  test('NotebookEdit with wrong notebook is NOT approved', async () => {
+    // The prompt names "analysis" but the tool is targeting "secrets.ipynb" — rejected.
+    const decision = await classifyPermissionRequest(
+      {
+        toolName: 'NotebookEdit',
+        input: { notebook_path: 'notebooks/secrets.ipynb', new_source: 'print("hi")' },
+        toolUseId: 'nb-2',
+      },
+      { allowedPrompts: [{ tool: 'NotebookEdit', prompt: 'update analysis notebook' }] },
+    );
+    expect(decision).toBeNull();
+  });
+
+  // ── Fail-closed: unknown tool should NOT be auto-approved ──────────────────
+
+  test('unknown tool with allowedPrompt is NOT approved (fail-closed)', async () => {
+    // extractRelevantInput returns null for unknown tools, so auto-approval must
+    // be refused regardless of what the allowedPrompt says.
+    const decision = await classifyPermissionRequest(
+      {
+        toolName: 'SomeFutureTool',
+        input: { action: 'do something dangerous' },
+        toolUseId: 'fc-1',
+      },
+      { allowedPrompts: [{ tool: 'SomeFutureTool', prompt: 'do something dangerous' }] },
+    );
+    expect(decision).toBeNull();
+  });
 });
