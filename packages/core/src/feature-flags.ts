@@ -13,7 +13,8 @@ export type FeatureFlagName =
   | 'FILE_HISTORY'
   | 'WORKFLOW_SCRIPTS'
   | 'EXIT_PLAN_MODE_V2'
-  | 'DARWIN_SANDBOX';
+  | 'DARWIN_SANDBOX'
+  | 'REPL_TOOL';
 
 export const FEATURE_FLAG_DEFAULTS: Record<FeatureFlagName, boolean> = {
   REACTIVE_COMPACT: true,       // Round 1 L11 is stable
@@ -24,6 +25,7 @@ export const FEATURE_FLAG_DEFAULTS: Record<FeatureFlagName, boolean> = {
   WORKFLOW_SCRIPTS: false,      // future
   EXIT_PLAN_MODE_V2: false,     // Round 2 L22
   DARWIN_SANDBOX: false,        // Opt-in; requires macOS sandbox-exec (R4.2)
+  REPL_TOOL: false,             // Experimental: inline JS/TS evaluation (R13.2)
 };
 
 const overrides: Partial<Record<FeatureFlagName, boolean>> = {};

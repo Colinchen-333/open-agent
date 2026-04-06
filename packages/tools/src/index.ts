@@ -86,3 +86,4 @@ export * from './sandbox/darwin-profile.js';
 export * from './sandbox/darwin-runner.js';
 export { createTodoWriteTool, getTodosForSession, clearTodoSessions } from './todo-write.js';
 export type { TodoItem, TodoWriteOptions } from './todo-write.js';
+export { createREPLTool, type REPLToolOptions } from './repl-tool.js';
