@@ -486,43 +486,52 @@ export class AnthropicProvider implements LLMProvider {
   }
 
   async listModels(): Promise<ModelInfo[]> {
-    return [
+    // Derive all capability flags from the central registry so that listModels()
+    // stays in sync with getModelCapability() / getCapabilities() and does not
+    // carry its own duplicated (potentially stale) hardcoded values.
+    // In particular this prevents the "haiku supportsThinking: true" split-brain
+    // where the registry correctly marks haiku as non-thinking but listModels()
+    // was overriding that with true.
+    const MODELS: Array<{ value: string; displayName: string; description: string; supportsAdaptiveThinking?: boolean; supportedEffortLevels?: ('low' | 'medium' | 'high' | 'max')[] }> = [
       {
         value: 'claude-opus-4-6',
         displayName: 'Claude Opus 4.6',
         description: 'Most capable model for complex tasks',
-        supportsThinking: true,
         supportsAdaptiveThinking: true,
-        supportsEffort: true,
         supportedEffortLevels: ['low', 'medium', 'high', 'max'],
-        supportsStructuredOutput: true,
-        supportsImages: true,
-        supportsServerTools: true,
       },
       {
         value: 'claude-sonnet-4-6',
         displayName: 'Claude Sonnet 4.6',
         description: 'Balanced performance and speed',
-        supportsThinking: true,
         supportsAdaptiveThinking: true,
-        supportsEffort: true,
         supportedEffortLevels: ['low', 'medium', 'high'],
-        supportsStructuredOutput: true,
-        supportsImages: true,
-        supportsServerTools: true,
       },
       {
         value: 'claude-haiku-4-5-20251001',
         displayName: 'Claude Haiku 4.5',
         description: 'Fast and affordable for lightweight tasks',
-        supportsThinking: true,
-        supportsEffort: true,
-        supportedEffortLevels: ['low', 'medium', 'high'],
-        supportsStructuredOutput: true,
-        supportsImages: true,
-        supportsServerTools: true,
+        supportsAdaptiveThinking: false,
+        supportedEffortLevels: [],
       },
     ];
+
+    return MODELS.map(({ value, displayName, description, supportsAdaptiveThinking, supportedEffortLevels }) => {
+      const cap = getModelCapability(value);
+      const thinking = cap?.supportsThinking ?? false;
+      return {
+        value,
+        displayName,
+        description,
+        supportsThinking: thinking,
+        supportsAdaptiveThinking: thinking ? (supportsAdaptiveThinking ?? false) : false,
+        supportsEffort: thinking,
+        supportedEffortLevels: thinking ? (supportedEffortLevels ?? []) : [],
+        supportsStructuredOutput: true,
+        supportsImages: cap?.supportsVision ?? true,
+        supportsServerTools: true,
+      };
+    });
   }
 
   async getCapabilities(model?: string) {

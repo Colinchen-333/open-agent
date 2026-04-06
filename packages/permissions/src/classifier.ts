@@ -81,28 +81,103 @@ function findAllowedPromptMatch(
   request: PermissionRequest,
   allowedPrompts: ReadonlyArray<{ tool: string; prompt: string }>,
 ): { tool: string; prompt: string } | null {
-  const inputText = extractInputText(request.input).toLowerCase();
-  const inputTokens = inputText.split(/\s+/).filter((t) => t.length > 0);
+  if (request.toolName !== 'Bash') {
+    // For non-Bash tools the tool name match alone is sufficient:
+    // the prompt is a description, not an executable command.
+    for (const entry of allowedPrompts) {
+      if (entry.tool === request.toolName) return entry;
+    }
+    return null;
+  }
+
+  // For Bash: extract the actual command string and verify every subcommand
+  // (separated by &&, ||, |, or ;) starts with a known-safe pattern derived
+  // from the prompt description.  This prevents substring attacks like
+  //   allowedPrompt "run tests"  matching  "rm -rf ./tests"
+  // because "rm" does not start with any "run tests" safe pattern.
+  const inputText = extractInputText(request.input).trim();
+
   for (const entry of allowedPrompts) {
     if (entry.tool !== request.toolName) continue;
-    // Keyword overlap: all meaningful prompt words must appear in the input.
-    // Matching uses stem-prefix logic: a prompt word matches if the input contains
-    // a token that is a prefix of the prompt word or the prompt word is a prefix
-    // of an input token. This handles inflections like "tests" ↔ "test".
-    const promptWords = entry.prompt
-      .toLowerCase()
-      .split(/\s+/)
-      .filter((w) => w.length > 3); // drop trivial short words (≤3 chars)
-    if (promptWords.length === 0) continue;
-    const allMatch = promptWords.every((pw) =>
-      inputText.includes(pw) ||
-      inputTokens.some((tok) => tok.startsWith(pw) || pw.startsWith(tok)),
-    );
-    if (allMatch) {
-      return entry;
+
+    const safePatterns = buildSafePatterns(entry.prompt);
+
+    // Split on shell operators; every subcommand must individually match.
+    const subcommands = inputText.split(/\s*(?:&&|\|\|?|;)\s*/).filter(Boolean);
+    const allSafe =
+      subcommands.length > 0 &&
+      subcommands.every((sub) => {
+        const trimmed = sub.trim();
+        return safePatterns.some((pattern) => matchesSafePattern(trimmed, pattern));
+      });
+
+    if (allSafe) return entry;
+  }
+
+  return null;
+}
+
+/**
+ * Map a natural-language intent description (e.g. "run tests") to a list of
+ * anchored RegExps that must match from the START of an individual command.
+ *
+ * The intent table covers the most common development workflows.  If the prompt
+ * does not match any known intent key, the prompt text itself is used as an
+ * anchored prefix, which handles cases like allowedPrompt = "bun run build".
+ */
+function buildSafePatterns(prompt: string): RegExp[] {
+  const normalized = prompt.toLowerCase().trim();
+  const patterns: RegExp[] = [];
+
+  const INTENT_TO_PATTERNS: Record<string, string[]> = {
+    'run tests': [
+      '^bun test', '^npm test', '^yarn test', '^pnpm test',
+      '^jest', '^vitest', '^pytest', '^go test', '^cargo test', '^make test',
+    ],
+    'install dependencies': [
+      '^bun install', '^bun add', '^npm install', '^npm ci',
+      '^yarn', '^pnpm install', '^pip install', '^pip3 install',
+    ],
+    'build': [
+      '^bun run build', '^npm run build', '^yarn build',
+      '^make build', '^cargo build', '^go build',
+    ],
+    'lint': ['^bun run lint', '^npm run lint', '^eslint', '^prettier', '^biome'],
+    'format': ['^bun run format', '^npm run format', '^prettier', '^biome format'],
+    'typecheck': ['^bun run typecheck', '^tsc', '^npm run typecheck'],
+    'start': ['^bun run start', '^npm start', '^yarn start', '^node'],
+    'git status': ['^git status', '^git diff', '^git log', '^git show', '^git branch'],
+    'list files': ['^ls', '^find', '^tree', '^dir'],
+    'read file': ['^cat', '^head', '^tail', '^less', '^more', '^bat'],
+  };
+
+  for (const [intent, pats] of Object.entries(INTENT_TO_PATTERNS)) {
+    if (normalized === intent || normalized.includes(intent)) {
+      for (const p of pats) {
+        patterns.push(new RegExp(p, 'i'));
+      }
     }
   }
-  return null;
+
+  // Fallback: treat the prompt itself as an anchored command prefix.
+  if (patterns.length === 0) {
+    const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    patterns.push(new RegExp(`^${escaped}`, 'i'));
+  }
+
+  return patterns;
+}
+
+/**
+ * Strip common innocent prefixes (env-var assignments, sudo, time, nice) then
+ * test the remaining command string against the safe pattern.
+ */
+function matchesSafePattern(command: string, pattern: RegExp): boolean {
+  const stripped = command
+    .replace(/^(\w+=\S+\s+)*/, '')         // leading env var assignments
+    .replace(/^(sudo|env|time|nice)\s+/i, '') // common transparent wrappers
+    .trim();
+  return pattern.test(stripped);
 }
 
 function extractInputText(input: unknown): string {

@@ -42,6 +42,28 @@ describe('AnthropicProvider.getCapabilities', () => {
     expect(caps.thinking).toBe('native');
   });
 
+  it('listModels: haiku entry has supportsThinking:false (registry-derived, not hardcoded)', async () => {
+    const provider = new AnthropicProvider({ apiKey: 'test-key' });
+    const models = await provider.listModels();
+    const haiku = models.find((m) => m.value === 'claude-haiku-4-5-20251001');
+    expect(haiku).toBeDefined();
+    expect(haiku!.supportsThinking).toBe(false);
+    expect(haiku!.supportsEffort).toBe(false);
+    expect(haiku!.supportsAdaptiveThinking).toBe(false);
+    // Effort levels must be empty for a non-thinking model
+    expect(haiku!.supportedEffortLevels).toHaveLength(0);
+  });
+
+  it('listModels: opus entry has supportsThinking:true derived from registry', async () => {
+    const provider = new AnthropicProvider({ apiKey: 'test-key' });
+    const models = await provider.listModels();
+    const opus = models.find((m) => m.value === 'claude-opus-4-6');
+    expect(opus).toBeDefined();
+    expect(opus!.supportsThinking).toBe(true);
+    expect(opus!.supportsAdaptiveThinking).toBe(true);
+    expect(opus!.supportedEffortLevels).toContain('max');
+  });
+
   it('uses conservative defaults (thinking:unsupported) for unknown models', async () => {
     const provider = new AnthropicProvider({ apiKey: 'test-key' });
     const caps = await provider.getCapabilities('claude-unknown-model-99');

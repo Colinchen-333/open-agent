@@ -156,4 +156,48 @@ describe('classifier', () => {
     );
     expect(decision).toBeNull();
   });
+
+  // ── Security: command-anchored allowedPrompts (privilege escalation fix) ──
+
+  test('SECURITY: rm -rf ./tests does NOT match allowedPrompt "run tests"', async () => {
+    // Classic privilege escalation: input contains "tests" as a path argument,
+    // but the command is destructive.  Must NOT be approved.
+    const decision = await classifyPermissionRequest(
+      { toolName: 'Bash', input: { command: 'rm -rf ./tests' }, toolUseId: 'sec-pwn-1' },
+      { allowedPrompts: [{ tool: 'Bash', prompt: 'run tests' }] },
+    );
+    expect(decision).toBeNull();
+  });
+
+  test('SECURITY: bun test packages/core/ IS approved by allowedPrompt "run tests"', async () => {
+    const decision = await classifyPermissionRequest(
+      { toolName: 'Bash', input: { command: 'bun test packages/core/' }, toolUseId: 'sec-pwn-2' },
+      { allowedPrompts: [{ tool: 'Bash', prompt: 'run tests' }] },
+    );
+    expect(decision?.approved).toBe(true);
+    expect(decision?.rationale).toContain('run tests');
+  });
+
+  test('SECURITY: npm install express IS approved by allowedPrompt "install dependencies"', async () => {
+    const decision = await classifyPermissionRequest(
+      { toolName: 'Bash', input: { command: 'npm install express' }, toolUseId: 'sec-pwn-3' },
+      { allowedPrompts: [{ tool: 'Bash', prompt: 'install dependencies' }] },
+    );
+    expect(decision?.approved).toBe(true);
+    expect(decision?.rationale).toContain('install dependencies');
+  });
+
+  test('SECURITY: rm -rf node_modules && npm install is NOT approved — first subcommand is destructive', async () => {
+    // Even though the second subcommand matches "install dependencies", the first
+    // subcommand (rm -rf) does not, so the whole chain must be rejected.
+    const decision = await classifyPermissionRequest(
+      {
+        toolName: 'Bash',
+        input: { command: 'rm -rf node_modules && npm install' },
+        toolUseId: 'sec-pwn-4',
+      },
+      { allowedPrompts: [{ tool: 'Bash', prompt: 'install dependencies' }] },
+    );
+    expect(decision).toBeNull();
+  });
 });
