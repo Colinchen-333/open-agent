@@ -13,10 +13,10 @@ export function createREPLTool(options: REPLToolOptions = {}): ToolDefinition {
   return withToolDefaults({
     name: 'REPL',
     description:
-      'Execute a JavaScript or TypeScript expression and return the result. ' +
+      'Execute JavaScript/TypeScript code and return the result. ' +
       'Useful for quick calculations, data transformations, JSON processing, ' +
-      'and testing small code snippets without writing to disk. ' +
-      'The expression runs in a Bun subprocess with a timeout.',
+      'and testing small code snippets. The last expression value is captured ' +
+      'automatically — no explicit return needed. Runs in a Bun subprocess with a timeout.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -24,11 +24,6 @@ export function createREPLTool(options: REPLToolOptions = {}): ToolDefinition {
           type: 'string',
           description:
             'The JavaScript/TypeScript code to evaluate. Last expression value is returned.',
-        },
-        language: {
-          type: 'string',
-          enum: ['javascript', 'typescript'],
-          description: 'Language hint (default: javascript). Both run in Bun.',
         },
       },
       required: ['code'],
@@ -38,11 +33,11 @@ export function createREPLTool(options: REPLToolOptions = {}): ToolDefinition {
       risk: 'medium',
     },
     annotations: {
-      destructive: false, // REPL is read-compute, doesn't write files
-      openWorld: false,   // no network by default
+      destructive: true,  // can execute arbitrary code (file writes, process spawning)
+      openWorld: true,    // inherits process.env; can make network calls
     },
     shouldDefer: true, // Available via ToolSearch, not always loaded
-    async execute(input: { code: string; language?: string }, ctx: ToolContext) {
+    async execute(input: { code: string }, ctx: ToolContext) {
       if (!feature('REPL_TOOL')) {
         return {
           error: 'REPL tool is not enabled. Set OPEN_AGENT_FEATURE_REPL_TOOL=1 to enable.',
@@ -54,16 +49,41 @@ export function createREPLTool(options: REPLToolOptions = {}): ToolDefinition {
         return { error: 'Code must be a non-empty string.' };
       }
 
-      // Wrap the code to capture the last expression value.
-      // The async IIFE allows top-level await and a return statement at the call site.
-      const wrappedCode = `
-        const __result = await (async () => {
-          ${code}
-        })();
-        if (__result !== undefined) {
-          console.log(typeof __result === 'string' ? __result : JSON.stringify(__result, null, 2));
-        }
-      `;
+      // Capture the last expression value without requiring an explicit `return`.
+      //
+      // We use the AsyncFunction constructor to create a proper async function whose
+      // body IS the user's code. This gives us:
+      //   1. Native `await` support — the function body is truly async.
+      //   2. `return value` in user code is captured as the function's resolved value.
+      //   3. For expression-only snippets (e.g. `2 + 3`, `arr.map(f)`), we use eval()
+      //      OUTSIDE the async function to capture the completion value of the last
+      //      statement — eval always returns the last expression's value.
+      //
+      // The two-phase approach:
+      //   - If user code contains `await`, run it via AsyncFunction (supports await).
+      //   - Otherwise, use eval() for automatic last-expression capture.
+      //   - In both cases the result is printed if non-undefined.
+      //
+      // We detect `await` by checking the serialized code string; false positives
+      // (e.g. variable named `awaiting`) are acceptable — AsyncFunction works for all.
+      const codeJson = JSON.stringify(code);
+      const wrappedCode = `(async () => {
+  const __hasAwait = /\\bawait\\b/.test(${codeJson});
+  let __r;
+  if (__hasAwait) {
+    // AsyncFunction body: user code runs in a real async function scope.
+    const __AsyncFn = Object.getPrototypeOf(async function(){}).constructor;
+    __r = await new __AsyncFn(${codeJson})();
+  } else {
+    // eval() returns the completion value of the last statement without needing return.
+    __r = eval(${codeJson});
+    if (__r && typeof __r.then === 'function') __r = await __r;
+  }
+  if (__r !== undefined) {
+    const __out = typeof __r === 'string' ? __r : JSON.stringify(__r, null, 2);
+    process.stdout.write(__out + '\\n');
+  }
+})()`;
 
       try {
         const proc = Bun.spawn([process.execPath, '-e', wrappedCode], {

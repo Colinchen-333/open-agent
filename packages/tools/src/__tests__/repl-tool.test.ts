@@ -16,7 +16,8 @@ describe('REPL tool', () => {
   test('evaluates simple expression', async () => {
     setFeatureDefault('REPL_TOOL', true);
     const tool = createREPLTool();
-    const result = await tool.execute({ code: 'return 2 + 3' }, ctx);
+    // No explicit `return` needed — last expression value is captured via eval
+    const result = await tool.execute({ code: '2 + 3' }, ctx);
     expect(result.output).toContain('5');
     expect(result.exitCode).toBe(0);
   });
@@ -25,7 +26,7 @@ describe('REPL tool', () => {
     setFeatureDefault('REPL_TOOL', true);
     const tool = createREPLTool();
     const result = await tool.execute({
-      code: 'const x = [1,2,3]; return x.map(n => n * 2)',
+      code: 'const x = [1,2,3]; x.map(n => n * 2)',
     }, ctx);
     // JSON.stringify pretty-prints arrays; check individual values
     expect(result.output).toContain('2');

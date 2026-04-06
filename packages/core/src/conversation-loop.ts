@@ -652,11 +652,15 @@ export class ConversationLoop {
       }
 
       // Build the tool spec list from the registered tools map.
-      const toolSpecs = Array.from(this.options.tools.values()).map((t) => ({
-        name: t.name,
-        description: t.description,
-        input_schema: t.inputSchema,
-      }));
+      // Deferred tools (shouldDefer: true) are only discoverable via ToolSearch
+      // and must not be presented to the model in the initial tool list.
+      const toolSpecs = Array.from(this.options.tools.values())
+        .filter((t) => !t.shouldDefer)
+        .map((t) => ({
+          name: t.name,
+          description: t.description,
+          input_schema: t.inputSchema,
+        }));
 
       const chatOptions: ChatOptions = {
         model: this.options.model,
