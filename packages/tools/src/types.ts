@@ -139,6 +139,12 @@ export interface ToolDefinition {
     /** The tool name as returned by the MCP server (without the `mcp__<server>__` prefix). */
     toolName: string;
   };
+  /** When true, enables strict API parameter validation (unknown properties rejected). */
+  strict?: boolean;
+  /** Whether this tool was loaded from an MCP server. */
+  isMcp?: boolean;
+  /** Whether this tool was loaded from an LSP server. */
+  isLsp?: boolean;
   inputSchema: Record<string, any>; // JSON Schema
   execute(input: any, context: ToolContext): Promise<any>;
   /** Optional short past-tense summary label used for tool_use_summary events. */

@@ -70,6 +70,7 @@ export function normalizeMcpToolInfo(serverName: string, tool: RawMcpTool): McpT
     inputSchema: tool.inputSchema ?? { type: 'object', properties: {} },
     serverName,
     mcpInfo: { serverName, toolName },
+    isMcp: true,
     ...(annotations ? { annotations } : {}),
   };
 }

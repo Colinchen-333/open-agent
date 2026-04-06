@@ -17,6 +17,8 @@ export interface McpToolInfo {
     /** The tool name as returned by the MCP server (without the `mcp__<server>__` prefix). */
     toolName: string;
   };
+  /** Whether this tool was loaded from an MCP server. Always true for McpToolInfo. */
+  isMcp?: boolean;
 }
 
 export interface McpResourceInfo {

@@ -36,6 +36,7 @@ export function createLSPTool(): ToolDefinition {
     },
     capability: { category: 'search', risk: 'low' },
     annotations: { readOnly: true },
+    isLsp: true,
     shouldDefer: true,
     async execute(
       input: { action: LSPAction; file: string; line?: number; character?: number },
