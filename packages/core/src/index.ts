@@ -139,3 +139,4 @@ export {
   type ShellSessionConfig,
   type CommandResult,
 } from './shell-session.js';
+export { SessionMemory, type MemoryEntry } from './session-memory.js';
