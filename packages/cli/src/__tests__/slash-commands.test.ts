@@ -1,6 +1,6 @@
-import { describe, expect, it, beforeEach } from 'bun:test';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'fs';
-import { tmpdir } from 'os';
+import { describe, expect, it, beforeEach, afterEach } from 'bun:test';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
+import { tmpdir, homedir } from 'os';
 import { join } from 'path';
 import {
   getSlashCommands,
@@ -60,10 +60,139 @@ describe('/workflow', () => {
 });
 
 describe('/keybindings', () => {
-  it('returns handled: true and a stub message', async () => {
+  const keybindingsPath = join(homedir(), '.claude', 'keybindings.json');
+
+  // Save and restore any existing file so tests don't pollute real config.
+  let originalContent: string | null = null;
+
+  beforeEach(() => {
+    try {
+      originalContent = readFileSync(keybindingsPath, 'utf8');
+    } catch {
+      originalContent = null;
+    }
+    // Start each test with no overrides
+    try { rmSync(keybindingsPath); } catch { /* ok */ }
+  });
+
+  afterEach(() => {
+    if (originalContent !== null) {
+      mkdirSync(join(homedir(), '.claude'), { recursive: true });
+      writeFileSync(keybindingsPath, originalContent, 'utf8');
+    } else {
+      try { rmSync(keybindingsPath); } catch { /* ok */ }
+    }
+  });
+
+  it('list: returns a formatted table of default bindings', async () => {
     const result = await handleSlashCommand('/keybindings', baseCtx);
     expect(result?.handled).toBe(true);
-    expect(result?.output).toContain('not yet implemented');
+    expect(result?.output).toContain('Context');
+    expect(result?.output).toContain('Chord');
+    expect(result?.output).toContain('Action');
+    // At least one default binding should appear
+    expect(result?.output).toContain('Global');
+    expect(result?.output).toContain('interrupt');
+  });
+
+  it('list: shows tip line for set/reset usage', async () => {
+    const result = await handleSlashCommand('/keybindings', baseCtx);
+    expect(result?.output).toContain('/keybindings set');
+    expect(result?.output).toContain('/keybindings reset');
+  });
+
+  it('set: writes a new override to keybindings.json', async () => {
+    const result = await handleSlashCommand('/keybindings set Chat Ctrl+Enter submit', baseCtx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('Keybinding set');
+    expect(result?.output).toContain('Chat');
+    expect(result?.output).toContain('submit');
+
+    // File must exist and contain the entry
+    const raw = readFileSync(keybindingsPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    expect(Array.isArray(parsed)).toBe(true);
+    const entry = parsed.find((e: any) => e.context === 'Chat' && e.action === 'submit');
+    expect(entry).toBeDefined();
+  });
+
+  it('set: updates an existing override without duplicating it', async () => {
+    // First set
+    await handleSlashCommand('/keybindings set Chat Ctrl+Enter submit', baseCtx);
+    // Overwrite with a new action
+    await handleSlashCommand('/keybindings set Chat Ctrl+Enter newline', baseCtx);
+
+    const raw = readFileSync(keybindingsPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    // Should still be exactly one entry for that chord
+    const entries = parsed.filter((e: any) => e.context === 'Chat' && e.chord === 'Ctrl+Enter');
+    expect(entries.length).toBe(1);
+    expect(entries[0].action).toBe('newline');
+  });
+
+  it('set: handles multi-keystroke chords (last token is action)', async () => {
+    const result = await handleSlashCommand('/keybindings set Chat Ctrl+K Ctrl+C copy_session', baseCtx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('copy_session');
+
+    const raw = readFileSync(keybindingsPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    const entry = parsed.find((e: any) => e.action === 'copy_session');
+    expect(entry).toBeDefined();
+    expect(entry.chord).toContain('Ctrl+K');
+  });
+
+  it('set: shows usage when not enough arguments', async () => {
+    const result = await handleSlashCommand('/keybindings set', baseCtx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('Usage');
+  });
+
+  it('reset: removes a previously set override', async () => {
+    // Set it first
+    await handleSlashCommand('/keybindings set Global Ctrl+Z undo', baseCtx);
+    let parsed = JSON.parse(readFileSync(keybindingsPath, 'utf8'));
+    expect(parsed.some((e: any) => e.action === 'undo')).toBe(true);
+
+    // Now reset it
+    const result = await handleSlashCommand('/keybindings reset Global Ctrl+Z', baseCtx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('Override removed');
+
+    parsed = JSON.parse(readFileSync(keybindingsPath, 'utf8'));
+    expect(parsed.some((e: any) => e.action === 'undo')).toBe(false);
+  });
+
+  it('reset: reports nothing-to-remove when override does not exist', async () => {
+    const result = await handleSlashCommand('/keybindings reset Chat Ctrl+Z', baseCtx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('No override found');
+  });
+
+  it('reset: shows usage when not enough arguments', async () => {
+    const result = await handleSlashCommand('/keybindings reset', baseCtx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('Usage');
+  });
+
+  it('set: invalid chord (modifier with no key) returns error message', async () => {
+    // "Ctrl+" has no key part — parser throws
+    const result = await handleSlashCommand('/keybindings set Chat Ctrl+ submit', baseCtx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('Invalid');
+  });
+
+  it('reset: invalid chord (modifier with no key) returns error message', async () => {
+    const result = await handleSlashCommand('/keybindings reset Chat Ctrl+', baseCtx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('Invalid');
+  });
+
+  it('unknown subcommand returns usage hint', async () => {
+    const result = await handleSlashCommand('/keybindings foobar', baseCtx);
+    expect(result?.handled).toBe(true);
+    expect(result?.output).toContain('Unknown subcommand');
+    expect(result?.output).toContain('Usage');
   });
 });
 

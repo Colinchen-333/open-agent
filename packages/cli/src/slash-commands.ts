@@ -1,7 +1,9 @@
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { dirname, join } from 'path';
+import { homedir } from 'os';
 import type { ConversationLoop, FileCheckpoint, SessionManager } from '@open-agent/core';
-import { loadMarkdownConfig } from '@open-agent/core';
+import { loadMarkdownConfig, loadKeybindingResolver, parseChord } from '@open-agent/core';
+import type { Keystroke, Chord, KeybindingContext } from '@open-agent/core';
 import {
   createTaskOutputTool,
   createTaskStopTool,
@@ -811,11 +813,178 @@ const SLASH_COMMANDS: Record<
     },
   },
   '/keybindings': {
-    description: 'Show current keybindings',
-    handler: async (_args, _ctx) => {
+    description: 'Show current keybindings, or set/reset overrides',
+    handler: async (args, _ctx) => {
+      // Helper: serialize a Keystroke back to a human-readable string.
+      function serializeKeystroke(ks: Keystroke): string {
+        const parts: string[] = [];
+        if (ks.ctrl) parts.push('Ctrl');
+        if (ks.alt) parts.push('Alt');
+        if (ks.shift) parts.push('Shift');
+        if (ks.meta) parts.push('Cmd');
+        // Named keys stay as-is; single letters are stored lowercase → capitalize for display
+        const key = ks.key.length === 1 ? ks.key.toUpperCase() : ks.key;
+        parts.push(key);
+        return parts.join('+');
+      }
+
+      function serializeChord(chord: Chord): string {
+        return chord.map(serializeKeystroke).join(' ');
+      }
+
+      const KEYBINDINGS_PATH = join(homedir(), '.claude', 'keybindings.json');
+
+      /** Read the current raw overrides array from disk (empty array if missing/unparseable). */
+      function readOverrides(): Array<{ context: string; chord: string; action: string; description?: string }> {
+        try {
+          const raw = readFileSync(KEYBINDINGS_PATH, 'utf8');
+          const parsed = JSON.parse(raw);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch {
+          return [];
+        }
+      }
+
+      /** Write overrides back to disk, creating the directory if needed. */
+      function writeOverrides(overrides: Array<{ context: string; chord: string; action: string; description?: string }>): void {
+        const dir = dirname(KEYBINDINGS_PATH);
+        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+        writeFileSync(KEYBINDINGS_PATH, JSON.stringify(overrides, null, 2) + '\n', 'utf8');
+      }
+
+      const trimmed = (args ?? '').trim();
+      const subArgs = trimmed.split(/\s+/);
+      const sub = subArgs[0] ?? '';
+
+      // ── /keybindings (no args) ─────────────────────────────────────────────
+      if (!sub) {
+        const resolver = await loadKeybindingResolver();
+        const bindings = resolver.list();
+        if (bindings.length === 0) {
+          return { handled: true, output: 'No keybindings configured.' };
+        }
+        // Build aligned table: CONTEXT | CHORD | ACTION | DESCRIPTION
+        const rows = bindings.map((b) => ({
+          context: b.context,
+          chord: serializeChord(b.chord),
+          action: b.action,
+          description: b.description ?? '',
+        }));
+        const w = {
+          context: Math.max(7, ...rows.map((r) => r.context.length)),
+          chord:   Math.max(5,  ...rows.map((r) => r.chord.length)),
+          action:  Math.max(6,  ...rows.map((r) => r.action.length)),
+        };
+        const header =
+          'Context'.padEnd(w.context) + '  ' +
+          'Chord'.padEnd(w.chord)     + '  ' +
+          'Action'.padEnd(w.action)   + '  Description';
+        const divider = '-'.repeat(header.length);
+        const lines: string[] = ['', header, divider];
+        for (const r of rows) {
+          lines.push(
+            r.context.padEnd(w.context) + '  ' +
+            r.chord.padEnd(w.chord)     + '  ' +
+            r.action.padEnd(w.action)   + '  ' + r.description,
+          );
+        }
+        lines.push('');
+        lines.push(`Tip: /keybindings set <Context> <chord> <action>  — add or update an override`);
+        lines.push(`     /keybindings reset <Context> <chord>          — remove an override`);
+        return { handled: true, output: lines.join('\n') };
+      }
+
+      // ── /keybindings set <Context> <chord…> <action> ──────────────────────
+      // Syntax: set Global Ctrl+C interrupt
+      //         set Chat "Ctrl+K Ctrl+C" copy_session
+      //         set Chat Ctrl+K Ctrl+C copy_session   (multi-word chord = all but last token)
+      if (sub === 'set') {
+        // subArgs[1] = context, subArgs[2..n-1] = chord tokens, subArgs[n] = action
+        const context = subArgs[1] as KeybindingContext | undefined;
+        if (!context || subArgs.length < 4) {
+          return {
+            handled: true,
+            output: 'Usage: /keybindings set <Context> <chord> <action>\n' +
+                    'Example: /keybindings set Chat Ctrl+Enter submit\n' +
+                    'Contexts: Global, Chat, Autocomplete, Settings, Help, HistorySearch',
+          };
+        }
+        const action = subArgs[subArgs.length - 1]!;
+        const chordTokens = subArgs.slice(2, subArgs.length - 1);
+        const chordStr = chordTokens.join(' ');
+
+        // Validate chord by parsing it
+        let chord: Chord;
+        try {
+          chord = parseChord(chordStr);
+        } catch (e) {
+          return {
+            handled: true,
+            output: `Invalid chord "${chordStr}": ${(e as Error).message}\n` +
+                    'Examples: Ctrl+C   Shift+Enter   Ctrl+K Ctrl+C',
+          };
+        }
+
+        const overrides = readOverrides();
+        // Replace existing entry with same context+chord, or push new one
+        const serializedChord = serializeChord(chord);
+        const idx = overrides.findIndex((o) => o.context === context && o.chord === serializedChord);
+        if (idx !== -1) {
+          overrides[idx] = { context, chord: serializedChord, action };
+        } else {
+          overrides.push({ context, chord: serializedChord, action });
+        }
+        writeOverrides(overrides);
+        return {
+          handled: true,
+          output: `Keybinding set: [${context}] ${serializedChord} → ${action}\nSaved to ${KEYBINDINGS_PATH}`,
+        };
+      }
+
+      // ── /keybindings reset <Context> <chord…> ─────────────────────────────
+      if (sub === 'reset') {
+        const context = subArgs[1] as KeybindingContext | undefined;
+        if (!context || subArgs.length < 3) {
+          return {
+            handled: true,
+            output: 'Usage: /keybindings reset <Context> <chord>\n' +
+                    'Example: /keybindings reset Chat Ctrl+Enter',
+          };
+        }
+        const chordTokens = subArgs.slice(2);
+        const chordStr = chordTokens.join(' ');
+
+        let chord: Chord;
+        try {
+          chord = parseChord(chordStr);
+        } catch (e) {
+          return {
+            handled: true,
+            output: `Invalid chord "${chordStr}": ${(e as Error).message}`,
+          };
+        }
+
+        const overrides = readOverrides();
+        const serializedChord = serializeChord(chord);
+        const before = overrides.length;
+        const filtered = overrides.filter((o) => !(o.context === context && o.chord === serializedChord));
+        if (filtered.length === before) {
+          return {
+            handled: true,
+            output: `No override found for [${context}] ${serializedChord}. Nothing removed.`,
+          };
+        }
+        writeOverrides(filtered);
+        return {
+          handled: true,
+          output: `Override removed: [${context}] ${serializedChord}\nSaved to ${KEYBINDINGS_PATH}`,
+        };
+      }
+
+      // Unknown subcommand
       return {
         handled: true,
-        output: 'Keybindings configuration not yet implemented (Round 3 scope).',
+        output: `Unknown subcommand: "${sub}"\nUsage:\n  /keybindings                        — list all bindings\n  /keybindings set <Ctx> <chord> <act> — add/update override\n  /keybindings reset <Ctx> <chord>     — remove override`,
       };
     },
   },
