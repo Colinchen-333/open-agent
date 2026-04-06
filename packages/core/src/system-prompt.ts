@@ -50,6 +50,11 @@ export interface SystemPromptOptions {
     instructions: string;
     keepCodingInstructions: boolean;
   };
+  /**
+   * When true, appends a brief-mode instruction block that tells the model to
+   * lead with code, skip explanations unless asked, and omit preamble/summaries.
+   */
+  briefMode?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +410,14 @@ ${options.agentInstructions.join('\n\n---\n\n')}`);
   if (options.activeOutputStyle && options.activeOutputStyle.instructions.trim().length > 0) {
     dynamicParts.push(
       `## Output style: ${options.activeOutputStyle.name}\n\n${options.activeOutputStyle.instructions.trim()}`,
+    );
+  }
+
+  // ── Dynamic: Brief mode ──────────────────────────────────────────────
+  // Injected last so it overrides any style verbosity hints above.
+  if (options.briefMode) {
+    dynamicParts.push(
+      `## Brief mode\n\nBe extremely concise. Lead with code. Skip explanations unless asked. No preamble, no trailing summaries.`,
     );
   }
 

@@ -2254,6 +2254,10 @@ export function query(
     ? options.systemPrompt
     : undefined;
 
+  // Forward reference so prompt builders declared before appStore can still
+  // read briefMode at call time without hitting the TDZ of `const appStore`.
+  let appStoreRef: ReturnType<typeof createStore<AppState>> | undefined;
+
   /** Build the structured blocks for the managed system prompt (undefined when caller supplied a raw string). */
   const buildManagedSystemPromptBlocks = (): import('@open-agent/core').SystemPromptBlock[] | undefined => {
     // When the caller supplies a flat string we cannot decompose it into blocks.
@@ -2285,6 +2289,7 @@ export function query(
       contextSections: promptContext.sections,
       toolDescriptions: getToolPromptDescriptions(),
       activeOutputStyle,
+      briefMode: (appStoreRef?.getState().briefMode === true) || false,
       runtimeSnapshot: buildSystemPromptRuntimeSnapshot({
         runtime: runtimeSnapshot,
         tools: availableTools,
@@ -2338,6 +2343,7 @@ export function query(
         contextSections: promptContext.sections,
         toolDescriptions: getToolPromptDescriptions(),
         activeOutputStyle,
+        briefMode: (appStoreRef?.getState().briefMode === true) || false,
         runtimeSnapshot: buildSystemPromptRuntimeSnapshot({
           runtime: runtimeSnapshot,
           tools: availableTools,
@@ -2474,6 +2480,7 @@ export function query(
     thinkingConfig: options.thinking ?? (options.maxThinkingTokens ? { type: 'enabled', budgetTokens: options.maxThinkingTokens } : { type: 'adaptive' }),
     verbose: options.debug ?? false,
   }));
+  appStoreRef = appStore;
 
   const mapAppStateMcpServers = () => runtime.listMcpServerStatus().map((server) => ({
     name: server.name,

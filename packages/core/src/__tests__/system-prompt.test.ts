@@ -375,6 +375,42 @@ describe('buildSystemPrompt runtime snapshot', () => {
   });
 });
 
+describe('buildSystemPrompt briefMode', () => {
+  it('injects brief mode block when briefMode is true', () => {
+    const prompt = buildSystemPrompt({
+      cwd: '/tmp',
+      model: 'glm-4.7',
+      permissionMode: 'default',
+      tools: [],
+      briefMode: true,
+    });
+    expect(prompt).toContain('## Brief mode');
+    expect(prompt).toContain('Lead with code');
+    expect(prompt).toContain('No preamble');
+  });
+
+  it('omits brief mode block when briefMode is false', () => {
+    const prompt = buildSystemPrompt({
+      cwd: '/tmp',
+      model: 'glm-4.7',
+      permissionMode: 'default',
+      tools: [],
+      briefMode: false,
+    });
+    expect(prompt).not.toContain('## Brief mode');
+  });
+
+  it('omits brief mode block when briefMode is not provided', () => {
+    const prompt = buildSystemPrompt({
+      cwd: '/tmp',
+      model: 'glm-4.7',
+      permissionMode: 'default',
+      tools: [],
+    });
+    expect(prompt).not.toContain('## Brief mode');
+  });
+});
+
 describe('buildSystemPromptBlocks', () => {
   it('returns blocks with all static sections before any dynamic section', () => {
     const blocks = buildSystemPromptBlocks({

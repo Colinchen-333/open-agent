@@ -12,25 +12,34 @@ export function extractBashSubcommands(command: string): string[][] {
 
   const result: string[][] = [];
   for (const part of parts) {
-    // Strip leading env vars (FOO=bar cmd → cmd)
-    const withoutEnvVars = part.replace(/^(\w+=\S+\s+)+/, '');
-    // Strip subshell wrapper
-    const withoutSubshell = withoutEnvVars.replace(/^\(|\)$/g, '').trim();
-    // Split into tokens
-    const tokens = withoutSubshell.split(/\s+/).filter(Boolean);
+    // 1. Strip subshell wrapper
+    const withoutSubshell = part.replace(/^\(|\)$/g, '').trim();
+
+    // 2. Split into tokens
+    let tokens = withoutSubshell.split(/\s+/).filter(Boolean);
     if (tokens.length === 0) continue;
 
-    // Skip common prefixes that aren't real commands
-    let startIdx = 0;
-    while (
-      startIdx < tokens.length &&
-      ['sudo', 'env', 'time', 'nice', 'nohup', 'xargs'].includes(tokens[startIdx]!)
-    ) {
-      startIdx++;
+    // 3. Strip leading env vars BEFORE prefix skipping (FOO=bar cmd → cmd)
+    while (tokens.length > 0 && /^\w+=/.test(tokens[0]!)) {
+      tokens = tokens.slice(1);
     }
-    if (startIdx >= tokens.length) continue;
 
-    result.push(tokens.slice(startIdx));
+    // 4. Skip common wrapper prefixes that aren't real commands
+    while (
+      tokens.length > 0 &&
+      ['sudo', 'env', 'time', 'nice', 'nohup', 'xargs'].includes(tokens[0]!)
+    ) {
+      tokens = tokens.slice(1);
+    }
+
+    // 5. Strip env vars AGAIN after prefix removal (handles `env FOO=bar cmd`)
+    while (tokens.length > 0 && /^\w+=/.test(tokens[0]!)) {
+      tokens = tokens.slice(1);
+    }
+
+    if (tokens.length === 0) continue;
+
+    result.push(tokens);
   }
   return result;
 }
@@ -172,9 +181,11 @@ export function classifyBashCommand(command: string): BashCommandClassification 
     hasNetwork: allCommandForms.some(c => NETWORK_COMMANDS.has(c)),
     isReadOnly:
       commands.length > 0 &&
-      allCommandForms.every(
-        c => READ_ONLY_COMMANDS.has(c) || commands.every(cmd => READ_ONLY_COMMANDS.has(cmd)),
-      ),
+      subcmds.every(tokens => {
+        const oneWord = tokens[0] ?? '';
+        const twoWord = tokens.length >= 2 ? `${tokens[0]} ${tokens[1]}` : '';
+        return READ_ONLY_COMMANDS.has(oneWord) || READ_ONLY_COMMANDS.has(twoWord);
+      }),
     hasPackageInstall: allCommandForms.some(c => PACKAGE_INSTALL_COMMANDS.has(c)),
   };
 }

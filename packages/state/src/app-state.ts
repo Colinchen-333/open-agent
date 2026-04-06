@@ -277,6 +277,10 @@ export interface AppState {
   // Settings
   thinkingConfig: ThinkingConfig;
   verbose: boolean;
+
+  // UI toggles
+  /** When true, the model is instructed to be extremely concise and code-first. */
+  briefMode?: boolean;
 }
 
 export function createDefaultAppState(overrides: Partial<AppState> = {}): AppState {

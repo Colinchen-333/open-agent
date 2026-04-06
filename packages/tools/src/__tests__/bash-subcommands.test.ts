@@ -215,4 +215,24 @@ describe('classifyBashCommand', () => {
     expect(c.commands).toContain('git');
     expect(c.commands).toContain('npm');
   });
+
+  // --- env prefix after wrapper prefix (Bug A) ---
+
+  it('detects npm install after env prefix (env NODE_ENV=production npm install)', () => {
+    const c = classifyBashCommand('env NODE_ENV=production npm install');
+    expect(c.hasPackageInstall).toBe(true);
+    expect(c.hasNetwork).toBe(true);
+  });
+
+  // --- two-word read-only commands (Bug B) ---
+
+  it('classifies git status as read-only', () => {
+    const c = classifyBashCommand('git status');
+    expect(c.isReadOnly).toBe(true);
+  });
+
+  it('classifies git diff && git log as read-only', () => {
+    const c = classifyBashCommand('git diff && git log');
+    expect(c.isReadOnly).toBe(true);
+  });
 });

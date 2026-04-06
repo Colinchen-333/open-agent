@@ -726,6 +726,9 @@ async function main(): Promise<void> {
   let toolNames = getAvailableTools().map((tool) => tool.name);
   // Mutable: set by /output-style and picked up by buildCliSystemPrompt on the next turn.
   let activeCliOutputStyle: Pick<OutputStyle, 'name' | 'instructions' | 'keepCodingInstructions'> | undefined = undefined;
+  // Forward reference so prompt builders declared before appStore can read
+  // briefMode at call time without hitting the TDZ of `const appStore`.
+  let cliAppStoreRef: ReturnType<typeof createStore<AppState>> | undefined;
   const isGitRepo = isGitRepository(cwd);
   const loadCurrentPromptContext = () => loadPromptContext({
     cwd,
@@ -770,6 +773,7 @@ async function main(): Promise<void> {
       }),
       outputStyle: cliOutputStyle,
       activeOutputStyle: activeCliOutputStyle,
+      briefMode: (cliAppStoreRef?.getState().briefMode === true) || false,
       knowledgeCutoff: 'August 2025',
     });
   };
@@ -811,6 +815,7 @@ async function main(): Promise<void> {
       }),
       outputStyle: cliOutputStyle,
       activeOutputStyle: activeCliOutputStyle,
+      briefMode: (cliAppStoreRef?.getState().briefMode === true) || false,
       knowledgeCutoff: 'August 2025',
     });
   };
@@ -827,6 +832,7 @@ async function main(): Promise<void> {
     thinkingConfig: effectiveThinking,
     verbose: args.verbose ?? false,
   }));
+  cliAppStoreRef = appStore;
 
   const loop = new ConversationLoop({
     provider,
