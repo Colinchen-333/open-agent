@@ -113,6 +113,11 @@ export function createBashTool(deps: BashToolDeps = {}): ToolDefinition {
     name: 'Bash',
     isConcurrencySafe: false,
     annotations: { destructive: true, openWorld: true },
+    userFacingName: (input: any) => {
+      const cmd = String(input?.command ?? '').trim();
+      const firstWord = cmd.split(/\s+/)[0] ?? 'Bash';
+      return `Bash(${firstWord})`;
+    },
     searchHint: 'execute shell terminal command run script',
     isDestructive: (input: unknown) => {
       const cmd = String((input as any)?.command ?? '');

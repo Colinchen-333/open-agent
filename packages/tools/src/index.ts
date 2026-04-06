@@ -24,6 +24,7 @@ export type {
   ToolAnnotations,
 } from './types.js';
 
+export { extractToolPath, getToolDisplayName, areToolInputsEquivalent } from './tool-path.js';
 export { ToolRegistry, createDefaultToolRegistry } from './registry.js';
 export { describeToolCapability, resolveToolCapability } from './capability.js';
 export { createReadTool } from './read.js';

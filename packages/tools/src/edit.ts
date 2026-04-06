@@ -73,6 +73,7 @@ export function createEditTool(): ToolDefinition {
     isConcurrencySafe: false,
     searchHint: 'edit modify replace text in file',
     annotations: { destructive: true },
+    getPath: (input: any) => input?.file_path ?? null,
     getToolUseSummary(input: FileEditInput, _result, isError) {
       const file = summarizeFilePath(input.file_path) ?? 'file';
       return isError ? `Edit failed in ${file}` : `Edited ${file}`;

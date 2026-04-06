@@ -10,6 +10,7 @@ export function createGrepTool(): ToolDefinition {
     isReadOnly: true,
     searchHint: 'search find text pattern in files code',
     annotations: { readOnly: true, idempotent: true },
+    getPath: (input: any) => input?.path ?? null,
     getToolUseSummary(input: GrepInput) {
       return `Searched ${truncateSummary(input.pattern, 40)}`;
     },

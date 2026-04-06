@@ -34,6 +34,7 @@ export function createGlobTool(): ToolDefinition {
     isReadOnly: true,
     searchHint: 'find files by name pattern glob',
     annotations: { readOnly: true, idempotent: true },
+    getPath: (input: any) => input?.path ?? null,
     getToolUseSummary(input: GlobInput) {
       return `Matched ${truncateSummary(input.pattern, 40)}`;
     },

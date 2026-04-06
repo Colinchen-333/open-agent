@@ -32,6 +32,9 @@ export function createReadTool(): ToolDefinition {
     isReadOnly: true,
     searchHint: 'read view open file contents',
     annotations: { readOnly: true, idempotent: true },
+    getPath: (input: any) => input?.file_path ?? null,
+    inputsEquivalent: (a: any, b: any) =>
+      a?.file_path === b?.file_path && a?.offset === b?.offset && a?.limit === b?.limit,
     getToolUseSummary(input: FileReadInput) {
       return `Read ${summarizeFilePath(input.file_path) ?? 'file'}`;
     },

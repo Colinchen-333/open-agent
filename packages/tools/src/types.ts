@@ -235,6 +235,15 @@ export interface ToolDefinition {
    *  Default: `${toolName} ${JSON.stringify(input).slice(0,200)}` */
   toAutoClassifierInput?: (input: unknown) => string;
 
+  /** Extract the primary file path from tool input for permission rule matching. */
+  getPath?: (input: unknown) => string | null;
+
+  /** Check if two tool inputs are semantically equivalent (for deduplication). */
+  inputsEquivalent?: (a: unknown, b: unknown) => boolean;
+
+  /** Dynamic user-facing name based on input. Defaults to `name` when omitted. */
+  userFacingName?: (input: unknown) => string;
+
   /** Per-tool permission check that runs before the engine pipeline.
    *  Return 'allow' | 'deny' | 'ask'. If 'deny', the tool call is blocked
    *  without reaching the engine. If 'allow', skips engine (fast path). */

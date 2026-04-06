@@ -13,6 +13,7 @@ export function createWriteTool(): ToolDefinition {
     searchHint: 'write create new file',
     isDestructive: true,
     annotations: { destructive: true },
+    getPath: (input: any) => input?.file_path ?? null,
     getToolUseSummary(input: FileWriteInput, _result, isError) {
       const file = summarizeFilePath(input.file_path) ?? 'file';
       return isError ? `Write failed for ${file}` : `Wrote ${file}`;
