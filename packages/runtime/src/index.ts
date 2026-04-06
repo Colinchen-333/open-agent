@@ -400,6 +400,7 @@ export class OpenAgentRuntime {
       name: runtimeName,
       description: tool.description ?? '',
       inputSchema: tool.inputSchema ?? { type: 'object', properties: {} },
+      shouldDefer: true, // MCP tools are discovered via ToolSearch, not in initial prompt
       isReadOnly: readOnly,
       capability: {
         category: 'mcp',
