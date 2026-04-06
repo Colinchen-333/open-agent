@@ -49,6 +49,23 @@ export interface ElicitationResponse {
 }
 
 /**
+ * Hook that can intercept an elicitation request before it reaches the UI adapter.
+ * Return a response to short-circuit, or null to let the next hook / adapter handle it.
+ */
+export interface ElicitationHook {
+  /** Hook name for logging and removal. */
+  name: string;
+  /** Called before the UI adapter. Return a response to skip UI, or null to continue. */
+  handle(request: ElicitationRequest): Promise<ElicitationResponse | null>;
+}
+
+/** Result payload delivered via a server-side completion notification. */
+export interface ElicitationCompletionResult {
+  success: boolean;
+  error?: string;
+}
+
+/**
  * Adapter interface that handles actually collecting user input.
  * A CLI adapter prompts on stdin; a web adapter shows a modal; a test adapter
  * pre-programs responses.
@@ -79,6 +96,8 @@ export const AUTO_DECLINE_ADAPTER: ElicitationAdapter = {
 export class ElicitationManager {
   private adapter: ElicitationAdapter;
   private inFlight = new Map<string, ElicitationRequest>();
+  private hooks: ElicitationHook[] = [];
+  private completionCallbacks = new Map<string, (result: ElicitationCompletionResult) => void>();
 
   constructor(adapter: ElicitationAdapter = AUTO_DECLINE_ADAPTER) {
     this.adapter = adapter;
@@ -89,13 +108,56 @@ export class ElicitationManager {
     this.adapter = adapter;
   }
 
+  // ── Hook management ──────────────────────────────────────────────────
+
+  /** Register a pre-elicitation hook. Hooks run in insertion order. */
+  addHook(hook: ElicitationHook): void {
+    this.hooks.push(hook);
+  }
+
+  /** Remove a previously registered hook by name. */
+  removeHook(name: string): void {
+    this.hooks = this.hooks.filter((h) => h.name !== name);
+  }
+
+  // ── Completion notifications ─────────────────────────────────────────
+
+  /**
+   * Register a callback for when the server sends a completion notification
+   * for the given elicitation (e.g. after a browser-based OAuth flow).
+   */
+  onCompletion(elicitationId: string, callback: (result: ElicitationCompletionResult) => void): void {
+    this.completionCallbacks.set(elicitationId, callback);
+  }
+
+  /**
+   * Handle a completion notification from the server (post-browser-flow).
+   * Fires and removes the registered callback, if any.
+   */
+  handleCompletionNotification(elicitationId: string, result: ElicitationCompletionResult): void {
+    this.completionCallbacks.get(elicitationId)?.(result);
+    this.completionCallbacks.delete(elicitationId);
+  }
+
+  // ── Core handling ────────────────────────────────────────────────────
+
   /**
    * Handle an incoming elicitation request from a server.
-   * Presents to the adapter, enforces timeout, returns response.
+   * Runs hooks first (any hook can short-circuit), then falls through to
+   * the adapter, enforcing per-request timeout.
    */
   async handle(request: ElicitationRequest): Promise<ElicitationResponse> {
     this.inFlight.set(request.elicitationId, request);
     try {
+      // Run hooks first — if any hook returns a response, use it
+      for (const hook of this.hooks) {
+        const hookResult = await hook.handle(request);
+        if (hookResult) {
+          return hookResult;
+        }
+      }
+
+      // Fall through to the adapter
       const timeoutMs = request.timeoutMs ?? 5 * 60_000; // default 5 min
       const adapterPromise = this.adapter.present(request);
       const timeoutPromise = new Promise<ElicitationResponse>((resolve) => {

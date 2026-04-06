@@ -18,6 +18,8 @@ export type {
   ElicitationRequest,
   ElicitationResponse,
   ElicitationAdapter,
+  ElicitationHook,
+  ElicitationCompletionResult,
 } from './elicitation';
 export { createSamplingHandler } from './sampling';
 export type { SamplingHandler } from './sampling';
