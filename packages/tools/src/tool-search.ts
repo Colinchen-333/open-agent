@@ -15,7 +15,7 @@ function tokenize(s: string): string[] {
 }
 
 function scoreMatch(queryTokens: string[], tool: ToolDefinition): number {
-  const hay = tokenize(`${tool.name} ${tool.description} ${tool.searchHint ?? ''}`);
+  const hay = tokenize(`${tool.name} ${tool.description} ${tool.searchHint ?? ''} ${(tool.aliases ?? []).join(' ')}`);
   const haySet = new Set(hay);
   let score = 0;
   for (const q of queryTokens) {
@@ -55,6 +55,33 @@ export function createToolSearchTool(opts: ToolSearchDeps | ToolSearchRegistry):
       async execute(input: any, ctx: ToolContext) {
         const query: string = String(input.query ?? '').trim();
         const max: number = (input.max_results as number) ?? 5;
+
+        // Direct select by name or alias
+        if (query.startsWith('select:')) {
+          const toolName = query.slice(7).trim();
+          if (!toolName) return 'Missing tool name. Use "select:<tool_name>".';
+          // Direct name lookup
+          let tool = opts.registry.get(toolName);
+          // Fallback: check aliases
+          if (!tool) {
+            for (const candidate of opts.registry.values()) {
+              if (candidate.aliases?.includes(toolName)) {
+                tool = candidate;
+                break;
+              }
+            }
+          }
+          if (tool) {
+            if (tool.shouldDefer) ctx.activateDeferredTool?.(tool.name);
+            return {
+              matches: [{ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, score: 100 }],
+              totalAvailable: 1,
+              categories: { [tool.capability?.category ?? 'other']: 1 },
+            };
+          }
+          return `Tool "${toolName}" not found. Try ToolSearch with keywords first, then run select:<tool_name>.`;
+        }
+
         const qTokens = tokenize(query);
         const scored: Array<{ name: string; description: string; inputSchema: unknown; score: number }> = [];
         for (const tool of opts.registry.values()) {

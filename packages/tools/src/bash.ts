@@ -114,6 +114,14 @@ export function createBashTool(deps: BashToolDeps = {}): ToolDefinition {
     isConcurrencySafe: false,
     annotations: { destructive: true, openWorld: true },
     searchHint: 'execute shell terminal command run script',
+    isDestructive: (input: unknown) => {
+      const cmd = String((input as any)?.command ?? '');
+      return /\b(rm|rmdir|mv|dd|mkfs|git push|git reset)\b/.test(cmd);
+    },
+    isOpenWorld: (input: unknown) => {
+      const cmd = String((input as any)?.command ?? '');
+      return /\b(curl|wget|ssh|scp|fetch|git clone|git pull)\b/.test(cmd);
+    },
     toAutoClassifierInput: (input: any) => `Bash ${input.command?.slice(0, 300) ?? ''}`,
     validateInput: (input: any) => {
       if (!input.command || typeof input.command !== 'string' || input.command.trim() === '') {

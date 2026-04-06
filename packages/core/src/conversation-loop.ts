@@ -673,7 +673,7 @@ export class ConversationLoop {
         .filter((t) => {
           if (t.isEnabled === false) return false;
           if (typeof t.isEnabled === 'function' && !t.isEnabled()) return false;
-          if (t.shouldDefer && !this.activatedDeferredTools.has(t.name)) return false;
+          if (t.shouldDefer && !t.alwaysLoad && !this.activatedDeferredTools.has(t.name)) return false;
           return true;
         })
         .map((t) => ({
@@ -1814,7 +1814,7 @@ export class ConversationLoop {
       .filter((t) => {
         if (t.isEnabled === false) return false;
         if (typeof t.isEnabled === 'function' && !t.isEnabled()) return false;
-        if (t.shouldDefer && !this.activatedDeferredTools.has(t.name)) return false;
+        if (t.shouldDefer && !t.alwaysLoad && !this.activatedDeferredTools.has(t.name)) return false;
         return true;
       })
       .map((t) => ({

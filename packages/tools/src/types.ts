@@ -212,6 +212,22 @@ export interface ToolDefinition {
   /** Search hint for ToolSearch matching (freeform keywords). */
   searchHint?: string;
 
+  /** Alternative names for tool lookup (e.g., ['FileRead'] for 'Read'). */
+  aliases?: string[];
+
+  /** When true, include in turn-1 tool list even if shouldDefer is true.
+   *  Used for tools that are deferred for ToolSearch but still need to be
+   *  available from the first turn. */
+  alwaysLoad?: boolean;
+
+  /** Whether this tool performs destructive/irreversible operations for the given input.
+   *  Used by the permission engine and UI for extra confirmation. */
+  isDestructive?: boolean | ((input: unknown) => boolean);
+
+  /** Whether this tool operates on untrusted/external content.
+   *  Affects permission classification and sandbox policy. */
+  isOpenWorld?: boolean | ((input: unknown) => boolean);
+
   /** Whether this tool is currently enabled (feature gate). When false, excluded from tool list. */
   isEnabled?: boolean | (() => boolean);
 

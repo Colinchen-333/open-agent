@@ -11,6 +11,7 @@ export function createWriteTool(): ToolDefinition {
     description: 'Write content to a file, creating it or overwriting it entirely. Creates parent directories as needed.',
     isConcurrencySafe: false,
     searchHint: 'write create new file',
+    isDestructive: true,
     annotations: { destructive: true },
     getToolUseSummary(input: FileWriteInput, _result, isError) {
       const file = summarizeFilePath(input.file_path) ?? 'file';
