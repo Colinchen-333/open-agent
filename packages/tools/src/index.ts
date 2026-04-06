@@ -94,3 +94,14 @@ export type { TodoItem, TodoWriteOptions } from './todo-write.js';
 export { createREPLTool, type REPLToolOptions } from './repl-tool.js';
 export { createWorkflowTool } from './workflow-tool.js';
 export { createBriefTool } from './brief-tool.js';
+export { createSleepTool } from './sleep-tool.js';
+export { createSnipTool } from './snip-tool.js';
+export {
+  createCronCreateTool,
+  createCronListTool,
+  createCronDeleteTool,
+  cronJobStore,
+  _resetCronStore,
+  type CronJob,
+} from './cron-tools.js';
+export { createLSPTool, type LSPAction } from './lsp-tool.js';

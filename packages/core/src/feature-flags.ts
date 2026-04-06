@@ -14,7 +14,8 @@ export type FeatureFlagName =
   | 'WORKFLOW_SCRIPTS'
   | 'EXIT_PLAN_MODE_V2'
   | 'DARWIN_SANDBOX'
-  | 'REPL_TOOL';
+  | 'REPL_TOOL'
+  | 'ENABLE_LSP_TOOL';
 
 export const FEATURE_FLAG_DEFAULTS: Record<FeatureFlagName, boolean> = {
   REACTIVE_COMPACT: true,       // Round 1 L11 is stable
@@ -26,6 +27,7 @@ export const FEATURE_FLAG_DEFAULTS: Record<FeatureFlagName, boolean> = {
   EXIT_PLAN_MODE_V2: false,     // Round 2 L22
   DARWIN_SANDBOX: process.platform === 'darwin',  // ON by default on macOS, OFF elsewhere (R4.2/R5.3)
   REPL_TOOL: false,             // Experimental: inline JS/TS evaluation (R13.2)
+  ENABLE_LSP_TOOL: false,       // LSP code-intelligence stub; needs real LSP server wired in
 };
 
 const overrides: Partial<Record<FeatureFlagName, boolean>> = {};

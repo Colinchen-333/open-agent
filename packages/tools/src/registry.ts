@@ -17,6 +17,10 @@ import { createTodoWriteTool } from './todo-write.js';
 import { createREPLTool } from './repl-tool.js';
 import { createWorkflowTool } from './workflow-tool.js';
 import { createBriefTool } from './brief-tool.js';
+import { createSleepTool } from './sleep-tool.js';
+import { createSnipTool } from './snip-tool.js';
+import { createCronCreateTool, createCronListTool, createCronDeleteTool } from './cron-tools.js';
+import { createLSPTool } from './lsp-tool.js';
 
 /**
  * Central registry for all available tools.
@@ -104,6 +108,12 @@ export function createDefaultToolRegistry(_cwd: string): ToolRegistry {
   registry.register(createREPLTool());
   registry.register(createWorkflowTool());
   registry.register(createBriefTool());
+  registry.register(createSleepTool());
+  registry.register(createSnipTool());
+  registry.register(createCronCreateTool());
+  registry.register(createCronListTool());
+  registry.register(createCronDeleteTool());
+  registry.register(createLSPTool());
   return registry;
 }
 
