@@ -105,3 +105,4 @@ export {
   type CronJob,
 } from './cron-tools.js';
 export { createLSPTool, type LSPAction } from './lsp-tool.js';
+export { createRemoteTriggerTool, type RemoteTriggerDeps } from './remote-trigger.js';

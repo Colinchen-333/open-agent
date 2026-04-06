@@ -94,6 +94,7 @@ export type ToolCapabilityCategory =
   | 'planning'
   | 'mcp'
   | 'utility'
+  | 'remote'
   | 'other';
 
 export type ToolCapabilityRisk = 'low' | 'medium' | 'high';
