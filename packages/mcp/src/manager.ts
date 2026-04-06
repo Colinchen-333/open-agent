@@ -14,6 +14,7 @@ import { McpStdioClient } from './stdio-transport';
 import { McpHttpClient } from './http-transport';
 import { McpSseClient } from './sse-transport';
 import { McpWsClient } from './ws-transport';
+import { expandConfigEnvVars } from './config-scope.js';
 import type { McpServerConnection, McpToolInfo, McpResourceInfo, McpPromptInfo, McpPromptMessage } from './types';
 import { normalizeMcpToolInfo } from './tool-info';
 import { McpServerState } from './server-state';
@@ -149,9 +150,12 @@ export class McpManager {
       return connection;
     }
 
+    // Expand ${VAR} references in the config before connecting.
+    const expandedConfig = expandConfigEnvVars(config as unknown as Record<string, unknown>) as unknown as McpServerConfig;
+
     const connection: McpServerConnection = {
       name,
-      config,
+      config: expandedConfig,
       status: 'connecting',
       tools: [],
       enabled: true,
@@ -159,7 +163,7 @@ export class McpManager {
     this.connections.set(name, connection);
 
     try {
-      const client = this.createClient(name, config);
+      const client = this.createClient(name, expandedConfig);
 
       if (client) {
         this.clients.set(name, client);

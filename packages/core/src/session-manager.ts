@@ -39,6 +39,13 @@ export interface SessionInfo {
     severity: 'info' | 'warning' | 'error';
     source?: string;
   }>;
+  gitBranch?: string;
+  projectPath?: string;
+  prNumber?: number;
+  prUrl?: string;
+  prRepository?: string;
+  worktreeSession?: { branch: string; path: string } | null;
+  mode?: 'coordinator' | 'normal';
 }
 
 export interface SessionCreateMetadata {
@@ -60,6 +67,13 @@ export interface SessionCreateMetadata {
     severity: 'info' | 'warning' | 'error';
     source?: string;
   }>;
+  gitBranch?: string;
+  projectPath?: string;
+  prNumber?: number;
+  prUrl?: string;
+  prRepository?: string;
+  worktreeSession?: { branch: string; path: string } | null;
+  mode?: 'coordinator' | 'normal';
 }
 
 export interface SessionUpdate {
@@ -82,6 +96,13 @@ export interface SessionUpdate {
     severity: 'info' | 'warning' | 'error';
     source?: string;
   }>;
+  gitBranch?: string;
+  projectPath?: string;
+  prNumber?: number;
+  prUrl?: string;
+  prRepository?: string;
+  worktreeSession?: { branch: string; path: string } | null;
+  mode?: 'coordinator' | 'normal';
 }
 
 /**
@@ -261,6 +282,28 @@ export class SessionManager {
       resumeSource === 'fork'
     ) {
       next.resumeSource = resumeSource;
+    }
+
+    // New metadata fields: git branch, project path, PR tracking, worktree, mode.
+    assignString('gitBranch', update.gitBranch);
+    assignString('projectPath', update.projectPath);
+    if (typeof update.prNumber === 'number' && Number.isFinite(update.prNumber)) {
+      next.prNumber = update.prNumber;
+    }
+    assignString('prUrl', update.prUrl);
+    assignString('prRepository', update.prRepository);
+    if (update.worktreeSession !== undefined) {
+      if (
+        update.worktreeSession === null ||
+        (typeof update.worktreeSession === 'object' &&
+          typeof update.worktreeSession.branch === 'string' &&
+          typeof update.worktreeSession.path === 'string')
+      ) {
+        next.worktreeSession = update.worktreeSession;
+      }
+    }
+    if (update.mode === 'coordinator' || update.mode === 'normal') {
+      next.mode = update.mode;
     }
 
     return next;
