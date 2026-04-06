@@ -13,6 +13,7 @@ import {
 } from './background-registry.js';
 import { spawnProcess, feature } from '@open-agent/core';
 import { summarizeCommand } from './tool-summary.js';
+import { classifyBashCommand } from './bash-subcommands.js';
 import {
   isDarwinSandboxAvailable,
   wrapWithDarwinSandbox,
@@ -496,13 +497,18 @@ export function createBashTool(deps: BashToolDeps = {}): ToolDefinition {
     },
     isSearchOrReadCommand: (input: unknown): { isSearch: boolean; isRead: boolean; isList: boolean } => {
       const cmd = String((input as { command?: string }).command ?? '');
-      const READ_VERBS = /^\s*(cat|less|tail|head|ls|pwd|stat|file|wc|find|which)\b/;
-      const SEARCH_VERBS = /^\s*(grep|rg|ripgrep|ack|ag|awk|sed -n)\b/;
-      const LIST_VERBS = /^\s*(ls|find|tree|git ls-files)\b/;
+      const classification = classifyBashCommand(cmd);
       return {
-        isRead: READ_VERBS.test(cmd),
-        isSearch: SEARCH_VERBS.test(cmd),
-        isList: LIST_VERBS.test(cmd),
+        isSearch: classification.commands.some(c =>
+          ['grep', 'rg', 'ag', 'ack', 'find'].includes(c),
+        ),
+        isRead: classification.isReadOnly,
+        isList: classification.commands.some(c =>
+          ['ls', 'find', 'tree'].includes(c) ||
+          // Handle "git ls-files" as a two-word compound
+          classification.commands.includes('git') &&
+            cmd.includes('ls-files'),
+        ),
       };
     },
   });

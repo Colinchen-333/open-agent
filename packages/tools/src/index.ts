@@ -29,6 +29,11 @@ export { createReadTool } from './read.js';
 export { createWriteTool } from './write.js';
 export { createEditTool } from './edit.js';
 export { createBashTool } from './bash.js';
+export {
+  extractBashSubcommands,
+  classifyBashCommand,
+  type BashCommandClassification,
+} from './bash-subcommands.js';
 export { createGlobTool } from './glob.js';
 export { createGrepTool } from './grep.js';
 export { createWebFetchTool } from './web-fetch.js';
@@ -87,3 +92,5 @@ export * from './sandbox/darwin-runner.js';
 export { createTodoWriteTool, getTodosForSession, clearTodoSessions } from './todo-write.js';
 export type { TodoItem, TodoWriteOptions } from './todo-write.js';
 export { createREPLTool, type REPLToolOptions } from './repl-tool.js';
+export { createWorkflowTool } from './workflow-tool.js';
+export { createBriefTool } from './brief-tool.js';

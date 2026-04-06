@@ -170,8 +170,9 @@ describe('ToolDefinition expanded contract', () => {
 
     expect(typeof bash.isSearchOrReadCommand).toBe('function');
 
+    // grep is a search and also read-only (non-destructive)
     expect(bash.isSearchOrReadCommand!({ command: 'grep foo bar.ts' })).toEqual({
-      isSearch: true, isRead: false, isList: false,
+      isSearch: true, isRead: true, isList: false,
     });
     expect(bash.isSearchOrReadCommand!({ command: 'cat README.md' })).toEqual({
       isSearch: false, isRead: true, isList: false,
