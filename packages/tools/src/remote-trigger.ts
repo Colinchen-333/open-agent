@@ -15,6 +15,7 @@ export function createRemoteTriggerTool(deps: RemoteTriggerDeps): ToolDefinition
       'Manage scheduled remote agent triggers via REST API. Use this instead of curl — auth is handled in-process.',
     shouldDefer: true,
     isReadOnly: false, // varies by action, but we mark false for safety
+    searchHint: 'manage scheduled remote agent triggers',
     capability: { category: 'remote' },
     inputSchema: {
       type: 'object',

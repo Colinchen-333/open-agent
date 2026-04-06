@@ -185,6 +185,21 @@ export interface ToolDefinition {
   renderToolUseMessage?: (input: unknown) => string;
   renderToolResultMessage?: (output: unknown) => string;
   renderToolUseErrorMessage?: (error: unknown) => string;
+
+  /** Search hint for ToolSearch matching (freeform keywords). */
+  searchHint?: string;
+
+  /** Whether this tool is currently enabled (feature gate). When false, excluded from tool list. */
+  isEnabled?: boolean | (() => boolean);
+
+  /** Convert tool input to a string for the auto-permission classifier.
+   *  Default: `${toolName} ${JSON.stringify(input).slice(0,200)}` */
+  toAutoClassifierInput?: (input: unknown) => string;
+
+  /** Per-tool permission check that runs before the engine pipeline.
+   *  Return 'allow' | 'deny' | 'ask'. If 'deny', the tool call is blocked
+   *  without reaching the engine. If 'allow', skips engine (fast path). */
+  checkPermissions?: (input: unknown) => 'allow' | 'deny' | 'ask';
 }
 
 export interface ToolContext {

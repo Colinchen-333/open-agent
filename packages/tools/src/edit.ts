@@ -69,6 +69,7 @@ export function createEditTool(): ToolDefinition {
     name: 'Edit',
     description: 'Perform an exact string replacement in a file. By default ensures old_string appears exactly once (use replace_all to replace every occurrence).',
     isConcurrencySafe: false,
+    searchHint: 'edit modify replace text in file',
     annotations: { destructive: true },
     getToolUseSummary(input: FileEditInput, _result, isError) {
       const file = summarizeFilePath(input.file_path) ?? 'file';

@@ -670,7 +670,12 @@ export class ConversationLoop {
       // Exception: once ToolSearch has activated a deferred tool via
       // activateDeferredTool(), it is included in all subsequent turns.
       const toolSpecs = Array.from(this.options.tools.values())
-        .filter((t) => !t.shouldDefer || this.activatedDeferredTools.has(t.name))
+        .filter((t) => {
+          if (t.isEnabled === false) return false;
+          if (typeof t.isEnabled === 'function' && !t.isEnabled()) return false;
+          if (t.shouldDefer && !this.activatedDeferredTools.has(t.name)) return false;
+          return true;
+        })
         .map((t) => ({
           name: t.name,
           description: t.description,
@@ -1806,7 +1811,12 @@ export class ConversationLoop {
    */
   getToolSpecs(): Array<{ name: string; description: string; input_schema: Record<string, any> }> {
     return Array.from(this.options.tools.values())
-      .filter((t) => !t.shouldDefer || this.activatedDeferredTools.has(t.name))
+      .filter((t) => {
+        if (t.isEnabled === false) return false;
+        if (typeof t.isEnabled === 'function' && !t.isEnabled()) return false;
+        if (t.shouldDefer && !this.activatedDeferredTools.has(t.name)) return false;
+        return true;
+      })
       .map((t) => ({
         name: t.name,
         description: t.description,

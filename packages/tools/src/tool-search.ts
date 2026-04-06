@@ -15,7 +15,7 @@ function tokenize(s: string): string[] {
 }
 
 function scoreMatch(queryTokens: string[], tool: ToolDefinition): number {
-  const hay = tokenize(`${tool.name} ${tool.description}`);
+  const hay = tokenize(`${tool.name} ${tool.description} ${tool.searchHint ?? ''}`);
   const haySet = new Set(hay);
   let score = 0;
   for (const q of queryTokens) {

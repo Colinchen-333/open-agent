@@ -113,6 +113,8 @@ export function createBashTool(deps: BashToolDeps = {}): ToolDefinition {
     name: 'Bash',
     isConcurrencySafe: false,
     annotations: { destructive: true, openWorld: true },
+    searchHint: 'execute shell terminal command run script',
+    toAutoClassifierInput: (input: any) => `Bash ${input.command?.slice(0, 300) ?? ''}`,
     description:
       'Execute a bash command in the current working directory. Stdout is captured and returned. Output exceeding 30 000 characters is truncated. Working directory persists between commands; shell state (everything else) does not.',
     getToolUseSummary(input: BashInput, _result, isError) {

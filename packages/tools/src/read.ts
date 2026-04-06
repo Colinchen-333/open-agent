@@ -30,6 +30,7 @@ export function createReadTool(): ToolDefinition {
     description:
       'Read a file from the filesystem. Returns file contents with line numbers (cat -n style). For images returns metadata and file info. For PDF files returns size information and extraction instructions. Supports Jupyter notebooks (.ipynb), offset and limit for partial reads.',
     isReadOnly: true,
+    searchHint: 'read view open file contents',
     annotations: { readOnly: true, idempotent: true },
     getToolUseSummary(input: FileReadInput) {
       return `Read ${summarizeFilePath(input.file_path) ?? 'file'}`;

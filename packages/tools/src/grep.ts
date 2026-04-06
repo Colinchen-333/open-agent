@@ -8,6 +8,7 @@ export function createGrepTool(): ToolDefinition {
     name: 'Grep',
     description: 'Search file contents using ripgrep (rg). Supports content, files_with_matches, and count output modes.',
     isReadOnly: true,
+    searchHint: 'search find text pattern in files code',
     annotations: { readOnly: true, idempotent: true },
     getToolUseSummary(input: GrepInput) {
       return `Searched ${truncateSummary(input.pattern, 40)}`;
