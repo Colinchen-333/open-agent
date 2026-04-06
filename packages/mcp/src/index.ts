@@ -28,3 +28,12 @@ export {
   resolveMcpResourceRef,
 } from './resource-uri';
 export type { ParsedMcpResourceRef, McpResourceContent } from './resource-uri';
+export {
+  expandEnvVars,
+  expandConfigEnvVars,
+  mergeScopedConfigs,
+} from './config-scope';
+export type {
+  ConfigScope,
+  ScopedMcpServerConfig,
+} from './config-scope';
