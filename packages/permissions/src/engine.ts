@@ -7,7 +7,7 @@ import type {
   PermissionRule,
   SandboxConfig,
 } from './types';
-import { classifyBashCommand } from './bash-policy.js';
+import { classifyBashCommand, type BashRiskClassification } from './bash-policy.js';
 import { runPipeline, type PipelineContext, type PipelineStage } from './pipeline.js';
 import { classifyPermissionRequest, type ClassifierContext } from './classifier.js';
 
@@ -220,6 +220,19 @@ export class PermissionEngine {
       }
     }
 
+    // Bash semantic pre-classification — stash the classification on ctx so
+    // downstream stages (alwaysAllow, prompt) can reuse it without re-classifying.
+    if (
+      request.toolName === 'Bash' &&
+      typeof request.input === 'object' &&
+      request.input !== null
+    ) {
+      const cmd = String((request.input as Record<string, unknown>).command ?? '');
+      if (cmd) {
+        (ctx as any).bashClassification = classifyBashCommand(cmd);
+      }
+    }
+
     // Sandbox enforcement — file system + auto-allow bash if sandboxed.
     if (this.sandbox.enabled) {
       const sandboxDecision = this.checkSandbox(request);
@@ -364,16 +377,28 @@ export class PermissionEngine {
    *   2. Semantic match against allowedPrompts registered by ExitPlanModeV2
    *   3. Recent explicit user approval phrase in the transcript
    *
-   * This stage is feature-gated via the TRANSCRIPT_CLASSIFIER flag (default false).
+   * This stage is feature-gated via the TRANSCRIPT_CLASSIFIER flag (default true).
    * The classifier is allow-only: it can short-circuit to allow but never to deny.
    * Denies remain the responsibility of stageAlwaysDeny and stagePrompt.
+   *
+   * Bash commands that are pre-classified as read-only (by stageValidateInput)
+   * are skipped by the LLM fallback — they will be handled by stagePrompt without
+   * requiring an LLM call, which avoids consuming a provider round-trip for safe
+   * commands.
    */
   private async stageClassifier(ctx: PipelineContext): Promise<PermissionDecision | undefined> {
     if (!feature('TRANSCRIPT_CLASSIFIER')) return undefined;
+
+    // Skip the LLM classifier for Bash commands already confirmed read-only —
+    // stagePrompt will auto-allow them without needing a model call.  We still
+    // run the cheaper rule-based checks (allowedPrompts, approval phrases).
+    const bashClass: BashRiskClassification | undefined = (ctx as any).bashClassification;
+    const skipLLM = bashClass?.level === 'read-only';
+
     const decision = await classifyPermissionRequest(ctx.request, {
       recentUserMessages: this.recentUserMessages,
       allowedPrompts: this.getAllowedPrompts(),
-      llmProvider: this.llmProvider,
+      llmProvider: skipLLM ? undefined : this.llmProvider,
     } satisfies ClassifierContext);
     if (decision?.approved === true) {
       return { behavior: 'allow', reason: `classifier: ${decision.rationale}` };
@@ -445,7 +470,10 @@ export class PermissionEngine {
           };
         }
 
-        const classification = classifyBashCommand(cmd);
+        // Reuse the classification cached in stageValidateInput when available
+        // to avoid re-running all regex patterns on the same command string.
+        const classification: BashRiskClassification =
+          (ctx as any).bashClassification ?? classifyBashCommand(cmd);
         if (classification.level === 'destructive') {
           return {
             behavior: 'ask',
@@ -554,13 +582,44 @@ export class PermissionEngine {
   }
 
   /**
-   * Try ruleContent first as a plain prefix, then as a RegExp.
+   * Test whether `value` matches a glob-style `pattern`.
+   *
+   * Glob semantics:
+   *   `*`  — matches any sequence of characters (including none)
+   *   `?`  — matches exactly one character
+   *
+   * Patterns that contain neither `*` nor `?` are treated as plain prefixes
+   * so that existing rules like `"git status"` continue to work unchanged.
+   */
+  private matchesGlobPattern(value: string, pattern: string): boolean {
+    // No wildcards — use cheap prefix check first, then substring fallback
+    if (!pattern.includes('*') && !pattern.includes('?')) {
+      return value.startsWith(pattern) || value.includes(pattern);
+    }
+    // Translate glob wildcards to regex equivalents
+    const regexSource = pattern
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&') // escape all regex meta-chars
+      .replace(/\*/g, '.*')                   // * → any sequence
+      .replace(/\?/g, '.');                   // ? → any single character
+    try {
+      return new RegExp(`^${regexSource}$`, 'i').test(value) ||
+             new RegExp(regexSource, 'i').test(value);
+    } catch {
+      return value.includes(pattern);
+    }
+  }
+
+  /**
+   * Try ruleContent first as a glob pattern (which degrades to prefix for
+   * patterns without wildcards), then as a RegExp.
    * Invalid regexes fall back to a substring test.
    */
   private matchesStringPattern(value: string, pattern: string): boolean {
-    if (value.startsWith(pattern)) {
+    // Glob matching handles the plain-prefix case as well
+    if (this.matchesGlobPattern(value, pattern)) {
       return true;
     }
+    // Also try interpreting as a raw RegExp for backward compatibility
     try {
       return new RegExp(pattern).test(value);
     } catch {

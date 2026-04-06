@@ -19,7 +19,7 @@ export type FeatureFlagName =
 
 export const FEATURE_FLAG_DEFAULTS: Record<FeatureFlagName, boolean> = {
   REACTIVE_COMPACT: true,       // Round 1 L11 is stable
-  TRANSCRIPT_CLASSIFIER: false, // Round 2 L23 is experimental
+  TRANSCRIPT_CLASSIFIER: true,  // Round 2 L23 — classifier + preToolUseHooks fully wired
   FORK_SUBAGENT: true,          // Round 1 L6 is stable
   THINKING_ADAPTIVE: false,     // Round 2 L19
   FILE_HISTORY: false,          // Round 2 L20

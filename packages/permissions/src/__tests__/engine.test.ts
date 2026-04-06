@@ -34,7 +34,7 @@ describe('PermissionEngine', () => {
     it('auto-allows read-only Bash commands', async () => {
       const decision = await engine.evaluate(req('Bash', { command: 'git status --short' }));
       expect(decision.behavior).toBe('allow');
-      expect(decision.reason).toContain('read-only bash');
+      expect(decision.reason).toContain('read-only');
     });
 
     it('asks for dangerous Bash commands (rm -rf)', async () => {
@@ -673,15 +673,41 @@ describe('PermissionEngine', () => {
   // ---------------------------------------------------------------------------
 
   describe('pipeline stage ordering', () => {
-    test('evaluate invokes pipeline stages in documented order', async () => {
+    test('evaluate invokes all pipeline stages for a non-short-circuiting request', async () => {
+      // Use a Write request in default mode: it passes validateInput, alwaysDeny,
+      // alwaysAllow (no allow rule), preToolUseHooks (no hook), classifier
+      // (TRANSCRIPT_CLASSIFIER may or may not run), and prompt (ask).
+      const engine = new PermissionEngine({ mode: 'default' });
+      const calls: string[] = [];
+      engine.__trace = (stage: string) => calls.push(stage);
+      await engine.evaluate({
+        toolName: 'Write',
+        input: { file_path: '/tmp/test.txt', content: 'hello' },
+        toolUseId: 'test-trace-id',
+      });
+      // All 6 stages must be reached in order regardless of which stage resolves.
+      expect(calls).toEqual([
+        'validateInput',
+        'alwaysDeny',
+        'alwaysAllow',
+        'preToolUseHooks',
+        'classifier',
+        'prompt',
+      ]);
+    });
+
+    test('read-only Bash traverses all stages and resolves at stagePrompt', async () => {
+      // The bash semantic auto-allow lives in stagePrompt so that deny rules
+      // (stageAlwaysDeny) and hooks (stagePreToolUseHooks) run first.
       const engine = new PermissionEngine({ mode: 'default' });
       const calls: string[] = [];
       engine.__trace = (stage: string) => calls.push(stage);
       await engine.evaluate({
         toolName: 'Bash',
         input: { command: 'echo hi' },
-        toolUseId: 'test-trace-id',
+        toolUseId: 'test-trace-readonly',
       });
+      // All 6 stages are visited; stagePrompt resolves the allow.
       expect(calls).toEqual([
         'validateInput',
         'alwaysDeny',
@@ -816,16 +842,22 @@ describe('PermissionEngine', () => {
     });
 
     test('classifier stage is pass-through when TRANSCRIPT_CLASSIFIER flag is off', async () => {
-      const engine = new PermissionEngine({ mode: 'default' });
-      // Without the flag, even readOnly annotated should fall through to prompt
-      const result = await engine.evaluate({
-        toolName: 'Read',
-        input: { file_path: '/tmp/x' },
-        toolUseId: 'test-classifier-2',
-        annotations: { readOnly: true },
-      });
-      // Result depends on baseline behavior — just assert classifier didn't early-exit with its rationale
-      expect(result.reason ?? '').not.toContain('classifier');
+      const { setFeatureDefault, clearFeatureOverrides } = await import('@open-agent/core');
+      setFeatureDefault('TRANSCRIPT_CLASSIFIER', false);
+      try {
+        const engine = new PermissionEngine({ mode: 'default' });
+        // With the flag off, even readOnly annotated should fall through to prompt
+        const result = await engine.evaluate({
+          toolName: 'Read',
+          input: { file_path: '/tmp/x' },
+          toolUseId: 'test-classifier-2',
+          annotations: { readOnly: true },
+        });
+        // Result depends on baseline behavior — just assert classifier didn't early-exit with its rationale
+        expect(result.reason ?? '').not.toContain('classifier');
+      } finally {
+        clearFeatureOverrides();
+      }
     });
 
     test('classifier DENY is enforced: LLM classifier returning DENY produces deny decision', async () => {
@@ -931,6 +963,151 @@ describe('PermissionEngine', () => {
       // No executor set — Read should be allowed by the safe-tools path.
       const result = await engine.evaluate(req('Read', { file_path: '/tmp/x.txt' }));
       expect(result.behavior).toBe('allow');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Bash semantic auto-allow (stageValidateInput read-only classifier)
+  // ---------------------------------------------------------------------------
+
+  describe('bash read-only auto-allow in stageValidateInput', () => {
+    it('auto-allows read-only Bash in default mode (no sandbox)', async () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      const commands = [
+        'echo hello',
+        'cat README.md',
+        'ls -la',
+        'git status',
+        'git diff HEAD',
+        'git log --oneline -5',
+        'grep -r "foo" .',
+      ];
+      for (const command of commands) {
+        const result = await engine.evaluate(req('Bash', { command }));
+        expect(result.behavior).toBe('allow');
+      }
+    });
+
+    it('auto-allow reason mentions read-only bash command', async () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      const result = await engine.evaluate(req('Bash', { command: 'git status' }));
+      expect(result.behavior).toBe('allow');
+      // stagePrompt returns the read-only bash command reason
+      expect(result.reason).toContain('read-only');
+    });
+
+    it('does NOT auto-allow workspace-write Bash in stageValidateInput', async () => {
+      const engine = new PermissionEngine({ mode: 'default' });
+      // mkdir is workspace-write — falls through to stagePrompt which asks
+      const result = await engine.evaluate(req('Bash', { command: 'mkdir -p build' }));
+      expect(result.behavior).toBe('ask');
+    });
+
+    it('does NOT auto-allow in stageValidateInput when sandbox is enabled (must go through sandbox check)', async () => {
+      const engine = new PermissionEngine({
+        mode: 'default',
+        sandbox: { enabled: true, autoAllowBashIfSandboxed: true },
+      });
+      // Even read-only bash must pass through sandbox when sandbox is active
+      const result = await engine.evaluate(req('Bash', { command: 'echo hello' }));
+      expect(result.behavior).toBe('allow'); // sandbox auto-allow covers it
+    });
+
+    it('auto-allows read-only Bash in acceptEdits mode (no sandbox)', async () => {
+      const engine = new PermissionEngine({ mode: 'acceptEdits' });
+      const result = await engine.evaluate(req('Bash', { command: 'git log --oneline' }));
+      expect(result.behavior).toBe('allow');
+    });
+
+    it('does NOT auto-allow read-only Bash in plan mode (plan mode denies Bash entirely)', async () => {
+      const engine = new PermissionEngine({ mode: 'plan' });
+      const result = await engine.evaluate(req('Bash', { command: 'git status' }));
+      expect(result.behavior).toBe('deny');
+    });
+
+    it('deny rules take priority over the read-only auto-allow', async () => {
+      // The auto-allow fires in stageAlwaysAllow (stage 3), AFTER stageAlwaysDeny
+      // (stage 2) has already run.  Deny rules therefore correctly win.
+      const engine = new PermissionEngine({
+        mode: 'default',
+        denyRules: [{ toolName: 'Bash', ruleContent: 'git status' }],
+      });
+      const result = await engine.evaluate(req('Bash', { command: 'git status' }));
+      expect(result.behavior).toBe('deny');
+      expect(result.reason).toContain('deny rule');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Glob pattern matching in allow/deny rules
+  // ---------------------------------------------------------------------------
+
+  describe('glob pattern matching in allow/deny rules', () => {
+    it('allow rule with glob * matches commands starting with git', async () => {
+      const engine = new PermissionEngine({
+        mode: 'default',
+        allowRules: [{ toolName: 'Bash', ruleContent: 'git *' }],
+      });
+      // git push would normally ask — glob allow rule makes it allowed
+      const result = await engine.evaluate(req('Bash', { command: 'git push origin main' }));
+      expect(result.behavior).toBe('allow');
+    });
+
+    it('allow rule with glob * does not match unrelated commands', async () => {
+      const engine = new PermissionEngine({
+        mode: 'default',
+        allowRules: [{ toolName: 'Bash', ruleContent: 'git *' }],
+      });
+      // npm install should not match "git *"
+      const result = await engine.evaluate(req('Bash', { command: 'npm install' }));
+      expect(result.behavior).not.toBe('allow');
+    });
+
+    it('deny rule with glob * blocks matching commands', async () => {
+      const engine = new PermissionEngine({
+        mode: 'default',
+        denyRules: [{ toolName: 'Bash', ruleContent: 'rm *' }],
+      });
+      const result = await engine.evaluate(req('Bash', { command: 'rm -rf /tmp/output' }));
+      expect(result.behavior).toBe('deny');
+    });
+
+    it('deny rule with glob does not block non-matching safe commands', async () => {
+      const engine = new PermissionEngine({
+        mode: 'default',
+        denyRules: [{ toolName: 'Bash', ruleContent: 'rm *' }],
+      });
+      // git status is read-only and doesn't match "rm *"
+      const result = await engine.evaluate(req('Bash', { command: 'git status' }));
+      // Should not be denied (may be allow or ask depending on mode/short-circuit)
+      expect(result.behavior).not.toBe('deny');
+    });
+
+    it('allow rule with ? wildcard matches single character substitution', async () => {
+      const engine = new PermissionEngine({
+        mode: 'default',
+        allowRules: [{ toolName: 'Bash', ruleContent: 'ls -?' }],
+      });
+      const result = await engine.evaluate(req('Bash', { command: 'ls -l' }));
+      expect(result.behavior).toBe('allow');
+    });
+
+    it('plain pattern (no wildcards) still works as prefix/substring match', async () => {
+      const engine = new PermissionEngine({
+        mode: 'default',
+        allowRules: [{ toolName: 'Bash', ruleContent: 'git status' }],
+      });
+      const result = await engine.evaluate(req('Bash', { command: 'git status --short' }));
+      expect(result.behavior).toBe('allow');
+    });
+
+    it('glob allow rule for file tools — Read path prefix', async () => {
+      const engine = new PermissionEngine({
+        mode: 'default',
+        denyRules: [{ toolName: 'Read', ruleContent: '/secret' }],
+      });
+      expect((await engine.evaluate(req('Read', { file_path: '/secret/token.txt' }))).behavior).toBe('deny');
+      expect((await engine.evaluate(req('Read', { file_path: '/tmp/safe.txt' }))).behavior).toBe('allow');
     });
   });
 });

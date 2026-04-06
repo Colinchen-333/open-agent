@@ -18,7 +18,8 @@ describe('feature flags', () => {
 
   test('returns compile-time default when no override and no env', () => {
     expect(feature('REACTIVE_COMPACT')).toBe(true);
-    expect(feature('TRANSCRIPT_CLASSIFIER')).toBe(false);
+    // TRANSCRIPT_CLASSIFIER is enabled by default — classifier + hooks are fully wired
+    expect(feature('TRANSCRIPT_CLASSIFIER')).toBe(true);
   });
 
   test('env var "1" enables a flag', () => {
@@ -34,6 +35,21 @@ describe('feature flags', () => {
   test('env var "0" disables a default-true flag', () => {
     process.env.OPEN_AGENT_FEATURE_REACTIVE_COMPACT = '0';
     expect(feature('REACTIVE_COMPACT')).toBe(false);
+  });
+
+  test('TRANSCRIPT_CLASSIFIER defaults to true (classifier + hooks fully wired)', () => {
+    expect(FEATURE_FLAG_DEFAULTS.TRANSCRIPT_CLASSIFIER).toBe(true);
+    expect(feature('TRANSCRIPT_CLASSIFIER')).toBe(true);
+  });
+
+  test('TRANSCRIPT_CLASSIFIER can be disabled via env var for opt-out', () => {
+    process.env.OPEN_AGENT_FEATURE_TRANSCRIPT_CLASSIFIER = '0';
+    expect(feature('TRANSCRIPT_CLASSIFIER')).toBe(false);
+  });
+
+  test('TRANSCRIPT_CLASSIFIER can be disabled via setFeatureDefault', () => {
+    setFeatureDefault('TRANSCRIPT_CLASSIFIER', false);
+    expect(feature('TRANSCRIPT_CLASSIFIER')).toBe(false);
   });
 
   test('setFeatureDefault overrides env and compile-time', () => {
