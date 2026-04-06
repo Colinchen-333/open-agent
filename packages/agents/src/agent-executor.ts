@@ -71,6 +71,14 @@ export interface ExecuteOptions {
    * the cache-stable fork context built by `createForkContext()`.
    */
   initialMessages?: import('@open-agent/providers').Message[];
+  /**
+   * Per-call runner factory override.  When set, `execute()` uses this
+   * factory instead of `this.runnerFactory` / the dynamic import fallback.
+   * Used by `executeForked()` to inject a sidechain-wired runner without
+   * mutating shared instance state (fixing the concurrent cross-contamination
+   * race described in Codex audit finding #4-1).
+   */
+  runnerFactory?: AgentRunnerConstructor;
 }
 
 /**
@@ -205,13 +213,14 @@ export class AgentExecutor {
       onEvent: upstreamOnMessage,
     };
 
-    // Patch onMessage by extending the runner factory indirectly: wrap the
-    // AgentRunner so its onMessage callback also writes to the sidechain.
-    const originalRunnerFactory = this.runnerFactory;
+    // Build a local runner factory scoped exclusively to this executeForked call.
+    // It wraps the base factory's runner to also stream messages to the sidechain.
+    // By passing it through options.runnerFactory (not mutating this.runnerFactory),
+    // concurrent execute() / executeForked() calls on the same AgentExecutor instance
+    // continue to use their own independent factories — no cross-contamination.
     const AgentRunnerClass = await this.loadAgentRunnerFactory();
 
-    // Create a temporary wrapped factory for this single executeForked call.
-    const wrappedFactory = class WrappedForkedRunner {
+    const localFactory = class WrappedForkedRunner {
       private inner: InstanceType<typeof AgentRunnerClass>;
       constructor(opts: ConstructorParameters<typeof AgentRunnerClass>[0]) {
         const origOnMessage = opts.onMessage;
@@ -228,15 +237,12 @@ export class AgentExecutor {
       getAgentId() { return this.inner.getAgentId(); }
     } as unknown as AgentRunnerConstructor;
 
-    // Temporarily swap in the wrapped factory for this call
-    (this as any).runnerFactory = wrappedFactory;
-    try {
-      const { agentId: resolvedId } = await this.execute(forkedOptions);
-      return { agentId: resolvedId, outputFile: scPath };
-    } finally {
-      // Restore original factory (undefined or user-supplied)
-      (this as any).runnerFactory = originalRunnerFactory;
-    }
+    // Pass the local factory as a per-call option; this.runnerFactory is never touched.
+    const { agentId: resolvedId } = await this.execute({
+      ...forkedOptions,
+      runnerFactory: localFactory,
+    });
+    return { agentId: resolvedId, outputFile: scPath };
   }
 
   /**
@@ -283,8 +289,11 @@ export class AgentExecutor {
     } catch { /* non-fatal */ }
 
     try {
-      // Import AgentRunner dynamically to avoid circular deps
-      const AgentRunner = await this.loadAgentRunnerFactory();
+      // Import AgentRunner dynamically to avoid circular deps.
+      // Prefer a per-call factory from options (e.g. injected by executeForked)
+      // over the shared instance factory — this avoids mutating shared state for
+      // concurrent callers.
+      const AgentRunner = options.runnerFactory ?? await this.loadAgentRunnerFactory();
 
       // Load previous messages if resuming, unless the caller already
       // provided a pre-built list (e.g. createForkContext output from executeForked).

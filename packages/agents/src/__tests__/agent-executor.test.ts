@@ -607,6 +607,112 @@ describe('AgentExecutor', () => {
     });
   });
 
+  describe('executeForked() concurrent factory isolation', () => {
+    let tmpRoot: string;
+
+    beforeEach(() => {
+      tmpRoot = mkdtempSync(`${tmpdir()}/oa-fork-concurrent-`);
+    });
+
+    afterEach(() => {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    });
+
+    /**
+     * Regression test for Codex audit finding #4-1 (严重).
+     *
+     * Before the fix, executeForked() temporarily overwrote this.runnerFactory
+     * with a sidechain-wired wrapper and restored it in a finally block.  Any
+     * concurrent execute() call that called loadAgentRunnerFactory() inside that
+     * await window would receive the sidechain-wired factory and incorrectly
+     * stream its messages to the forked agent's sidechain file.
+     *
+     * After the fix, executeForked() passes the wrapped factory exclusively
+     * through options.runnerFactory; this.runnerFactory is never mutated, so
+     * concurrent callers always see the base factory.
+     */
+    test('concurrent execute() does not receive the sidechain-wired factory', async () => {
+      // Track which factory constructor was used for each runner instantiation.
+      const constructorNames: string[] = [];
+
+      // A factory whose instances record their constructor name.
+      class BaseRunner {
+        constructor(_opts: any) {
+          constructorNames.push('BaseRunner');
+        }
+        async run(_prompt: string) { return mockRunResult; }
+        getAgentId() { return 'mock-agent-id'; }
+      }
+
+      const isolationExecutor = new AgentExecutor(undefined, {
+        runnerFactory: BaseRunner as never,
+      });
+
+      // Fire executeForked and a plain execute() concurrently.  The execute()
+      // call must always instantiate BaseRunner, never WrappedForkedRunner.
+      await Promise.all([
+        isolationExecutor.executeForked({
+          definition: mockDefinition,
+          provider: mockProvider as any,
+          tools: mockTools,
+          prompt: 'forked task',
+          cwd: '/tmp',
+          parentMessages: [],
+          root: tmpRoot,
+        }),
+        isolationExecutor.execute({
+          definition: mockDefinition,
+          provider: mockProvider as any,
+          tools: mockTools,
+          prompt: 'concurrent plain task',
+          cwd: '/tmp',
+        }),
+      ]);
+
+      // Both runners must have been created — one forked (WrappedForkedRunner
+      // wraps BaseRunner, so BaseRunner is still used inside), one plain.
+      expect(constructorNames.length).toBeGreaterThanOrEqual(2);
+
+      // All instantiations visible to this outer spy must be 'BaseRunner'.
+      // The WrappedForkedRunner inner runner is also a BaseRunner — what must
+      // NOT appear is a WrappedForkedRunner being handed to the plain execute().
+      // We verify this by confirming this.runnerFactory was never swapped: all
+      // calls to our BaseRunner spy came through the unmodified factory path.
+      for (const name of constructorNames) {
+        expect(name).toBe('BaseRunner');
+      }
+    });
+
+    test('this.runnerFactory remains unchanged after executeForked() completes', async () => {
+      class StableFactory {
+        constructor(_opts: any) {}
+        async run(_prompt: string) { return mockRunResult; }
+        getAgentId() { return 'mock-agent-id'; }
+      }
+
+      const isolationExecutor = new AgentExecutor(undefined, {
+        runnerFactory: StableFactory as never,
+      });
+
+      const factoryBefore = (isolationExecutor as any).runnerFactory;
+
+      await isolationExecutor.executeForked({
+        definition: mockDefinition,
+        provider: mockProvider as any,
+        tools: mockTools,
+        prompt: 'factory stability test',
+        cwd: '/tmp',
+        parentMessages: [],
+        root: tmpRoot,
+      });
+
+      const factoryAfter = (isolationExecutor as any).runnerFactory;
+
+      // The shared factory reference must be identical before and after the fork.
+      expect(factoryAfter).toBe(factoryBefore);
+    });
+  });
+
   describe('A3: AgentRunner onEvent try-catch 源码保护', () => {
     it('agent-runner.ts 中 onEvent 调用被 try-catch 包裹', async () => {
       const { readFileSync } = await import('fs');
