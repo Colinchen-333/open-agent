@@ -132,11 +132,18 @@ async function main(): Promise<void> {
 
       const effectiveCwd = agentCwd ?? cwd;
 
+      // R12: caller-supplied isolation wins; absent → fall back to agentDef.isolation.
+      const effectiveIsolation = isolation ?? agentDef.isolation;
+      // R12: explicit run_in_background=true wins; undefined → honour agentDef.allowBackgroundExecution.
+      const effectiveRunInBackground =
+        runInBackground === true ||
+        (runInBackground === undefined && agentDef.allowBackgroundExecution === true);
+
       // --- Worktree setup ---
       let worktreePath: string | undefined;
       let worktreeBranch: string | undefined;
 
-      if (isolation === 'worktree') {
+      if (effectiveIsolation === 'worktree') {
         const worktreeName = name ?? `agent-${resume ?? Date.now()}`;
         try {
           const wt = await createWorktree(effectiveCwd, worktreeName);
@@ -159,15 +166,15 @@ async function main(): Promise<void> {
         maxTurns,
         mode: mode ?? agentDef.mode,
         teamName,
-        isolation,
-        runInBackground,
+        isolation: effectiveIsolation,
+        runInBackground: effectiveRunInBackground,
         resume,
         worktreePath,
       };
 
       // Fork isolation: snapshot parent messages and run in an isolated sidechain.
       // Checked before runInBackground so fork takes precedence over background dispatch.
-      if (isolation === 'fork' && typeof agentExecutor.executeForked === 'function') {
+      if (effectiveIsolation === 'fork' && typeof agentExecutor.executeForked === 'function') {
         const { agentId, outputFile } = await agentExecutor.executeForked({
           ...executeOptions,
           parentMessages: loop.getMessages(),
@@ -190,7 +197,7 @@ async function main(): Promise<void> {
         });
       }
 
-      if (runInBackground) {
+      if (effectiveRunInBackground) {
         const { agentId, outputFile } = await agentExecutor.executeInBackground(executeOptions);
         return JSON.stringify({
           status: 'async_launched',
