@@ -163,6 +163,10 @@ export interface ToolDefinition {
   /** Extract searchable text from the tool's output for transcript search. */
   extractSearchText?: (output: unknown) => string;
 
+  /** Returns a human-readable label for the status bar while this tool is active.
+   *  Mirrors Claude Code's getActivityDescription(input) convention. */
+  getActivityDescription?: (input: unknown) => string;
+
   /** Decide whether the result has been truncated (for UI indicators). */
   isResultTruncated?: (output: unknown) => boolean;
 

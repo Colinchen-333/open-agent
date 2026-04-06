@@ -12,6 +12,9 @@ export function createGrepTool(): ToolDefinition {
     getToolUseSummary(input: GrepInput) {
       return `Searched ${truncateSummary(input.pattern, 40)}`;
     },
+    getActivityDescription(input: unknown) {
+      return `Searching for "${(input as GrepInput)?.pattern ?? '...'}"`;
+    },
     inputSchema: {
       type: 'object',
       properties: {

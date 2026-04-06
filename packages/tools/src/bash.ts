@@ -119,6 +119,10 @@ export function createBashTool(deps: BashToolDeps = {}): ToolDefinition {
       const summary = summarizeCommand(input.command, input.description);
       return isError ? `Command failed: ${summary}` : `Ran ${summary}`;
     },
+    getActivityDescription(input: unknown) {
+      const cmd = String((input as BashInput)?.command ?? '').slice(0, 60);
+      return `Running: ${cmd}${cmd.length >= 60 ? '...' : ''}`;
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -512,6 +516,34 @@ export function createBashTool(deps: BashToolDeps = {}): ToolDefinition {
           classification.commands.includes('git') &&
             cmd.includes('ls-files'),
         ),
+      };
+    },
+
+    /**
+     * Return a matcher predicate that tests a permission rule pattern against
+     * the bash command string.  Supports glob wildcards (`*` matches any
+     * sequence, `?` matches a single character) so that rules such as
+     * `"git push*"` or `"rm *"` work as expected.
+     */
+    preparePermissionMatcher: (input: unknown): (pattern: string) => boolean => {
+      const cmd = String((input as { command?: string })?.command ?? '');
+      return (pattern: string): boolean => {
+        if (!pattern) return false;
+        // Translate glob wildcards to a regex
+        const regexSource = pattern
+          .replace(/[.+^${}()|[\]\\]/g, '\\$&') // escape regex meta-chars
+          .replace(/\*/g, '.*')                   // * → any sequence
+          .replace(/\?/g, '.');                   // ? → any single character
+        try {
+          // Try both full-string and substring match so partial prefixes work
+          return (
+            new RegExp(`^${regexSource}$`, 'i').test(cmd) ||
+            new RegExp(regexSource, 'i').test(cmd)
+          );
+        } catch {
+          // Regex compile failed — fall back to substring containment
+          return cmd.includes(pattern);
+        }
       };
     },
   });

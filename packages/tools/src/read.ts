@@ -34,6 +34,9 @@ export function createReadTool(): ToolDefinition {
     getToolUseSummary(input: FileReadInput) {
       return `Read ${summarizeFilePath(input.file_path) ?? 'file'}`;
     },
+    getActivityDescription(input: unknown) {
+      return `Reading ${(input as FileReadInput)?.file_path ?? 'file'}`;
+    },
     inputSchema: {
       type: 'object',
       properties: {

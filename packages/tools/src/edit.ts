@@ -74,6 +74,9 @@ export function createEditTool(): ToolDefinition {
       const file = summarizeFilePath(input.file_path) ?? 'file';
       return isError ? `Edit failed in ${file}` : `Edited ${file}`;
     },
+    getActivityDescription(input: unknown) {
+      return `Editing ${(input as FileEditInput)?.file_path ?? 'file'}`;
+    },
     inputSchema: {
       type: 'object',
       properties: {

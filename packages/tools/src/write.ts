@@ -15,6 +15,9 @@ export function createWriteTool(): ToolDefinition {
       const file = summarizeFilePath(input.file_path) ?? 'file';
       return isError ? `Write failed for ${file}` : `Wrote ${file}`;
     },
+    getActivityDescription(input: unknown) {
+      return `Writing ${(input as FileWriteInput)?.file_path ?? 'file'}`;
+    },
     inputSchema: {
       type: 'object',
       properties: {

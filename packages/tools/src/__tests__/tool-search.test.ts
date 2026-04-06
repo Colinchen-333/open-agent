@@ -67,6 +67,127 @@ test('registry-mode: activateDeferredTool gracefully absent (no crash)', async (
   expect(result.matches).toHaveLength(1);
 });
 
+// ---------------------------------------------------------------------------
+// Category breakdown (registry-based path)
+// ---------------------------------------------------------------------------
+
+test('registry-mode: result includes totalAvailable count', async () => {
+  const tools = new Map<string, ToolDefinition>([
+    ['mcp__svc__alpha', { name: 'mcp__svc__alpha', description: 'Alpha service action', shouldDefer: true, execute: async () => null, inputSchema: {} }],
+    ['mcp__svc__beta', { name: 'mcp__svc__beta', description: 'Beta metrics collector', shouldDefer: true, execute: async () => null, inputSchema: {} }],
+  ]);
+  const tool = createToolSearchTool({ registry: tools });
+  const result = await tool.execute({ query: 'alpha beta service metrics' }, { cwd: '/', sessionId: 's' });
+  expect(result.totalAvailable).toBeDefined();
+  expect(typeof result.totalAvailable).toBe('number');
+  expect(result.totalAvailable).toBeGreaterThanOrEqual(result.matches.length);
+});
+
+test('registry-mode: result includes categories object', async () => {
+  const tools = new Map<string, ToolDefinition>([
+    [
+      'mcp__svc__alpha',
+      {
+        name: 'mcp__svc__alpha',
+        description: 'Alpha filesystem scanner',
+        shouldDefer: true,
+        capability: { category: 'filesystem' },
+        execute: async () => null,
+        inputSchema: {},
+      },
+    ],
+    [
+      'mcp__svc__beta',
+      {
+        name: 'mcp__svc__beta',
+        description: 'Beta web crawler',
+        shouldDefer: true,
+        capability: { category: 'web' },
+        execute: async () => null,
+        inputSchema: {},
+      },
+    ],
+  ]);
+  const tool = createToolSearchTool({ registry: tools });
+  // Query matches both tools
+  const result = await tool.execute({ query: 'alpha beta filesystem web' }, { cwd: '/', sessionId: 's' });
+  expect(result.categories).toBeDefined();
+  expect(typeof result.categories).toBe('object');
+  expect(Object.keys(result.categories).length).toBeGreaterThan(0);
+});
+
+test('registry-mode: categories counts match matched results', async () => {
+  const tools = new Map<string, ToolDefinition>([
+    [
+      'mcp__svc__fs1',
+      {
+        name: 'mcp__svc__fs1',
+        description: 'File system indexer',
+        shouldDefer: true,
+        capability: { category: 'filesystem' },
+        execute: async () => null,
+        inputSchema: {},
+      },
+    ],
+    [
+      'mcp__svc__fs2',
+      {
+        name: 'mcp__svc__fs2',
+        description: 'File system watcher',
+        shouldDefer: true,
+        capability: { category: 'filesystem' },
+        execute: async () => null,
+        inputSchema: {},
+      },
+    ],
+    [
+      'mcp__svc__web',
+      {
+        name: 'mcp__svc__web',
+        description: 'Web fetcher utility',
+        shouldDefer: true,
+        capability: { category: 'web' },
+        execute: async () => null,
+        inputSchema: {},
+      },
+    ],
+  ]);
+  const tool = createToolSearchTool({ registry: tools });
+  // Query matches all three
+  const result = await tool.execute(
+    { query: 'file system web utility', max_results: 10 },
+    { cwd: '/', sessionId: 's' },
+  );
+  // Total counts in categories should equal totalAvailable
+  const categorySum = Object.values(result.categories as Record<string, number>).reduce((a, b) => a + b, 0);
+  expect(categorySum).toBe(result.totalAvailable);
+});
+
+// ---------------------------------------------------------------------------
+// Category breakdown (legacy callback-based path)
+// ---------------------------------------------------------------------------
+
+test('callback-mode: result includes categories and totalAvailable', async () => {
+  const tool = createToolSearchTool({
+    searchTools: async () => [
+      { name: 'FsTool', description: 'A filesystem utility' },
+      { name: 'WebTool', description: 'A web fetcher' },
+    ],
+    selectTool: async (name) => ({
+      name,
+      description: name === 'FsTool' ? 'A filesystem utility' : 'A web fetcher',
+      capability: { category: name === 'FsTool' ? 'filesystem' : 'web' } as any,
+      inputSchema: {},
+      execute: async () => null,
+    }),
+  });
+  const result = await tool.execute({ query: 'filesystem web' }, { cwd: '/', sessionId: 's' } as any);
+  expect(result.matches).toBeDefined();
+  expect(result.totalAvailable).toBeDefined();
+  expect(result.categories).toBeDefined();
+  expect(typeof result.categories).toBe('object');
+});
+
 describe('ToolSearch tool', () => {
   it('returns guidance when query is empty', async () => {
     const tool = createToolSearchTool({

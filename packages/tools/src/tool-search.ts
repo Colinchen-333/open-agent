@@ -71,7 +71,14 @@ export function createToolSearchTool(opts: ToolSearchDeps | ToolSearchRegistry):
         for (const m of matches) {
           ctx.activateDeferredTool?.(m.name);
         }
-        return { matches };
+        // Build category breakdown from the full result set (before slicing)
+        const categories: Record<string, number> = {};
+        for (const s of scored) {
+          const tool = opts.registry.get(s.name);
+          const cat = tool?.capability?.category ?? 'other';
+          categories[cat] = (categories[cat] ?? 0) + 1;
+        }
+        return { matches, totalAvailable: scored.length, categories };
       },
     });
   }
@@ -152,11 +159,19 @@ export function createToolSearchTool(opts: ToolSearchDeps | ToolSearchRegistry):
             name: t.name,
             description: t.description,
             ...(full?.inputSchema ? { inputSchema: full.inputSchema } : {}),
+            category: full?.capability?.category ?? 'other',
           };
         }),
       );
 
-      return { matches };
+      // Build category breakdown over matched results
+      const categories: Record<string, number> = {};
+      for (const m of matches) {
+        const cat = m.category ?? 'other';
+        categories[cat] = (categories[cat] ?? 0) + 1;
+      }
+
+      return { matches, totalAvailable: results.length, categories };
     },
   });
 }
