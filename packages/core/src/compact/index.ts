@@ -13,6 +13,23 @@ export * from './llm-summarizer.js';
 export * from './llm-autocompact.js';
 export * from './token-estimate.js';
 
+export {
+  recordCollapseCommit,
+  recordCollapseError,
+  recordEmptyCollapse,
+  stageCollapse,
+  flushStaged,
+  resetContextCollapse,
+  restoreFromEntries,
+  getCollapseStats,
+  getCollapseCommits,
+  subscribe as subscribeToCollapse,
+  type ContextCollapseCommit,
+  type ContextCollapseSnapshot,
+  type ContextCollapseStats,
+  type CollapseHealth,
+} from './context-collapse.js';
+
 export interface CompactPipelineOptions {
   /** Number of recent assistant turns whose tool_results to preserve unchanged. */
   keepLastN: number;

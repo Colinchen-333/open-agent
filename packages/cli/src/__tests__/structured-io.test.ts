@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { readNdjsonStream, filterMessagesByType, type NdjsonMessage } from '../structured-io';
+import { readNdjsonStream, filterMessagesByType } from '../structured-io';
 
 async function* fromLines(lines: string[]): AsyncGenerator<string> {
   for (const line of lines) yield line;
