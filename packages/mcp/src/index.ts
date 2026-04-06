@@ -53,3 +53,4 @@ export type {
   McpOAuthToken,
   McpOAuthConfig,
 } from './auth';
+export { resolveHeaders, createEnvHeadersHelper, type HeadersHelper } from './headers-helper';
