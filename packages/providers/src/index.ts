@@ -20,6 +20,7 @@ export { calculateCost } from './pricing.js';
 export type { ModelCapability } from './model-capability.js';
 export { getModelCapability, supportsThinking, getContextWindowForModel } from './model-capability.js';
 export { thinkingBudgetFromEffort, resolveWantsThinking, buildAnthropicThinkingParam } from './thinking.js';
+export { probeProvider, mergeCapabilities, type NegotiatedCapabilities, type ProbeResult } from './capability-negotiation.js';
 
 import type { LLMProvider } from './types.js';
 import { AnthropicProvider } from './anthropic.js';
