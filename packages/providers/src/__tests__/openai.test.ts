@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, spyOn } from 'bun:test';
 import { OpenAIProvider } from '../openai.js';
 import { supportsThinking, getContextWindowForModel } from '../model-capability.js';
-import type { Message, StreamEvent } from '../types.js';
+import type { Message, StreamEvent, ToolSpec } from '../types.js';
 
 function makeProviderWithChunks(chunks: any[]): OpenAIProvider {
   const provider = new OpenAIProvider({ apiKey: 'test-key' });
@@ -311,5 +311,307 @@ describe('OpenAIProvider: thinking-unsupported warning', () => {
     expect(warnSpy).not.toHaveBeenCalled();
 
     warnSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Helper: captures the params passed to client.chat.completions.create
+// ---------------------------------------------------------------------------
+
+function makeCapturingProvider(): { provider: OpenAIProvider; calls: any[] } {
+  const calls: any[] = [];
+  const provider = new OpenAIProvider({ apiKey: 'test-key' });
+  (provider as any).client = {
+    chat: {
+      completions: {
+        create: async (params: any) => {
+          calls.push(params);
+          return (async function* () {
+            yield { choices: [{ delta: {}, finish_reason: 'stop' }], usage: null };
+          })();
+        },
+      },
+    },
+  };
+  return { provider, calls };
+}
+
+// ---------------------------------------------------------------------------
+// Part 2 — Structured output (JSON schema)
+// ---------------------------------------------------------------------------
+
+describe('OpenAIProvider: structured output (responseFormat)', () => {
+  it('forwards responseFormat as response_format json_schema to the API', async () => {
+    const { provider, calls } = makeCapturingProvider();
+
+    await collect(provider.chat(
+      [{ role: 'user', content: 'Give me JSON' }],
+      {
+        model: 'gpt-4o',
+        responseFormat: {
+          type: 'json_schema',
+          schema: {
+            type: 'object',
+            properties: { name: { type: 'string' } },
+            required: ['name'],
+          },
+        },
+      },
+    ));
+
+    expect(calls.length).toBeGreaterThan(0);
+    const sentParams = calls[0];
+    expect(sentParams.response_format).toBeDefined();
+    expect(sentParams.response_format.type).toBe('json_schema');
+    expect(sentParams.response_format.json_schema.name).toBe('structured_output');
+    expect(sentParams.response_format.json_schema.strict).toBe(true);
+    expect(sentParams.response_format.json_schema.schema.properties.name).toEqual({ type: 'string' });
+  });
+
+  it('omits response_format when responseFormat is not provided', async () => {
+    const { provider, calls } = makeCapturingProvider();
+
+    await collect(provider.chat(
+      [{ role: 'user', content: 'hello' }],
+      { model: 'gpt-4o' },
+    ));
+
+    expect(calls[0].response_format).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Part 3 — Tool choice control
+// ---------------------------------------------------------------------------
+
+describe('OpenAIProvider: toolChoice parameter', () => {
+  const dummyTool: ToolSpec = {
+    name: 'my_func',
+    description: 'A test function',
+    input_schema: { type: 'object', properties: {} },
+  };
+
+  it('defaults tool_choice to "auto" when tools are present and toolChoice is unset', async () => {
+    const { provider, calls } = makeCapturingProvider();
+
+    await collect(provider.chat(
+      [{ role: 'user', content: 'hello' }],
+      { model: 'gpt-4o', tools: [dummyTool] },
+    ));
+
+    expect(calls[0].tool_choice).toBe('auto');
+  });
+
+  it('passes toolChoice "none" to the API verbatim', async () => {
+    const { provider, calls } = makeCapturingProvider();
+
+    await collect(provider.chat(
+      [{ role: 'user', content: 'hello' }],
+      { model: 'gpt-4o', tools: [dummyTool], toolChoice: 'none' },
+    ));
+
+    expect(calls[0].tool_choice).toBe('none');
+  });
+
+  it('passes toolChoice "required" to the API verbatim', async () => {
+    const { provider, calls } = makeCapturingProvider();
+
+    await collect(provider.chat(
+      [{ role: 'user', content: 'hello' }],
+      { model: 'gpt-4o', tools: [dummyTool], toolChoice: 'required' },
+    ));
+
+    expect(calls[0].tool_choice).toBe('required');
+  });
+
+  it('passes a named function toolChoice object to the API', async () => {
+    const { provider, calls } = makeCapturingProvider();
+
+    await collect(provider.chat(
+      [{ role: 'user', content: 'hello' }],
+      {
+        model: 'gpt-4o',
+        tools: [dummyTool],
+        toolChoice: { type: 'function', function: { name: 'my_func' } },
+      },
+    ));
+
+    expect(calls[0].tool_choice).toEqual({ type: 'function', function: { name: 'my_func' } });
+  });
+
+  it('omits tool_choice entirely when no tools and no toolChoice', async () => {
+    const { provider, calls } = makeCapturingProvider();
+
+    await collect(provider.chat(
+      [{ role: 'user', content: 'hello' }],
+      { model: 'gpt-4o' },
+    ));
+
+    expect(calls[0].tool_choice).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Part 4 — Context window truncation
+// ---------------------------------------------------------------------------
+
+describe('OpenAIProvider: context window truncation', () => {
+  it('trims oldest non-system messages when estimated tokens exceed budget', async () => {
+    const { provider, calls } = makeCapturingProvider();
+
+    // glm-4.7 has contextWindow=128_000, maxOutput=16_000 → budget ≈ 112_000 tokens
+    // Each old message is 'A'.repeat(4) = 1 token each — negligible.
+    // But we can set maxTokens high to shrink the input budget and force truncation.
+    // contextWindow=128_000, maxTokens=127_990 → maxInputTokens=10
+    // A message with 60 chars ≈ 15 tokens exceeds 10 token budget.
+    // So with 4 such non-system messages only the last one should survive.
+
+    const longContent = 'A'.repeat(60); // ~15 tokens
+    const messages: Message[] = [
+      { role: 'system', content: 'You are helpful.' },
+      { role: 'user', content: longContent },
+      { role: 'user', content: longContent },
+      { role: 'user', content: longContent },
+      { role: 'user', content: longContent },
+    ];
+
+    await collect(provider.chat(messages, {
+      model: 'glm-4.7',
+      maxTokens: 127_990, // leaves only ~10 tokens for input
+    }));
+
+    expect(calls.length).toBeGreaterThan(0);
+    const sentMessages = calls[0].messages;
+
+    // System message must always be preserved
+    const systemMsgs = sentMessages.filter((m: any) => m.role === 'system');
+    expect(systemMsgs.length).toBe(1);
+
+    // Total message count must be fewer than the 5 original messages
+    expect(sentMessages.length).toBeLessThan(5);
+  });
+
+  it('preserves all messages when they fit within the context window', async () => {
+    const { provider, calls } = makeCapturingProvider();
+
+    // Short messages that trivially fit
+    const messages: Message[] = [
+      { role: 'user', content: 'hello' },
+      { role: 'user', content: 'world' },
+    ];
+
+    await collect(provider.chat(messages, { model: 'gpt-4o' }));
+
+    const sentMessages = calls[0].messages;
+    expect(sentMessages.length).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Part 5 — Thinking / reasoning_effort
+// ---------------------------------------------------------------------------
+
+describe('OpenAIProvider: reasoning_effort for thinking-capable models', () => {
+  it('attaches reasoning_effort when model supports thinking and thinking is enabled', async () => {
+    const { provider, calls } = makeCapturingProvider();
+
+    await collect(provider.chat(
+      [{ role: 'user', content: 'think hard' }],
+      {
+        model: 'gpt-5', // registered in model-capability as supportsThinking:true
+        thinking: { type: 'enabled', budgetTokens: 5000 },
+        effort: 'high',
+      },
+    ));
+
+    expect(calls[0].reasoning_effort).toBe('high');
+  });
+
+  it('defaults reasoning_effort to "medium" when effort is not specified', async () => {
+    const { provider, calls } = makeCapturingProvider();
+
+    await collect(provider.chat(
+      [{ role: 'user', content: 'think' }],
+      {
+        model: 'gpt-5',
+        thinking: { type: 'enabled', budgetTokens: 2000 },
+      },
+    ));
+
+    expect(calls[0].reasoning_effort).toBe('medium');
+  });
+
+  it('does NOT attach reasoning_effort for non-thinking models', async () => {
+    const { provider, calls } = makeCapturingProvider();
+
+    await collect(provider.chat(
+      [{ role: 'user', content: 'hello' }],
+      {
+        model: 'gpt-4o', // does not support thinking
+        thinking: { type: 'enabled', budgetTokens: 1000 },
+      },
+    ));
+
+    expect(calls[0].reasoning_effort).toBeUndefined();
+  });
+
+  it('does NOT attach reasoning_effort when thinking is disabled', async () => {
+    const { provider, calls } = makeCapturingProvider();
+
+    await collect(provider.chat(
+      [{ role: 'user', content: 'hello' }],
+      {
+        model: 'gpt-5',
+        thinking: { type: 'disabled' },
+        effort: 'high',
+      },
+    ));
+
+    expect(calls[0].reasoning_effort).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Part 7 — Provider capabilities
+// ---------------------------------------------------------------------------
+
+describe('OpenAIProvider: getCapabilities()', () => {
+  it('returns thinking=native for gpt-5 (thinking-capable)', async () => {
+    const provider = new OpenAIProvider({ apiKey: 'test-key' });
+    const caps = await provider.getCapabilities('gpt-5');
+    expect(caps.thinking).toBe('native');
+    expect(caps.supportedEffortLevels).toEqual(['low', 'medium', 'high']);
+  });
+
+  it('returns thinking=unsupported for gpt-4o', async () => {
+    const provider = new OpenAIProvider({ apiKey: 'test-key' });
+    const caps = await provider.getCapabilities('gpt-4o');
+    expect(caps.thinking).toBe('unsupported');
+    expect(caps.supportedEffortLevels).toEqual([]);
+  });
+
+  it('returns thinking=unsupported for glm-4.7', async () => {
+    const provider = new OpenAIProvider({ apiKey: 'test-key' });
+    const caps = await provider.getCapabilities('glm-4.7');
+    expect(caps.thinking).toBe('unsupported');
+  });
+
+  it('returns structuredOutput=native for all models', async () => {
+    const provider = new OpenAIProvider({ apiKey: 'test-key' });
+    const caps = await provider.getCapabilities('gpt-4o');
+    expect(caps.structuredOutput).toBe('native');
+  });
+
+  it('returns toolUse=native and serverTools=unsupported', async () => {
+    const provider = new OpenAIProvider({ apiKey: 'test-key' });
+    const caps = await provider.getCapabilities('gpt-4o');
+    expect(caps.toolUse).toBe('native');
+    expect(caps.serverTools).toBe('unsupported');
+  });
+
+  it('returns provider name as "openai"', async () => {
+    const provider = new OpenAIProvider({ apiKey: 'test-key' });
+    const caps = await provider.getCapabilities();
+    expect(caps.provider).toBe('openai');
   });
 });

@@ -69,6 +69,14 @@ export interface ChatOptions {
   signal?: AbortSignal;
   /** Structured output format (e.g. JSON schema). */
   responseFormat?: { type: 'json_schema'; schema: Record<string, unknown> };
+  /**
+   * Controls which tool the model is allowed to call.
+   * - 'auto': model decides (default when tools are present)
+   * - 'none': model will not call any tool
+   * - 'required': model must call at least one tool
+   * - object: forces a specific named function
+   */
+  toolChoice?: 'auto' | 'none' | 'required' | { type: 'function'; function: { name: string } };
 }
 
 export interface ToolSpec {

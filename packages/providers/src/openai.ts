@@ -9,7 +9,44 @@ import type {
   StreamEvent,
   ToolSpec,
 } from './types.js';
-import { supportsThinking, getContextWindowForModel } from './model-capability.js';
+import { supportsThinking, getContextWindowForModel, getModelCapability } from './model-capability.js';
+
+// ---------------------------------------------------------------------------
+// Token estimation — local chars/4 heuristic (avoids a hard dep on core)
+// ---------------------------------------------------------------------------
+
+/** Rough estimate: 1 token ≈ 4 characters (English). */
+function estimateTokens(text: string): number {
+  if (!text) return 0;
+  return Math.ceil(text.length / 4);
+}
+
+/** Estimate the total token count for an array of OpenAI-format messages. */
+function estimateOaiMessageTokens(messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[]): number {
+  let total = 0;
+  for (const msg of messages) {
+    // 4-token fixed overhead per message (role + JSON framing)
+    total += 4;
+    const content = msg.content;
+    if (typeof content === 'string') {
+      total += estimateTokens(content);
+    } else if (Array.isArray(content)) {
+      for (const part of content) {
+        if (part && typeof part === 'object' && 'text' in part && typeof (part as any).text === 'string') {
+          total += estimateTokens((part as any).text);
+        }
+      }
+    }
+    // tool_calls in assistant messages
+    if ('tool_calls' in msg && Array.isArray((msg as any).tool_calls)) {
+      for (const tc of (msg as any).tool_calls) {
+        total += estimateTokens(tc.function?.name ?? '');
+        total += estimateTokens(tc.function?.arguments ?? '');
+      }
+    }
+  }
+  return total;
+}
 
 // Track which models we have already warned about unsupported thinking so we
 // emit the console.warn at most once per process (not once per request).
@@ -226,11 +263,15 @@ export class OpenAIProvider implements LLMProvider {
     options: ChatOptions,
   ): AsyncGenerator<StreamEvent> {
     try {
-      // Observability: warn once per model when thinking is requested but the
-      // model does not support it.  No behaviour change — thinking is not wired
-      // in OpenAIProvider; this guard is purely informational.
+      // ── Part 1: Thinking / reasoning support ────────────────────────────────
+      //
+      // For models that natively support reasoning (e.g. gpt-5), forward the
+      // effort level via `reasoning_effort`.  For models that don't, emit a
+      // one-time warning and carry on — the option is silently dropped so the
+      // request still succeeds.
+      const modelSupportsThinking = supportsThinking(options.model);
       if (options.thinking && options.thinking.type !== 'disabled') {
-        if (!supportsThinking(options.model) && !_thinkingWarnedModels.has(options.model)) {
+        if (!modelSupportsThinking && !_thinkingWarnedModels.has(options.model)) {
           _thinkingWarnedModels.add(options.model);
           console.warn(
             `[OpenAIProvider] thinking was requested for model "${options.model}" but this model does not support extended thinking — the setting will be ignored.`,
@@ -238,17 +279,51 @@ export class OpenAIProvider implements LLMProvider {
         }
       }
 
-      // Derive context window size from capability registry for any future
-      // compact-budget or truncation threshold computations.
-      // Currently there is no hardcoded token ceiling in this provider, so
-      // this is captured as a named variable for forward-compatibility.
-      const _contextWindow = getContextWindowForModel(options.model);
-      void _contextWindow; // used when token-budget logic lands
+      // ── Part 2: Context-window budget & message truncation ──────────────────
+      //
+      // Use the capability registry to compute how much input headroom we have.
+      // If the estimated token count of the converted messages exceeds the
+      // available budget, drop the oldest non-system messages until we fit.
+      // System messages are always preserved.
+      const contextWindow = getContextWindowForModel(options.model);
+      const maxOutputTokens = options.maxTokens ?? getModelCapability(options.model)?.maxOutput ?? 4096;
+      const maxInputTokens = contextWindow - maxOutputTokens;
 
-      const oaiMessages = convertMessages(messages, options.systemPrompt);
+      let oaiMessages = convertMessages(messages, options.systemPrompt);
+
+      // Truncate if necessary, keeping system messages intact.
+      if (maxInputTokens > 0) {
+        let estimatedTokens = estimateOaiMessageTokens(oaiMessages);
+        if (estimatedTokens > maxInputTokens) {
+          // Split into system and non-system messages, then trim from the
+          // oldest non-system messages until we are under budget.
+          const systemMessages = oaiMessages.filter((m) => m.role === 'system');
+          const nonSystemMessages = oaiMessages.filter((m) => m.role !== 'system');
+
+          while (nonSystemMessages.length > 1 && estimatedTokens > maxInputTokens) {
+            nonSystemMessages.shift();
+            estimatedTokens = estimateOaiMessageTokens([...systemMessages, ...nonSystemMessages]);
+          }
+
+          oaiMessages = [...systemMessages, ...nonSystemMessages];
+        }
+      }
+
       const tools =
         options.tools && options.tools.length > 0
           ? convertTools(options.tools)
+          : undefined;
+
+      // ── Part 3: Build request params ────────────────────────────────────────
+
+      // Tool choice: caller can override; fall back to 'auto' when tools exist.
+      const toolChoiceValue = options.toolChoice ?? (tools ? 'auto' : undefined);
+
+      // Reasoning effort mapping: our effort levels map 1-to-1 to OpenAI's.
+      // Only attached when the model actually supports thinking.
+      const reasoningEffort =
+        modelSupportsThinking && options.thinking && options.thinking.type !== 'disabled'
+          ? ((options.effort ?? 'medium') as OpenAI.ReasoningEffort)
           : undefined;
 
       const params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming = {
@@ -259,10 +334,15 @@ export class OpenAIProvider implements LLMProvider {
         ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
         ...(options.topP !== undefined ? { top_p: options.topP } : {}),
         ...(options.stopSequences ? { stop: options.stopSequences } : {}),
-        ...(tools ? { tools, tool_choice: 'auto' } : {}),
+        // Tools + tool_choice
+        ...(tools ? { tools } : {}),
+        ...(toolChoiceValue !== undefined
+          ? { tool_choice: toolChoiceValue as OpenAI.Chat.Completions.ChatCompletionToolChoiceOption }
+          : {}),
+        // Structured output (JSON schema)
         ...(options.responseFormat && {
           response_format: {
-            type: 'json_schema',
+            type: 'json_schema' as const,
             json_schema: {
               name: 'structured_output',
               strict: true,
@@ -270,6 +350,8 @@ export class OpenAIProvider implements LLMProvider {
             },
           },
         }),
+        // Reasoning effort for o-series and gpt-5 class models
+        ...(reasoningEffort !== undefined ? { reasoning_effort: reasoningEffort } : {}),
       };
 
       let stream: AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>;
@@ -448,17 +530,23 @@ export class OpenAIProvider implements LLMProvider {
   }
 
   async getCapabilities(model?: string) {
-    const models = await this.listModels();
-    const matched = model ? models.find((entry) => entry.value === model) : undefined;
+    const cap = model ? getModelCapability(model) : null;
+    const modelSupportsThinking = cap?.supportsThinking ?? false;
+
     return {
       provider: this.name,
       ...(model ? { model } : {}),
-      thinking: 'unsupported' as const,
+      // Thinking: native when the model supports reasoning_effort, otherwise unsupported
+      thinking: (modelSupportsThinking ? 'native' : 'unsupported') as 'native' | 'unsupported',
+      // All OpenAI-compatible endpoints support JSON schema structured output
       structuredOutput: 'native' as const,
       toolUse: 'native' as const,
       serverTools: 'unsupported' as const,
-      supportsAdaptiveThinking: matched?.supportsAdaptiveThinking ?? false,
-      supportedEffortLevels: matched?.supportedEffortLevels ?? [],
+      supportsAdaptiveThinking: false,
+      // Effort levels only meaningful for thinking-capable models
+      supportedEffortLevels: modelSupportsThinking
+        ? (['low', 'medium', 'high'] as ('low' | 'medium' | 'high')[])
+        : [],
     };
   }
 }
