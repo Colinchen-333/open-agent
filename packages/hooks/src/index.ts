@@ -13,3 +13,4 @@ export type {
 } from './types';
 export { HookExecutor } from './executor';
 export * from './camel-case-compat';
+export * as Events from './events';
