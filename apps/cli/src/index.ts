@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { parseArgs, TerminalRenderer, REPL, emitStreamJson, emitStreamJsonInit, TerminalPermissionPrompter, handleSlashCommand } from '@open-agent/cli';
-import { ConversationLoop, SessionManager, ConfigLoader, buildSystemPrompt, buildSystemPromptBlocks, isGitRepository, FileCheckpoint, buildTaskOrchestrationTemplates, loadPromptContext, buildSystemPromptRuntimeSnapshot, loadOutputStyles, mergeOutputStyles, findOutputStyle, BUILTIN_OUTPUT_STYLES } from '@open-agent/core';
+import { ConversationLoop, SessionManager, ConfigLoader, buildSystemPrompt, buildSystemPromptBlocks, isGitRepository, FileCheckpoint, buildTaskOrchestrationTemplates, loadPromptContext, buildSystemPromptRuntimeSnapshot, loadOutputStyles, mergeOutputStyles, findOutputStyle, BUILTIN_OUTPUT_STYLES, createLLMSummarizer } from '@open-agent/core';
 import type { OutputStyle } from '@open-agent/core';
 import { createStore, createDefaultAppState } from '@open-agent/state';
 import type { AppState } from '@open-agent/state';
@@ -853,6 +853,10 @@ async function main(): Promise<void> {
   // Activate proactive autocompact so the snip + microcompact pipeline fires
   // before each turn when token thresholds are hit, not just reactively.
   loop.setAutoCompactPolicy('proactive');
+
+  // Wire a real LLM-backed summarizer so the llmAutocompact tier actually
+  // calls the provider instead of falling back to the noop placeholder.
+  loop.setMessageSummarizer(createLLMSummarizer(provider, model));
 
   // Expose loop for plan mode tool access
   (globalThis as any).__openAgentLoop = loop;

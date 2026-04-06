@@ -15,7 +15,7 @@ import type {
   SDKTaskNotificationMessage,
   SDKPromptSuggestionMessage,
 } from '@open-agent/core';
-import { ConversationLoop, SessionManager, buildSystemPrompt, buildSystemPromptBlocks, FileCheckpoint, isGitRepository, buildTaskOrchestrationTemplates, loadPromptContext, buildSystemPromptRuntimeSnapshot, buildRuntimeHookSurfaceSummary, HOOK_EVENTS, loadOutputStyles, mergeOutputStyles, findOutputStyle, BUILTIN_OUTPUT_STYLES } from '@open-agent/core';
+import { ConversationLoop, SessionManager, buildSystemPrompt, buildSystemPromptBlocks, FileCheckpoint, isGitRepository, buildTaskOrchestrationTemplates, loadPromptContext, buildSystemPromptRuntimeSnapshot, buildRuntimeHookSurfaceSummary, HOOK_EVENTS, loadOutputStyles, mergeOutputStyles, findOutputStyle, BUILTIN_OUTPUT_STYLES, createLLMSummarizer } from '@open-agent/core';
 import type { OutputStyle } from '@open-agent/core';
 import {
   createStore,
@@ -2989,6 +2989,10 @@ export function query(
   // pipeline fires before each turn when token thresholds are hit, rather
   // than waiting for a reactive 429/context-exceeded error.
   loop.setAutoCompactPolicy('proactive');
+
+  // Wire a real LLM-backed summarizer so the llmAutocompact tier actually
+  // calls the provider instead of falling back to the noop placeholder.
+  loop.setMessageSummarizer(createLLMSummarizer(provider, model));
 
   const syncLoopToolsFromRegistry = () => {
     loop.setTools(new Map(toolRegistry.list().map((t) => [t.name, t])));

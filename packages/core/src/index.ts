@@ -112,3 +112,4 @@ export {
 } from './session-search.js';
 export * from './keybindings';
 export * from './output-styles.js';
+export { createLLMSummarizer } from './compact/llm-summarizer.js';
