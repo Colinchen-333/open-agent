@@ -10,6 +10,7 @@ import type {
   ToolSpec,
 } from './types.js';
 import { buildAnthropicThinkingParam } from './thinking.js';
+import { getModelCapability, supportsThinking as modelSupportsThinking } from './model-capability.js';
 
 /**
  * Convert a list of SystemPromptBlocks into the Anthropic messages API
@@ -525,17 +526,29 @@ export class AnthropicProvider implements LLMProvider {
   }
 
   async getCapabilities(model?: string) {
+    const m = model ?? 'claude-sonnet-4-6';
+    const cap = getModelCapability(m);
+
+    // Derive per-model thinking support from the capability registry so that
+    // getCapabilities() returns accurate data for every registered model rather
+    // than hardcoding 'native' for all Anthropic models.  Haiku and legacy 3.x
+    // models do not support thinking; Opus/Sonnet 4.x do.
+    const thinkingSupported = cap?.supportsThinking ?? modelSupportsThinking(m);
+
+    // Derive adaptive thinking from listModels() for models in that list, or
+    // fall back to the capability registry's supportsThinking flag.
     const models = await this.listModels();
     const matched = model ? models.find((entry) => entry.value === model) : undefined;
+
     return {
       provider: this.name,
       ...(model ? { model } : {}),
-      thinking: 'native' as const,
-      structuredOutput: 'best_effort' as const,
+      thinking: (thinkingSupported ? 'native' : 'unsupported') as 'native' | 'unsupported',
+      structuredOutput: 'native' as const,
       toolUse: 'native' as const,
-      serverTools: 'native' as const,
-      supportsAdaptiveThinking: matched?.supportsAdaptiveThinking ?? true,
-      supportedEffortLevels: matched?.supportedEffortLevels ?? ['low', 'medium', 'high', 'max'],
+      serverTools: 'unsupported' as const,
+      supportsAdaptiveThinking: matched?.supportsAdaptiveThinking ?? cap?.supportsThinking ?? false,
+      supportedEffortLevels: matched?.supportedEffortLevels ?? (thinkingSupported ? (['low', 'medium', 'high', 'max'] as const) : []),
     };
   }
 }

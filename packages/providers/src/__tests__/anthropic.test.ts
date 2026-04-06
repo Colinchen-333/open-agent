@@ -4,9 +4,71 @@ import {
   convertMessages,
   extractSystemPrompt,
   convertTools,
+  AnthropicProvider,
 } from '../anthropic.js';
 import { buildAnthropicThinkingParam } from '../thinking.js';
 import type { Message, ContentBlock, ChatOptions, ToolSpec } from '../types.js';
+
+// ---------------------------------------------------------------------------
+// AnthropicProvider.getCapabilities — model-accurate capability reporting
+// ---------------------------------------------------------------------------
+
+describe('AnthropicProvider.getCapabilities', () => {
+  it('returns thinking:native for claude-opus-4-6 (thinking-capable model)', async () => {
+    const provider = new AnthropicProvider({ apiKey: 'test-key' });
+    const caps = await provider.getCapabilities('claude-opus-4-6');
+    expect(caps.thinking).toBe('native');
+    expect(caps.supportsAdaptiveThinking).toBe(true);
+    expect(caps.supportedEffortLevels).toContain('max');
+  });
+
+  it('returns thinking:unsupported for claude-haiku-4-5 (no-thinking model)', async () => {
+    const provider = new AnthropicProvider({ apiKey: 'test-key' });
+    const caps = await provider.getCapabilities('claude-haiku-4-5');
+    expect(caps.thinking).toBe('unsupported');
+    expect(caps.supportsAdaptiveThinking).toBe(false);
+    expect(caps.supportedEffortLevels).toHaveLength(0);
+  });
+
+  it('returns thinking:unsupported for claude-haiku-4-5-20251001 (dated id)', async () => {
+    const provider = new AnthropicProvider({ apiKey: 'test-key' });
+    const caps = await provider.getCapabilities('claude-haiku-4-5-20251001');
+    expect(caps.thinking).toBe('unsupported');
+  });
+
+  it('returns thinking:native for claude-sonnet-4-6', async () => {
+    const provider = new AnthropicProvider({ apiKey: 'test-key' });
+    const caps = await provider.getCapabilities('claude-sonnet-4-6');
+    expect(caps.thinking).toBe('native');
+  });
+
+  it('uses conservative defaults (thinking:unsupported) for unknown models', async () => {
+    const provider = new AnthropicProvider({ apiKey: 'test-key' });
+    const caps = await provider.getCapabilities('claude-unknown-model-99');
+    // getModelCapability returns null → modelSupportsThinking returns false (conservative)
+    expect(caps.thinking).toBe('unsupported');
+    expect(caps.supportsAdaptiveThinking).toBe(false);
+  });
+
+  it('omits model key when no model argument supplied', async () => {
+    const provider = new AnthropicProvider({ apiKey: 'test-key' });
+    const caps = await provider.getCapabilities();
+    expect(Object.prototype.hasOwnProperty.call(caps, 'model')).toBe(false);
+    expect(caps.provider).toBe('anthropic');
+  });
+
+  it('reports structuredOutput:native (not best_effort)', async () => {
+    const provider = new AnthropicProvider({ apiKey: 'test-key' });
+    const caps = await provider.getCapabilities('claude-sonnet-4-6');
+    expect(caps.structuredOutput).toBe('native');
+  });
+
+  it('reports serverTools:unsupported', async () => {
+    const provider = new AnthropicProvider({ apiKey: 'test-key' });
+    const caps = await provider.getCapabilities('claude-opus-4-6');
+    expect(caps.serverTools).toBe('unsupported');
+  });
+});
 
 // ---------------------------------------------------------------------------
 // convertMessages

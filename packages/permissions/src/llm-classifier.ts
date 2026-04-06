@@ -43,15 +43,23 @@ ${
 
 Respond with exactly one word: APPROVE or DENY`;
 
+    // Use word-boundary regex so that "DISAPPROVE" does not match APPROVE,
+    // and "UNDENIABLE" does not match DENY. The model is prompted to reply
+    // with exactly one word, but defensive parsing prevents false positives
+    // from prose responses where APPROVE or DENY appears as a substring of a
+    // longer word (e.g. DISAPPROVE, UNAPPROVED, DENIABLE).
+    const DENY_PATTERN = /\bDENY\b/i;
+    const APPROVE_PATTERN = /\bAPPROVE\b/i;
+
     try {
       const response = await provider.classify(prompt);
-      const normalized = response.trim().toUpperCase();
+      const normalized = response.trim();
 
       // Check DENY first to avoid "DENY. Do not approve." being matched as APPROVE.
-      if (normalized.includes('DENY')) {
+      if (DENY_PATTERN.test(normalized)) {
         return { approved: false, rationale: `LLM classifier denied: ${request.toolName}` };
       }
-      if (normalized.includes('APPROVE')) {
+      if (APPROVE_PATTERN.test(normalized)) {
         return { approved: true, rationale: `LLM classifier approved: ${request.toolName}` };
       }
       // Ambiguous response — pass through

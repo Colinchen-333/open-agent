@@ -15,6 +15,26 @@ export interface BuildBashSandboxPolicyInput {
   runtimeDeniedPaths?: string[];
 }
 
+/**
+ * Sandbox enforcement boundary:
+ * - On macOS with DARWIN_SANDBOX enabled: OS-level sandbox-exec enforces the policy.
+ *   The sandbox profile restricts filesystem writes, network, and process creation.
+ * - On other platforms or when DARWIN_SANDBOX is disabled: policy is advisory only.
+ *   Violations are detected post-hoc via stderr analysis and command inspection,
+ *   but not prevented at the OS level. This is an intentional design boundary
+ *   matching Claude Code's approach (which also only enforces on macOS).
+ *
+ * The `boundaryKind` field in the returned policy records which enforcement mode applies:
+ * - 'hard': all configured features are OS-enforced (macOS sandbox-exec only).
+ * - 'mixed': some features are OS-enforced, some are advisory only.
+ * - 'policy_only': all features are advisory — no OS enforcement available.
+ * - 'none': sandbox is disabled.
+ *
+ * The `executionEngine` field in {@link BashSandboxExecutionRecord} records which
+ * enforcement mode was actually used during execution:
+ * - 'sandbox-exec': full OS enforcement (macOS only).
+ * - 'policy': advisory policy with post-hoc detection.
+ */
 export function buildBashSandboxPolicy(input: BuildBashSandboxPolicyInput): BashSandboxExecutionPolicy {
   const sandbox = input.sandbox;
   const bypassRequested = input.dangerouslyDisableSandbox === true;

@@ -836,17 +836,21 @@ function buildSandboxExecutionRecord(input: {
   backgroundTaskId?: string;
   findings: BashSandboxExecutionFinding[];
 }): BashSandboxExecutionRecord {
+  const provenance = createSandboxExecutionProvenance(input.ctx, {
+    command: input.command,
+    cwd: input.cwd,
+    runInBackground: input.runInBackground,
+    policy: input.policy,
+    wrappedWithSandboxExec: input.wrappedWithSandboxExec === true,
+  });
   return {
     timestamp: new Date().toISOString(),
     outcome: input.outcome,
-    provenance: createSandboxExecutionProvenance(input.ctx, {
-      command: input.command,
-      cwd: input.cwd,
-      runInBackground: input.runInBackground,
-      policy: input.policy,
-      wrappedWithSandboxExec: input.wrappedWithSandboxExec === true,
-    }),
+    provenance,
     findings: input.findings,
+    // Collapsed enforcement mode: 'sandbox-exec' when darwin-sandbox-exec was
+    // used, 'policy' for all other cases (including 'none' = no OS enforcement).
+    executionEngine: provenance.executionEngine === 'darwin-sandbox-exec' ? 'sandbox-exec' : 'policy',
     ...(input.exitCode !== undefined ? { exitCode: input.exitCode } : {}),
     ...(input.finalCwd !== undefined ? { finalCwd: input.finalCwd } : {}),
     ...(input.outputLength !== undefined ? { outputLength: input.outputLength } : {}),

@@ -137,6 +137,24 @@ describe('createLLMClassifier', () => {
     expect(result?.rationale).toContain('Bash');
   });
 
+  test('DISAPPROVE does NOT match APPROVE (word-boundary guard)', async () => {
+    // "DISAPPROVE" contains "APPROVE" as a substring; includes() would have
+    // incorrectly returned approved:true before the word-boundary fix.
+    const provider = { classify: async () => 'DISAPPROVE' };
+    const classify = createLLMClassifier(provider);
+    const result = await classify(makeRequest('Bash', { command: 'ls' }), {});
+    // Neither \bAPPROVE\b nor \bDENY\b matches "DISAPPROVE" → null (ambiguous)
+    expect(result).toBeNull();
+  });
+
+  test('"I DENY this" matches DENY (word boundary present)', async () => {
+    const provider = { classify: async () => 'I DENY this request.' };
+    const classify = createLLMClassifier(provider);
+    const result = await classify(makeRequest('Bash', { command: 'rm -rf /' }), {});
+    expect(result?.approved).toBe(false);
+    expect(result?.rationale).toContain('denied');
+  });
+
   test('truncates large JSON inputs to 500 chars', async () => {
     let capturedPrompt = '';
     const provider = {

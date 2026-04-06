@@ -102,6 +102,13 @@ export interface BashSandboxExecutionRecord {
   finalCwd?: string | null;
   outputLength?: number;
   backgroundTaskId?: string;
+  /**
+   * Collapsed enforcement mode for this execution record, derived from
+   * `provenance.executionEngine`. Queryable without unwrapping provenance:
+   *  - 'sandbox-exec': OS-level enforcement was active (macOS sandbox-exec).
+   *  - 'policy': Advisory policy only — no OS-level enforcement was applied.
+   */
+  executionEngine: 'sandbox-exec' | 'policy';
 }
 
 export interface BashSandboxExecutionPolicy {
