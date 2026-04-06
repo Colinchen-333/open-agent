@@ -5018,7 +5018,9 @@ export function query(
         ...(normalizeOptionalString(action.arguments['model']) ? { model: normalizeOptionalString(action.arguments['model']) } : {}),
         ...(normalizeOptionalString(action.arguments['mode']) ? { mode: normalizeOptionalString(action.arguments['mode']) } : {}),
         ...(normalizeOptionalString(action.arguments['cwd']) ? { cwd: normalizeOptionalString(action.arguments['cwd']) } : {}),
-        ...(action.arguments['isolation'] === 'worktree' ? { isolation: 'worktree' as const } : {}),
+        ...((action.arguments['isolation'] === 'worktree' || action.arguments['isolation'] === 'fork')
+          ? { isolation: action.arguments['isolation'] as 'worktree' | 'fork' }
+          : {}),
         ...(normalizeIntegerField(action.arguments['max_turns']) !== undefined
           ? { maxTurns: normalizeIntegerField(action.arguments['max_turns'])! }
           : {}),
@@ -5089,7 +5091,9 @@ export function query(
               ...(normalizeOptionalString(action.arguments['model']) ? { model: normalizeOptionalString(action.arguments['model']) } : {}),
               ...(normalizeOptionalString(action.arguments['mode']) ? { mode: normalizeOptionalString(action.arguments['mode']) } : {}),
               ...(normalizeOptionalString(action.arguments['cwd']) ? { cwd: normalizeOptionalString(action.arguments['cwd']) } : {}),
-              ...(action.arguments['isolation'] === 'worktree' ? { isolation: 'worktree' as const } : {}),
+              ...((action.arguments['isolation'] === 'worktree' || action.arguments['isolation'] === 'fork')
+                ? { isolation: action.arguments['isolation'] as 'worktree' | 'fork' }
+                : {}),
               ...(normalizeIntegerField(action.arguments['max_turns']) !== undefined
                 ? { maxTurns: normalizeIntegerField(action.arguments['max_turns'])! }
                 : {}),
@@ -5112,7 +5116,9 @@ export function query(
               ...(normalizeOptionalString(action.arguments['model']) ? { model: normalizeOptionalString(action.arguments['model']) } : {}),
               ...(normalizeOptionalString(action.arguments['mode']) ? { mode: normalizeOptionalString(action.arguments['mode']) } : {}),
               ...(normalizeOptionalString(action.arguments['cwd']) ? { cwd: normalizeOptionalString(action.arguments['cwd']) } : {}),
-              ...(action.arguments['isolation'] === 'worktree' ? { isolation: 'worktree' as const } : {}),
+              ...((action.arguments['isolation'] === 'worktree' || action.arguments['isolation'] === 'fork')
+                ? { isolation: action.arguments['isolation'] as 'worktree' | 'fork' }
+                : {}),
               ...(normalizeIntegerField(action.arguments['max_turns']) !== undefined
                 ? { maxTurns: normalizeIntegerField(action.arguments['max_turns'])! }
                 : {}),

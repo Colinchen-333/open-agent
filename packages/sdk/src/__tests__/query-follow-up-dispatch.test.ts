@@ -1,10 +1,65 @@
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, spyOn, afterEach, type Mock } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
+import { randomUUID } from 'crypto';
 import type { ChatOptions, LLMProvider, Message, StreamEvent } from '@open-agent/providers';
 import type { Query, WorkerRecord, TaskDispatcherRecord } from '../types.js';
 import { query } from '../query.js';
+import { AgentExecutor } from '@open-agent/agents';
 import { makeLockedTempHome as makeTempHome } from './temp-home.js';
+
+// ---------------------------------------------------------------------------
+// Spies for Fix 1: fork isolation via executeFollowUp scaffold
+// ---------------------------------------------------------------------------
+
+let executeForkedSpy: Mock<any>;
+let executeInBackgroundSpy: Mock<any>;
+let getAgentSpy: Mock<any>;
+
+function makeMinimalSession(agentId: string) {
+  return {
+    agentId,
+    agentType: 'worker',
+    state: 'running' as const,
+    startedAt: new Date().toISOString(),
+    model: 'mock-model',
+    numTurns: 0,
+    durationMs: 0,
+    totalToolUseCount: 0,
+    totalTokens: 0,
+  };
+}
+
+function installForkSpies() {
+  let lastAgentId = '';
+
+  executeForkedSpy = spyOn(AgentExecutor.prototype, 'executeForked').mockImplementation(
+    async () => {
+      lastAgentId = `fork-${randomUUID()}`;
+      return { agentId: lastAgentId, outputFile: '/tmp/fake.output' };
+    },
+  );
+  executeInBackgroundSpy = spyOn(AgentExecutor.prototype, 'executeInBackground').mockImplementation(
+    async () => {
+      lastAgentId = `bg-${randomUUID()}`;
+      return { agentId: lastAgentId, outputFile: '/tmp/fake-bg.output' };
+    },
+  );
+  // getAgent must return a session for the agentId returned by the spy
+  getAgentSpy = spyOn(AgentExecutor.prototype, 'getAgent').mockImplementation(
+    (agentId: string) => makeMinimalSession(agentId),
+  );
+}
+
+function restoreForkSpies() {
+  executeForkedSpy?.mockRestore();
+  executeInBackgroundSpy?.mockRestore();
+  getAgentSpy?.mockRestore();
+}
+
+afterEach(() => {
+  restoreForkSpies();
+});
 
 function makeBackgroundProvider(): LLMProvider {
   return {
@@ -278,6 +333,99 @@ describe('query() follow-up dispatcher', () => {
       expect(stopped.kind).toBe('task_dispatcher');
       expect(stopped.dispatcherStop?.success).toBe(true);
       expect(stopped.dispatcher?.dispatcherId).toBe(started.dispatcher!.dispatcherId);
+
+      q.close();
+    } finally {
+      temp.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix 1 verification: executeFollowUp scaffold forwards isolation='fork'
+// ---------------------------------------------------------------------------
+
+describe('executeFollowUp: isolation=fork scaffold path (R10 fix)', () => {
+  it('forwards isolation=fork to launchWorker → executeForked, not executeInBackground', async () => {
+    const temp = makeTempHome('open-agent-sdk-follow-up-fork-isolation-');
+    installForkSpies();
+
+    try {
+      const q = query('follow-up fork isolation', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeBackgroundProvider(),
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+      });
+
+      const teamName = `fork-team-${Date.now()}`;
+      await q.createTeam({ name: teamName, setActive: true });
+
+      const dispatched = await q.executeFollowUp({
+        kind: 'generic_followup',
+        action: {
+          tool: 'Task',
+          arguments: {
+            description: 'Fork isolation worker',
+            prompt: 'Run with fork isolation.',
+            subagent_type: 'worker',
+            team_name: teamName,
+            isolation: 'fork',
+          },
+        },
+      });
+
+      // The result is a worker launch
+      expect(dispatched.kind).toBe('worker');
+      if (dispatched.kind === 'worker') {
+        expect(dispatched.followUpKind).toBe('generic_followup');
+      }
+
+      // isolation='fork' must have routed to executeForked, not executeInBackground
+      expect(executeForkedSpy).toHaveBeenCalledTimes(1);
+      expect(executeInBackgroundSpy).toHaveBeenCalledTimes(0);
+
+      q.close();
+    } finally {
+      temp.cleanup();
+    }
+  });
+
+  it('does NOT forward isolation=none to launchWorker (falls back to executeInBackground)', async () => {
+    const temp = makeTempHome('open-agent-sdk-follow-up-none-isolation-');
+    installForkSpies();
+
+    try {
+      const q = query('follow-up none isolation', {
+        cwd: temp.cwd,
+        model: 'mock-model',
+        provider: makeBackgroundProvider(),
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+      });
+
+      const teamName = `none-team-${Date.now()}`;
+      await q.createTeam({ name: teamName, setActive: true });
+
+      const dispatched = await q.executeFollowUp({
+        kind: 'generic_followup',
+        action: {
+          tool: 'Task',
+          arguments: {
+            description: 'No-isolation worker',
+            prompt: 'Run without isolation.',
+            subagent_type: 'worker',
+            team_name: teamName,
+            isolation: 'none',
+          },
+        },
+      });
+
+      expect(dispatched.kind).toBe('worker');
+      // isolation='none' is not forwarded → background dispatch, not fork
+      expect(executeForkedSpy).toHaveBeenCalledTimes(0);
+      expect(executeInBackgroundSpy).toHaveBeenCalledTimes(1);
 
       q.close();
     } finally {

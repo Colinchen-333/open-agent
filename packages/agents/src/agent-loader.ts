@@ -193,6 +193,25 @@ export class AgentLoader {
       ? (meta.hooks as Record<string, unknown>)
       : undefined;
 
+    const isolation = typeof meta.isolation === 'string'
+      && ['worktree', 'fork', 'none'].includes(meta.isolation)
+      ? (meta.isolation as AgentDefinition['isolation'])
+      : undefined;
+
+    const mode = typeof meta.mode === 'string'
+      ? (meta.mode as AgentDefinition['mode'])
+      : undefined;
+
+    const allowBackgroundExecution = typeof meta.allowBackgroundExecution === 'boolean'
+      ? meta.allowBackgroundExecution
+      : typeof meta['allow-background-execution'] === 'boolean'
+        ? (meta['allow-background-execution'] as boolean)
+        : typeof meta.allowBackgroundExecution === 'string'
+          ? (meta.allowBackgroundExecution as string).toLowerCase() === 'true'
+          : typeof meta['allow-background-execution'] === 'string'
+            ? (meta['allow-background-execution'] as string).toLowerCase() === 'true'
+            : undefined;
+
     return {
       description: (meta.description as string) || '',
       tools: meta.tools as string[] | undefined,
@@ -208,6 +227,9 @@ export class AgentLoader {
       ...(requiredMcpServers !== undefined && { requiredMcpServers }),
       ...(omitClaudeMd !== undefined && { omitClaudeMd }),
       ...(hooks !== undefined && { hooks }),
+      ...(isolation !== undefined && { isolation }),
+      ...(mode !== undefined && { mode }),
+      ...(allowBackgroundExecution !== undefined && { allowBackgroundExecution }),
     };
   }
 

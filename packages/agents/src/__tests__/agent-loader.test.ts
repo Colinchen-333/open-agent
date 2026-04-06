@@ -283,6 +283,196 @@ describe('AgentLoader', () => {
     });
   });
 
+  describe('parseAgentMd isolation / mode / allowBackgroundExecution (R10 fix)', () => {
+    it('parses isolation: fork from frontmatter', () => {
+      const agentDir = join(cwd, '.open-agent', 'agents');
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(
+        join(agentDir, 'fork-agent.md'),
+        [
+          '---',
+          'description: Fork isolation agent',
+          'tools: [Read, Bash]',
+          'isolation: fork',
+          '---',
+          'You run with fork isolation.',
+        ].join('\n'),
+      );
+
+      const freshLoader = new AgentLoader();
+      freshLoader.loadDefaults(cwd);
+
+      const agent = freshLoader.get('fork-agent');
+      expect(agent).toBeDefined();
+      expect(agent!.isolation).toBe('fork');
+    });
+
+    it('parses isolation: worktree from frontmatter', () => {
+      const agentDir = join(cwd, '.open-agent', 'agents');
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(
+        join(agentDir, 'worktree-agent.md'),
+        [
+          '---',
+          'description: Worktree isolation agent',
+          'tools: [Read]',
+          'isolation: worktree',
+          '---',
+          'You run in a worktree.',
+        ].join('\n'),
+      );
+
+      const freshLoader = new AgentLoader();
+      freshLoader.loadDefaults(cwd);
+
+      const agent = freshLoader.get('worktree-agent');
+      expect(agent).toBeDefined();
+      expect(agent!.isolation).toBe('worktree');
+    });
+
+    it('parses isolation: none from frontmatter', () => {
+      const agentDir = join(cwd, '.open-agent', 'agents');
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(
+        join(agentDir, 'no-isolation-agent.md'),
+        [
+          '---',
+          'description: No isolation agent',
+          'tools: [Read]',
+          'isolation: none',
+          '---',
+          'You run without isolation.',
+        ].join('\n'),
+      );
+
+      const freshLoader = new AgentLoader();
+      freshLoader.loadDefaults(cwd);
+
+      const agent = freshLoader.get('no-isolation-agent');
+      expect(agent).toBeDefined();
+      expect(agent!.isolation).toBe('none');
+    });
+
+    it('ignores unknown isolation values', () => {
+      const agentDir = join(cwd, '.open-agent', 'agents');
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(
+        join(agentDir, 'bad-isolation-agent.md'),
+        [
+          '---',
+          'description: Bad isolation agent',
+          'tools: [Read]',
+          'isolation: sandbox',
+          '---',
+          'Unknown isolation value should be silently dropped.',
+        ].join('\n'),
+      );
+
+      const freshLoader = new AgentLoader();
+      freshLoader.loadDefaults(cwd);
+
+      const agent = freshLoader.get('bad-isolation-agent');
+      expect(agent).toBeDefined();
+      expect(agent!.isolation).toBeUndefined();
+    });
+
+    it('parses mode from frontmatter', () => {
+      const agentDir = join(cwd, '.open-agent', 'agents');
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(
+        join(agentDir, 'mode-agent.md'),
+        [
+          '---',
+          'description: Mode agent',
+          'tools: [Read]',
+          'mode: acceptEdits',
+          '---',
+          'You run in acceptEdits mode.',
+        ].join('\n'),
+      );
+
+      const freshLoader = new AgentLoader();
+      freshLoader.loadDefaults(cwd);
+
+      const agent = freshLoader.get('mode-agent');
+      expect(agent).toBeDefined();
+      expect(agent!.mode).toBe('acceptEdits');
+    });
+
+    it('parses allowBackgroundExecution: true from frontmatter', () => {
+      const agentDir = join(cwd, '.open-agent', 'agents');
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(
+        join(agentDir, 'bg-agent.md'),
+        [
+          '---',
+          'description: Background execution agent',
+          'tools: [Read]',
+          'allowBackgroundExecution: true',
+          '---',
+          'You may run in the background.',
+        ].join('\n'),
+      );
+
+      const freshLoader = new AgentLoader();
+      freshLoader.loadDefaults(cwd);
+
+      const agent = freshLoader.get('bg-agent');
+      expect(agent).toBeDefined();
+      expect(agent!.allowBackgroundExecution).toBe(true);
+    });
+
+    it('parses allow-background-execution: true (kebab-case alias) from frontmatter', () => {
+      const agentDir = join(cwd, '.open-agent', 'agents');
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(
+        join(agentDir, 'bg-kebab-agent.md'),
+        [
+          '---',
+          'description: Background execution kebab agent',
+          'tools: [Read]',
+          'allow-background-execution: true',
+          '---',
+          'You may run in the background (kebab alias).',
+        ].join('\n'),
+      );
+
+      const freshLoader = new AgentLoader();
+      freshLoader.loadDefaults(cwd);
+
+      const agent = freshLoader.get('bg-kebab-agent');
+      expect(agent).toBeDefined();
+      expect(agent!.allowBackgroundExecution).toBe(true);
+    });
+
+    it('parses combined isolation + mode + allowBackgroundExecution', () => {
+      const agentDir = join(cwd, '.open-agent', 'agents');
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(
+        join(agentDir, 'full-meta-agent.md'),
+        [
+          '---',
+          'description: Full metadata agent',
+          'tools: [Read, Bash]',
+          'isolation: fork',
+          'mode: bypassPermissions',
+          'allowBackgroundExecution: true',
+          '---',
+          'You are a fully-configured agent.',
+        ].join('\n'),
+      );
+
+      const freshLoader = new AgentLoader();
+      freshLoader.loadDefaults(cwd);
+
+      const agent = freshLoader.get('full-meta-agent');
+      expect(agent).toBeDefined();
+      expect(agent!.isolation).toBe('fork');
+      expect(agent!.mode).toBe('bypassPermissions');
+      expect(agent!.allowBackgroundExecution).toBe(true);
+    });
+  });
+
   describe('register()', () => {
     it('can register a custom agent', () => {
       loader.register('custom-test-agent', {
