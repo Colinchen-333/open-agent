@@ -15,6 +15,8 @@ import { createTaskOutputTool, createTaskStopTool } from './task-management.js';
 import { createEnterWorktreeTool } from './worktree.js';
 import { createTodoWriteTool } from './todo-write.js';
 import { createREPLTool } from './repl-tool.js';
+import { createWorkflowTool } from './workflow-tool.js';
+import { createBriefTool } from './brief-tool.js';
 
 /**
  * Central registry for all available tools.
@@ -100,6 +102,8 @@ export function createDefaultToolRegistry(_cwd: string): ToolRegistry {
   registry.register(createEnterWorktreeTool());
   registry.register(createTodoWriteTool());
   registry.register(createREPLTool());
+  registry.register(createWorkflowTool());
+  registry.register(createBriefTool());
   return registry;
 }
 
