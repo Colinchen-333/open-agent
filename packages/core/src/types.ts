@@ -79,7 +79,7 @@ export interface AccountInfo {
 }
 
 // Agent MCP server spec — server name reference or inline config
-export type AgentMcpServerSpec = string | Record<string, McpStdioServerConfig | McpSSEServerConfig | McpHttpServerConfig | McpSdkServerConfig>;
+export type AgentMcpServerSpec = string | Record<string, McpStdioServerConfig | McpSSEServerConfig | McpHttpServerConfig | McpWsServerConfig | McpSdkServerConfig>;
 
 // Agent definition
 export interface AgentDefinition {
@@ -176,6 +176,12 @@ export interface McpHttpServerConfig {
   headers?: Record<string, string>;
 }
 
+export interface McpWsServerConfig {
+  type: 'ws';
+  url: string;
+  headers?: Record<string, string>;
+}
+
 export interface McpSdkServerConfig {
   type: 'sdk';
   name: string;
@@ -191,6 +197,7 @@ export type McpServerConfig =
   | McpStdioServerConfig
   | McpSSEServerConfig
   | McpHttpServerConfig
+  | McpWsServerConfig
   | McpSdkServerConfig;
 
 // SDK assistant message error types

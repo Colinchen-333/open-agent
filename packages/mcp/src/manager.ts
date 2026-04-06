@@ -3,6 +3,7 @@ import type {
   McpStdioServerConfig,
   McpSSEServerConfig,
   McpHttpServerConfig,
+  McpWsServerConfig,
 } from '@open-agent/core';
 import { isDeepStrictEqual } from 'util';
 import {
@@ -12,6 +13,7 @@ import {
 import { McpStdioClient } from './stdio-transport';
 import { McpHttpClient } from './http-transport';
 import { McpSseClient } from './sse-transport';
+import { McpWsClient } from './ws-transport';
 import type { McpServerConnection, McpToolInfo, McpResourceInfo, McpPromptInfo, McpPromptMessage } from './types';
 import { normalizeMcpToolInfo } from './tool-info';
 import { McpServerState } from './server-state';
@@ -28,11 +30,12 @@ function isAuthError(error: unknown): boolean {
   );
 }
 
-function normalizedServerType(config: McpServerConfig): 'stdio' | 'http' | 'sse' | 'sdk' {
+function normalizedServerType(config: McpServerConfig): 'stdio' | 'http' | 'sse' | 'ws' | 'sdk' {
   const type = (config as { type?: string }).type;
   if (!type || type === 'stdio') return 'stdio';
   if (type === 'http') return 'http';
   if (type === 'sse') return 'sse';
+  if (type === 'ws') return 'ws';
   return 'sdk';
 }
 
@@ -64,6 +67,12 @@ function hasServerConfigChanged(
     return a.url !== b.url || !isDeepStrictEqual(a.headers ?? {}, b.headers ?? {});
   }
 
+  if (prevType === 'ws') {
+    const a = prev as McpWsServerConfig;
+    const b = next as McpWsServerConfig;
+    return a.url !== b.url || !isDeepStrictEqual(a.headers ?? {}, b.headers ?? {});
+  }
+
   return !isDeepStrictEqual(
     {
       name: (prev as { name?: string }).name,
@@ -77,7 +86,7 @@ function hasServerConfigChanged(
 }
 
 // Union type of all client types we maintain
-type AnyMcpClient = McpStdioClient | McpHttpClient | McpSseClient;
+type AnyMcpClient = McpStdioClient | McpHttpClient | McpSseClient | McpWsClient;
 
 /** Payload delivered to a resource subscription callback. */
 export type ResourceNotificationEvent =
@@ -618,6 +627,9 @@ export class McpManager {
     if (client instanceof McpStdioClient || client instanceof McpSseClient) {
       return client.getUnderlyingClient();
     }
+    if (client instanceof McpWsClient) {
+      return client.getUnderlyingClient();
+    }
     return null;
   }
 
@@ -710,6 +722,11 @@ export class McpManager {
     if (type === 'sse') {
       const sseConfig = config as McpSSEServerConfig;
       return new McpSseClient(name, sseConfig.url, sseConfig.headers);
+    }
+
+    if (type === 'ws') {
+      const wsConfig = config as McpWsServerConfig;
+      return new McpWsClient(name, wsConfig.url, wsConfig.headers);
     }
 
     if (type === 'sdk') {
