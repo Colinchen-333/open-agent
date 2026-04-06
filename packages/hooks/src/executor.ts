@@ -170,9 +170,10 @@ export class HookExecutor {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), timeoutMs);
 
+      const enrichedInput = withCamelCaseAliases(input);
       try {
         for (const hookFn of matcherEntry.hooks) {
-          const result = await hookFn(input, toolUseId, { signal: ac.signal });
+          const result = await hookFn(enrichedInput as any, toolUseId, { signal: ac.signal });
           results.push(result);
           if (result.continue === false) {
             clearTimeout(timer);

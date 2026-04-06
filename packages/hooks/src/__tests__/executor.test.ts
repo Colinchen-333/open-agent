@@ -112,6 +112,26 @@ test('shell hook receives stdin JSON with all HookInput fields', async () => {
   expect(captured.tool_use_id).toBe('use-1');
 });
 
+test('callback hook receives camelCase aliases in input', async () => {
+  let capturedInput: any = null;
+  const executor = new HookExecutor();
+  executor.registerCallbackHook('PreToolUse', {
+    hooks: [async (input) => { capturedInput = input; return { continue: true }; }],
+  });
+  await executor.execute('PreToolUse', {
+    session_id: 's',
+    transcript_path: '/t',
+    cwd: '/',
+    hook_event_name: 'PreToolUse',
+    tool_name: 'Bash',
+    tool_input: { command: 'ls' },
+    tool_use_id: 'tu-cb',
+  });
+  expect(capturedInput.hookEvent).toBe('PreToolUse');
+  expect(capturedInput.toolName).toBe('Bash');
+  expect(capturedInput.hook_event_name).toBe('PreToolUse'); // snake_case preserved
+});
+
 test('shell hook receives camelCase aliases in stdin JSON', async () => {
   const executor = new HookExecutor();
   const script = `cat > /tmp/hook-camel-test.json && echo '{"continue": true}'`;
