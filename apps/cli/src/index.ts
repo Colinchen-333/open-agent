@@ -1119,6 +1119,12 @@ async function main(): Promise<void> {
           // cast is safe: resumeTranscript is produced by SessionManager which
           // returns the same shape that ConversationLoop originally persisted.
           loop.setMessages(result.resumeTranscript as import('@open-agent/providers').Message[]);
+          // Propagate the restored session identity into the loop so that all
+          // subsequent hooks, stream events, and tool-execution records use the
+          // resumed session ID rather than the original startup session ID.
+          if (typeof loop.setSessionId === 'function') {
+            loop.setSessionId(result.shouldResume);
+          }
           sessionId = result.shouldResume;
           console.log(`\nSession ${result.shouldResume.slice(0, 8)} loaded with ${result.resumeTranscript.length} messages. Continue typing to resume.\n`);
           continue;

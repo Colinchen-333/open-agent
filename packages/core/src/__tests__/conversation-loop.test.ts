@@ -1004,4 +1004,35 @@ describe('ConversationLoop', () => {
       expect((capturedOptionsList[1] as any).systemPromptBlocks[0].text).toBe('UPDATED');
     });
   });
+
+  // -------------------------------------------------------------------------
+  // /resume hydration helpers — R8.2
+  // -------------------------------------------------------------------------
+
+  describe('setSessionId and setMessages (R8.2 resume hydration)', () => {
+    it('setSessionId updates the loop session identity', () => {
+      const provider = makeMockProvider([]);
+      const loop = new ConversationLoop(baseOptions(provider, new Map(), { sessionId: 'old-session' }));
+
+      loop.setSessionId('new-session');
+
+      // Access options via the public method indirectly: the next run() call
+      // should embed the new sessionId in system_init.  We verify by inspecting
+      // the internal state through the (any) cast since this is a unit-level check.
+      expect((loop as any).options.sessionId).toBe('new-session');
+    });
+
+    it('setMessages resets turnCount to 0', async () => {
+      const provider = makeMockProvider([textResponse('hi'), textResponse('hi2')]);
+      const loop = new ConversationLoop(baseOptions(provider));
+
+      // Execute one turn to advance turnCount beyond 0.
+      await collectMessages(loop.run('first turn'));
+      expect(loop.getTurnCount()).toBeGreaterThan(0);
+
+      // Simulate /resume hydration: setMessages should reset turnCount.
+      loop.setMessages([{ role: 'user', content: 'restored message' }]);
+      expect(loop.getTurnCount()).toBe(0);
+    });
+  });
 });

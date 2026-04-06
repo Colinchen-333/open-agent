@@ -1683,9 +1683,22 @@ export class ConversationLoop {
    * Called by the REPL when the user runs `/resume` and the slash-command
    * handler returns `shouldResume` + `resumeTranscript`.  Transient messages
    * are stripped from the incoming array for safety.
+   *
+   * Also resets turnCount so the restored session starts counting turns from
+   * zero — matching the behaviour of a freshly-started session.
    */
   setMessages(messages: Message[]): void {
     this.messages = messages.filter(m => !(m as any)._transient);
+    this.turnCount = 0; // Reset turn count for the new session context
+  }
+
+  /**
+   * Update the session identity so that hooks, stream events, and tool
+   * execution all reference the restored session rather than the original one.
+   * Called by the REPL's /resume wiring immediately after setMessages().
+   */
+  setSessionId(id: string): void {
+    (this.options as any).sessionId = id;
   }
 
   /** Return the number of LLM turns executed so far. */

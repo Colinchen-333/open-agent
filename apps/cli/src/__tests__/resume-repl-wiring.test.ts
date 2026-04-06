@@ -121,4 +121,24 @@ describe('/resume REPL wiring — contract between slash-command and loop', () =
     expect(capturedSessionId).toBe(MOCK_SESSION_ID);
     expect(loop.getMessages()).toHaveLength(MOCK_TRANSCRIPT.length);
   });
+
+  it('resume wiring calls setSessionId on the loop (R8.2)', async () => {
+    const ctx = makeResumeCtx();
+    const loop = makeLoop();
+
+    const result = await handleSlashCommand('/resume abcd1234', ctx);
+
+    // Simulate exactly what the updated index.ts wiring does:
+    if (result?.shouldResume && Array.isArray(result.resumeTranscript)) {
+      loop.setMessages(result.resumeTranscript as any);
+      if (typeof loop.setSessionId === 'function') {
+        loop.setSessionId(result.shouldResume);
+      }
+    }
+
+    // Verify the loop's internal sessionId has been switched to the resumed one.
+    expect((loop as any).options.sessionId).toBe(MOCK_SESSION_ID);
+    // turnCount should have been reset by setMessages.
+    expect(loop.getTurnCount()).toBe(0);
+  });
 });
