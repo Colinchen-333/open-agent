@@ -90,6 +90,17 @@ describe('AnthropicProvider.getCapabilities', () => {
     const caps = await provider.getCapabilities('claude-opus-4-6');
     expect(caps.serverTools).toBe('unsupported');
   });
+
+  it('listModels: every entry has supportsServerTools:false (consistent with getCapabilities)', async () => {
+    // getCapabilities() returns serverTools:'unsupported' for all Anthropic
+    // models.  listModels() must agree — previously it incorrectly returned true.
+    const provider = new AnthropicProvider({ apiKey: 'test-key' });
+    const models = await provider.listModels();
+    expect(models.length).toBeGreaterThan(0);
+    for (const model of models) {
+      expect(model.supportsServerTools).toBe(false);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

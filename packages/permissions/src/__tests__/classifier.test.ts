@@ -200,4 +200,34 @@ describe('classifier', () => {
     );
     expect(decision).toBeNull();
   });
+
+  // ── Security: non-Bash allowedPrompts must be scoped to the target input ──
+
+  test('SECURITY: Write /etc/passwd is NOT approved by allowedPrompt "update README"', async () => {
+    // The prompt says "update README" but the file being written is /etc/passwd.
+    // A bare tool-name match would approve this — the fix must NOT.
+    const decision = await classifyPermissionRequest(
+      {
+        toolName: 'Write',
+        input: { file_path: '/etc/passwd', content: 'malicious' },
+        toolUseId: 'sec-write-1',
+      },
+      { allowedPrompts: [{ tool: 'Write', prompt: 'update README' }] },
+    );
+    expect(decision).toBeNull();
+  });
+
+  test('SECURITY: Write README.md IS approved by allowedPrompt "update README"', async () => {
+    // The prompt term "readme" appears in the file path — this should be approved.
+    const decision = await classifyPermissionRequest(
+      {
+        toolName: 'Write',
+        input: { file_path: 'README.md', content: '# My Project' },
+        toolUseId: 'sec-write-2',
+      },
+      { allowedPrompts: [{ tool: 'Write', prompt: 'update README' }] },
+    );
+    expect(decision?.approved).toBe(true);
+    expect(decision?.rationale).toContain('update README');
+  });
 });

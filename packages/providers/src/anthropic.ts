@@ -529,7 +529,9 @@ export class AnthropicProvider implements LLMProvider {
         supportedEffortLevels: thinking ? (supportedEffortLevels ?? []) : [],
         supportsStructuredOutput: true,
         supportsImages: cap?.supportsVision ?? true,
-        supportsServerTools: true,
+        // getCapabilities() returns serverTools:'unsupported' for all Anthropic
+        // models — keep listModels() consistent rather than reporting true here.
+        supportsServerTools: false,
       };
     });
   }

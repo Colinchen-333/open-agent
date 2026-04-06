@@ -7,6 +7,23 @@ import { setFeatureDefault, clearFeatureOverrides } from '@open-agent/core';
 const ctx = { cwd: '/', sessionId: 's' } as any;
 
 describe('plan-mode tools (engine variant)', () => {
+  test('EnterPlanMode clears stale allowedPrompts on re-enter', async () => {
+    // Simulate: phase-1 plan exits and registers prompts, then the model enters
+    // plan mode again for phase-2.  The phase-1 prompts must not carry over.
+    const engine = new PermissionEngine({ mode: 'default' });
+
+    // Register some prompts from a previous plan phase.
+    engine.registerAllowedPrompts([{ tool: 'Bash', prompt: 'run tests' }]);
+    expect(engine.getAllowedPrompts()).toHaveLength(1);
+
+    // Entering plan mode again must clear those stale prompts.
+    const enter = createEnterPlanModeTool({ engine });
+    await enter.execute({}, ctx);
+
+    expect(engine.getAllowedPrompts()).toHaveLength(0);
+    expect(engine.getMode()).toBe('plan');
+  });
+
   test('EnterPlanMode switches engine to plan mode', async () => {
     const engine = new PermissionEngine({ mode: 'default' });
     const tool = createEnterPlanModeTool({ engine });

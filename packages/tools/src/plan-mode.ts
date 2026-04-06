@@ -14,6 +14,8 @@ export interface PlanModeEngineOpts {
     pushMode(mode: 'plan'): void;
     popMode(): void;
     getMode(): string;
+    /** Optional — clears stale allowedPrompts from a previous plan phase. */
+    clearAllowedPrompts?: () => void;
   };
 }
 
@@ -38,6 +40,12 @@ export function createEnterPlanModeTool(deps: PlanModeDeps | PlanModeEngineOpts)
       },
       async execute(_input: any, _ctx: ToolContext) {
         engine.pushMode('plan');
+        // Clear any allowedPrompts that were registered during a previous plan
+        // phase so that stale permissions from an old plan do not carry over
+        // into the new one.
+        if (typeof engine.clearAllowedPrompts === 'function') {
+          engine.clearAllowedPrompts();
+        }
         return 'Entered plan mode. You can now explore the codebase and design your approach. Use ExitPlanMode when your plan is ready for user approval.';
       },
     });

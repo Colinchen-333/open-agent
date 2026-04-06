@@ -82,10 +82,32 @@ function findAllowedPromptMatch(
   allowedPrompts: ReadonlyArray<{ tool: string; prompt: string }>,
 ): { tool: string; prompt: string } | null {
   if (request.toolName !== 'Bash') {
-    // For non-Bash tools the tool name match alone is sufficient:
-    // the prompt is a description, not an executable command.
+    // For non-Bash tools (Write/Edit/Read/Grep/etc.) we require that the
+    // prompt's key terms appear in the relevant input field (e.g. file_path).
+    // A bare tool-name match is NOT sufficient — it would allow
+    //   { tool: "Write", prompt: "update README" }
+    // to approve writing ANY file, including sensitive paths like /etc/passwd.
     for (const entry of allowedPrompts) {
-      if (entry.tool === request.toolName) return entry;
+      if (entry.tool !== request.toolName) continue;
+
+      const relevantInput = extractRelevantInput(request.toolName, request.input);
+      if (!relevantInput) {
+        // No matchable input — refuse to auto-approve.
+        return null;
+      }
+
+      const promptTerms = entry.prompt
+        .toLowerCase()
+        .split(/\s+/)
+        .filter((w) => w.length > 2);
+      if (promptTerms.length === 0) continue;
+
+      const matchCount = promptTerms.filter((w) =>
+        relevantInput.toLowerCase().includes(w),
+      ).length;
+
+      // Require at least 50% of prompt terms to appear in the relevant input.
+      if (matchCount >= Math.ceil(promptTerms.length * 0.5)) return entry;
     }
     return null;
   }
@@ -189,6 +211,43 @@ function extractInputText(input: unknown): string {
       .join(' ');
   }
   return '';
+}
+
+/**
+ * Return the single most semantically significant input field for a given tool
+ * so that allowedPrompt matching can verify the prompt describes the actual
+ * target (e.g. the file being written) rather than any arbitrary content.
+ *
+ * Returns null when no suitable field is found, which causes the caller to
+ * refuse auto-approval (fail-closed).
+ */
+function extractRelevantInput(toolName: string, input: unknown): string | null {
+  if (!input || typeof input !== 'object') return null;
+  const i = input as Record<string, unknown>;
+
+  // File-system tools: match against the target path.
+  if (['Write', 'Edit', 'Read', 'FileWrite', 'FileEdit', 'FileRead'].includes(toolName)) {
+    return typeof i.file_path === 'string' ? i.file_path : null;
+  }
+
+  // Search tools: match against the search pattern or query string.
+  if (['Grep', 'Glob', 'WebSearch'].includes(toolName)) {
+    if (typeof i.pattern === 'string') return i.pattern;
+    if (typeof i.query === 'string') return i.query;
+    return null;
+  }
+
+  // Web fetch: match against the URL.
+  if (toolName === 'WebFetch') {
+    return typeof i.url === 'string' ? i.url : null;
+  }
+
+  // Generic fallback: first 200 chars of the JSON-serialised input.
+  try {
+    return JSON.stringify(i).slice(0, 200);
+  } catch {
+    return null;
+  }
 }
 
 function containsApprovalPhrase(text: string): boolean {
