@@ -52,9 +52,9 @@ const DEFAULT_READONLY_BINDS = [
 ];
 
 /**
- * Default writable paths.
+ * Default writable paths (used by future sandbox exec integration).
  */
-const DEFAULT_WRITABLE_PATHS = [
+export const DEFAULT_WRITABLE_PATHS = [
   '/tmp',
   '/dev/null',
   '/dev/zero',

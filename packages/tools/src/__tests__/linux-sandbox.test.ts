@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import {
   buildBwrapCommand,
   sandboxConfigToLinux,
-  type LinuxSandboxConfig,
 } from '../sandbox/linux-sandbox';
 
 describe('buildBwrapCommand', () => {
