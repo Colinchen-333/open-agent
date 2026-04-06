@@ -10,6 +10,8 @@
 //   createSdkMcpServer() / tool()            MCP in-process server helpers
 
 export * from './types.js';
+export * from './sdk-types-complete.js';
+export { watchScheduledTasks, buildMissedTaskNotification, connectRemoteControl } from './daemon.js';
 
 // Primary V1 API
 export { query } from './query.js';
