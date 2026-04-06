@@ -140,3 +140,26 @@ export {
   type CommandResult,
 } from './shell-session.js';
 export { SessionMemory, type MemoryEntry } from './session-memory.js';
+export {
+  shellExec,
+  shellExecChain,
+  shellExecWithRetry,
+  getDefaultShell,
+  getShellBinary,
+  buildShellArgs,
+  detectSandboxMode,
+  type ShellMode,
+  type SandboxMode,
+  type ShellConfig,
+  type ShellExecResult,
+  type ShellSignalHandler,
+} from './shell.js';
+export {
+  AnalyticsCollector,
+  getAnalytics,
+  resetAnalytics,
+  type EventCategory,
+  type AnalyticsEvent,
+  type SessionMetrics,
+  type PerformanceMetric,
+} from './analytics.js';
