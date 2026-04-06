@@ -69,5 +69,7 @@ export function createWriteTool(): ToolDefinition {
         lineCount,
       };
     },
+    renderToolUseMessage: (input: any) => `Write ${input?.file_path ?? 'unknown'}`,
+    renderToolResultMessage: () => 'File written successfully',
   });
 }

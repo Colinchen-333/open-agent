@@ -123,6 +123,7 @@ export {
 export { TokenAccountant, type TurnUsage, type SessionUsage } from './token-accounting.js';
 export { validateConfig, mergeConfigWithValidation, type ConfigValidationError, type ConfigValidationResult } from './config-validator.js';
 export { truncateToTokenBudget, type TruncationResult } from './context-truncation.js';
+export { calculateRetryDelay, isRetryableError, withRetry, type QueryOptions, type QueryResult } from './query-engine.js';
 export {
   recoverFromJsonl,
   findNewestLeaf,

@@ -174,5 +174,7 @@ export function createEditTool(): ToolDefinition {
         patch,
       };
     },
+    renderToolUseMessage: (input: any) => `Edit ${input?.file_path ?? 'unknown'}`,
+    renderToolResultMessage: (output: any) => typeof output === 'string' && output.includes('updated') ? output : 'File edited',
   });
 }

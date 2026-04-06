@@ -341,6 +341,14 @@ export function createReadTool(): ToolDefinition {
         },
       };
     },
+    renderToolUseMessage: (input: any) => `Read ${input?.file_path ?? 'unknown'}${input?.offset ? ` (offset: ${input.offset})` : ''}`,
+    renderToolResultMessage: (output: any) => {
+      if (typeof output === 'string') {
+        const lines = output.split('\n').length;
+        return `${lines} line${lines !== 1 ? 's' : ''} read`;
+      }
+      return 'File contents read';
+    },
     extractSearchText: (output: unknown): string => {
       const o = output as { file?: { content?: string } };
       return o.file?.content ?? '';

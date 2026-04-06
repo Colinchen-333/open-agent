@@ -86,5 +86,13 @@ export function createGlobTool(): ToolDefinition {
         truncated,
       };
     },
+    renderToolUseMessage: (input: any) => `Glob "${input?.pattern ?? ''}" in ${input?.path ?? 'cwd'}`,
+    renderToolResultMessage: (output: any) => {
+      if (typeof output === 'object' && output !== null) {
+        const o = output as any;
+        return `${o.numFiles ?? 0} file${(o.numFiles ?? 0) !== 1 ? 's' : ''} found`;
+      }
+      return 'Search complete';
+    },
   });
 }

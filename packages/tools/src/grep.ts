@@ -168,6 +168,14 @@ export function createGrepTool(): ToolDefinition {
         numLines: lines.length,
       };
     },
+    renderToolUseMessage: (input: any) => `Grep "${input?.pattern ?? ''}" in ${input?.path ?? 'cwd'}`,
+    renderToolResultMessage: (output: any) => {
+      if (typeof output === 'object' && output !== null) {
+        const o = output as any;
+        return `${o.numFiles ?? 0} file${(o.numFiles ?? 0) !== 1 ? 's' : ''} matched`;
+      }
+      return String(output).slice(0, 100);
+    },
     isResultTruncated: (output: unknown): boolean => {
       const o = output as { matches?: unknown[]; truncated?: boolean; numLines?: number };
       return o.truncated === true || (Array.isArray(o.matches) && o.matches.length >= 250);
