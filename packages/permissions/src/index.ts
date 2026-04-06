@@ -12,3 +12,12 @@ export type { SettingsFile, SettingsPermissions } from './settings-loader';
 export * from './sandbox-meta-policy';
 // Note: llm-classifier.ts has been removed. LLMClassifierProvider and
 // classifyPermissionRequest are now exported from ./classifier.
+export {
+  loadPersistedRules,
+  savePersistedRules,
+  addPermanentRule,
+  removePermanentRule,
+  getPermanentRules,
+  clearPersistedRules,
+} from './rule-persistence';
+export type { PersistedRule } from './rule-persistence';

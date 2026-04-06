@@ -56,3 +56,5 @@ export type {
   McpOAuthConfig,
 } from './auth';
 export { resolveHeaders, createEnvHeadersHelper, type HeadersHelper } from './headers-helper';
+export { McpHealthMonitor } from './health-monitor';
+export type { ServerHealthStatus, HealthMonitorConfig } from './health-monitor';
