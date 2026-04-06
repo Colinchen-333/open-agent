@@ -595,7 +595,7 @@ export interface WorkerLaunchInput {
   maxTurns?: number;
   mode?: string;
   cwd?: string;
-  isolation?: 'worktree';
+  isolation?: 'worktree' | 'fork';
 }
 
 export interface TaskLeaseInfo {
@@ -671,7 +671,7 @@ export interface TaskDispatchInput extends TaskClaimOptions {
   maxTurns?: number;
   mode?: string;
   cwd?: string;
-  isolation?: 'worktree';
+  isolation?: 'worktree' | 'fork';
 }
 
 export interface TaskDispatchResult {
@@ -726,7 +726,7 @@ export interface TaskDispatcherRecord {
   maxTurns?: number;
   mode?: string;
   cwd?: string;
-  isolation?: 'worktree';
+  isolation?: 'worktree' | 'fork';
   schedulerState: TaskDispatcherSchedulingState;
   lastBlockedReason?: TaskDispatcherBlockReason;
   lastBlockedAt?: string;
@@ -957,7 +957,7 @@ export interface SDKTaskDispatcherEvent {
   maxTurns?: number;
   mode?: string;
   cwd?: string;
-  isolation?: 'worktree';
+  isolation?: 'worktree' | 'fork';
   schedulerState: TaskDispatcherSchedulingState;
   lastBlockedReason?: TaskDispatcherBlockReason;
   lastBlockedAt?: string;

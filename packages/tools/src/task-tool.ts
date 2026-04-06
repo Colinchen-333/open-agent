@@ -54,8 +54,8 @@ export function createTaskTool(deps: TaskToolDeps): ToolDefinition {
         },
         isolation: {
           type: 'string',
-          enum: ['worktree'],
-          description: 'Isolation mode. "worktree" creates a temporary git worktree.',
+          enum: ['worktree', 'fork'],
+          description: 'Isolation mode. "worktree" creates a temporary git worktree. "fork" snapshots the parent message history and runs the subagent in an isolated context without a worktree.',
         },
         run_in_background: {
           type: 'boolean',

@@ -794,7 +794,7 @@ export function query(
     maxTurns?: number;
     mode?: string;
     cwd?: string;
-    isolation?: 'worktree';
+    isolation?: 'worktree' | 'fork';
     timer: ReturnType<typeof setTimeout> | null;
     running: boolean;
     rerunRequested: boolean;
@@ -1512,28 +1512,11 @@ export function query(
         // Fork-mode dispatch: isolation === 'fork' routes through executeForked()
         // so the parent's message history is snapshotted by createForkContext()
         // before the subagent runs — making the fork cache-stable and isolated.
+        // IMPORTANT: fork must be checked BEFORE background, because fork needs
+        // a synchronous snapshot of the parent's message history at dispatch time.
+        // Background dispatch bypasses this snapshot and would produce a stale or
+        // empty context for the fork subagent.
         const useFork = isolation === 'fork' && typeof sdkAgentExecutor.executeForked === 'function';
-
-        if (runInBackground) {
-          const bg = await sdkAgentExecutor.executeInBackground(executeOptions);
-          return JSON.stringify({
-            status: 'async_launched',
-            agentId: bg.agentId,
-            description: name ?? subagentType,
-            prompt: agentPrompt,
-            outputFile: bg.outputFile,
-            canReadOutputFile: true,
-            task_event: {
-              type: 'system',
-              subtype: 'task_started',
-              task_id: bg.agentId,
-              ...(parentToolUseId ? { tool_use_id: parentToolUseId } : {}),
-              description: name ?? subagentType,
-              task_type: 'agent',
-            },
-            ...(worktreePath ? { worktree_path: worktreePath, worktree_branch: worktreeBranch } : {}),
-          });
-        }
 
         if (useFork) {
           // Snapshot the parent conversation at dispatch time.
@@ -1578,6 +1561,27 @@ export function query(
               ...(teamName ? { team_name: teamName } : {}),
               ...(name ? { description: name } : {}),
             },
+          });
+        }
+
+        if (runInBackground) {
+          const bg = await sdkAgentExecutor.executeInBackground(executeOptions);
+          return JSON.stringify({
+            status: 'async_launched',
+            agentId: bg.agentId,
+            description: name ?? subagentType,
+            prompt: agentPrompt,
+            outputFile: bg.outputFile,
+            canReadOutputFile: true,
+            task_event: {
+              type: 'system',
+              subtype: 'task_started',
+              task_id: bg.agentId,
+              ...(parentToolUseId ? { tool_use_id: parentToolUseId } : {}),
+              description: name ?? subagentType,
+              task_type: 'agent',
+            },
+            ...(worktreePath ? { worktree_path: worktreePath, worktree_branch: worktreeBranch } : {}),
           });
         }
 
