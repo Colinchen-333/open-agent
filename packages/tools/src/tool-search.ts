@@ -143,7 +143,20 @@ export function createToolSearchTool(opts: ToolSearchDeps | ToolSearchRegistry):
         return `No matching tools found for "${query}". Try broader keywords or use "select:<tool_name>".`;
       }
 
-      return limited.map((t) => `- ${t.name}: ${t.description}`).join('\n');
+      // Build structured matches with full schemas so the model can call the
+      // tools immediately after discovery, matching Claude Code's behaviour.
+      const matches = await Promise.all(
+        limited.map(async (t) => {
+          const full = await deps.selectTool(t.name).catch(() => null);
+          return {
+            name: t.name,
+            description: t.description,
+            ...(full?.inputSchema ? { inputSchema: full.inputSchema } : {}),
+          };
+        }),
+      );
+
+      return { matches };
     },
   });
 }

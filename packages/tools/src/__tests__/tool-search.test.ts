@@ -124,6 +124,23 @@ describe('ToolSearch tool', () => {
     expect(activated).toContain('mcp__svc__action');
   });
 
+  it('keyword search returns structured matches with inputSchema', async () => {
+    const tool = createToolSearchTool({
+      searchTools: async () => [{ name: 'TestTool', description: 'A test tool' }],
+      selectTool: async (name) => ({
+        name,
+        description: 'A test tool',
+        inputSchema: { type: 'object', properties: { x: { type: 'string' } } },
+        execute: async () => null,
+      }),
+    });
+    const result = await tool.execute({ query: 'test' }, { cwd: '/', sessionId: 's' } as any);
+    expect(result.matches).toBeDefined();
+    expect(result.matches[0].name).toBe('TestTool');
+    expect(result.matches[0].inputSchema).toBeDefined();
+    expect(result.matches[0].inputSchema.properties.x).toBeDefined();
+  });
+
   it('select: does not call activateDeferredTool for non-deferred tools', async () => {
     const normalTool: ToolDefinition = {
       name: 'SomeTool',
