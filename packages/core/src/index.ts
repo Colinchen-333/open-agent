@@ -120,3 +120,4 @@ export {
   extractAgentMessages,
   type SidechainEntry,
 } from './sidechain.js';
+export { TokenAccountant, type TurnUsage, type SessionUsage } from './token-accounting.js';
