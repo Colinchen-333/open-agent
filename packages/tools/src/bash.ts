@@ -123,6 +123,22 @@ export function createBashTool(deps: BashToolDeps = {}): ToolDefinition {
     },
     description:
       'Execute a bash command in the current working directory. Stdout is captured and returned. Output exceeding 30 000 characters is truncated. Working directory persists between commands; shell state (everything else) does not.',
+    dynamicDescription: (ctx) => {
+      const base = 'Executes a given bash command and returns its output.';
+      if (ctx?.isNonInteractive) {
+        return base + ' Running in non-interactive mode — prefer non-interactive commands.';
+      }
+      return base;
+    },
+    prompt: (ctx) => {
+      const lines = [
+        'The Bash tool executes shell commands. Use it for system operations, running tests, git commands, and any terminal task.',
+      ];
+      if (ctx?.permissionMode === 'bypassPermissions') {
+        lines.push('All commands are auto-approved in this mode.');
+      }
+      return lines.join('\n');
+    },
     getToolUseSummary(input: BashInput, _result, isError) {
       const summary = summarizeCommand(input.command, input.description);
       return isError ? `Command failed: ${summary}` : `Ran ${summary}`;

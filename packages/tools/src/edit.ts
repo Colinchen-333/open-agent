@@ -68,6 +68,8 @@ export function createEditTool(): ToolDefinition {
   return withToolDefaults({
     name: 'Edit',
     description: 'Perform an exact string replacement in a file. By default ensures old_string appears exactly once (use replace_all to replace every occurrence).',
+    prompt: () =>
+      'The Edit tool performs exact string replacements in files. Always read a file before editing it. Prefer editing over writing to preserve existing content.',
     isConcurrencySafe: false,
     searchHint: 'edit modify replace text in file',
     annotations: { destructive: true },

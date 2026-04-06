@@ -193,6 +193,22 @@ export interface ToolDefinition {
   renderToolResultMessage?: (output: unknown) => string;
   renderToolUseErrorMessage?: (error: unknown) => string;
 
+  /** Dynamic description generator. When present, overrides the static `description` field.
+   *  Receives optional context for content-aware descriptions. */
+  dynamicDescription?: (context?: {
+    isNonInteractive?: boolean;
+    permissionMode?: string;
+    cwd?: string;
+  }) => string;
+
+  /** System prompt section for this tool. Injected into the system prompt
+   *  alongside the tool schema when the tool is active. */
+  prompt?: (context?: {
+    permissionMode?: string;
+    cwd?: string;
+    tools?: string[];
+  }) => string;
+
   /** Search hint for ToolSearch matching (freeform keywords). */
   searchHint?: string;
 

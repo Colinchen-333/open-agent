@@ -87,6 +87,7 @@ export {
 export { createToolSearchTool, type ToolSearchDeps, type ToolSearchRegistry } from './tool-search.js';
 export { createSkillTool, type SkillDeps } from './skill-tool.js';
 export { getToolPromptDescriptions } from './tool-descriptions.js';
+export { getToolDescription, getToolPrompt, collectToolPrompts, type ToolDescriptionContext } from './tool-description.js';
 export { withToolDefaults } from './tool-defaults.js';
 export * from './sandbox/darwin-profile.js';
 export * from './sandbox/darwin-runner.js';
