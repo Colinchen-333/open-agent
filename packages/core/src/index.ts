@@ -121,3 +121,5 @@ export {
   type SidechainEntry,
 } from './sidechain.js';
 export { TokenAccountant, type TurnUsage, type SessionUsage } from './token-accounting.js';
+export { validateConfig, mergeConfigWithValidation, type ConfigValidationError, type ConfigValidationResult } from './config-validator.js';
+export { truncateToTokenBudget, type TruncationResult } from './context-truncation.js';
