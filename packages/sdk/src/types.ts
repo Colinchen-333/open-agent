@@ -232,6 +232,13 @@ export interface QueryOptions {
   spawnClaudeCodeProcess?: unknown;
   promptSuggestions?: boolean;
   strictMcpConfig?: boolean;
+  /** Configuration for built-in tool behavior. */
+  toolConfig?: {
+    askUserQuestion?: {
+      /** Opts into the preview field on AskUserQuestion options and sets its format. */
+      previewFormat?: 'markdown' | 'html';
+    };
+  };
   stderr?: unknown;
   stdin?: unknown;
   stdout?: unknown;
