@@ -1516,7 +1516,11 @@ export function query(
         // a synchronous snapshot of the parent's message history at dispatch time.
         // Background dispatch bypasses this snapshot and would produce a stale or
         // empty context for the fork subagent.
-        const useFork = isolation === 'fork' && typeof sdkAgentExecutor.executeForked === 'function';
+        //
+        // effectiveIsolation: caller-supplied isolation wins; if absent, fall back
+        // to the agent definition's declared isolation preference (R11 fix).
+        const effectiveIsolation = isolation ?? agentDef.isolation;
+        const useFork = effectiveIsolation === 'fork' && typeof sdkAgentExecutor.executeForked === 'function';
 
         if (useFork) {
           // Snapshot the parent conversation at dispatch time.
@@ -1564,7 +1568,15 @@ export function query(
           });
         }
 
-        if (runInBackground) {
+        // runInBackground: explicit caller choice wins; if caller did not specify
+        // (undefined), honour the agent definition's allowBackgroundExecution flag
+        // so agents declared with allowBackgroundExecution: true run asynchronously
+        // by default (R11 fix).
+        const effectiveRunInBackground =
+          runInBackground === true ||
+          (runInBackground === undefined && agentDef.allowBackgroundExecution === true);
+
+        if (effectiveRunInBackground) {
           const bg = await sdkAgentExecutor.executeInBackground(executeOptions);
           return JSON.stringify({
             status: 'async_launched',

@@ -1,15 +1,18 @@
 /**
- * R8.4 — Fork isolation takes precedence over background dispatch
+ * R11 — AgentDefinition fallback for isolation and allowBackgroundExecution
  *
- * Codex audit #4, finding #4: when isolation === 'fork' AND runInBackground === true,
- * the old code entered executeInBackground() first (the fork branch was unreachable).
- * The fix reorders: fork is checked before background so executeForked() is called.
+ * Codex audit #7, findings:
+ *   Fix 1: when the model does NOT supply an isolation field in the Task tool
+ *           input, the dispatch should fall back to agentDef.isolation.
+ *   Fix 2: when the model does NOT supply run_in_background in the Task tool
+ *           input, the dispatch should fall back to agentDef.allowBackgroundExecution.
+ *   Fix 3: explicit run_in_background: false in the tool input must override
+ *           agentDef.allowBackgroundExecution: true.
  *
  * These tests verify:
- *   1. isolation === 'fork'  → executeForked() called, executeInBackground() NOT called
- *   2. isolation === 'worktree' + background === true  → executeInBackground() called
- *   3. no isolation + background === true              → executeInBackground() called
- *   4. no isolation + background === false             → execute() called
+ *   1. agentDef.isolation = 'fork', no isolation in tool input → executeForked()
+ *   2. agentDef.allowBackgroundExecution = true, no run_in_background in tool input → executeInBackground()
+ *   3. run_in_background = false in tool input overrides agentDef.allowBackgroundExecution: true → execute()
  */
 
 import { describe, it, expect, spyOn, afterEach, type Mock } from 'bun:test';
@@ -67,7 +70,7 @@ function finalReplyEvents(): StreamEvent[] {
 
 /**
  * A static two-turn provider:
- *   turn 1 → Task tool-use
+ *   turn 1 → Task tool-use with provided input
  *   turn 2 → text "done"
  */
 function makeStaticProvider(toolInput: Record<string, unknown>): LLMProvider {
@@ -75,7 +78,7 @@ function makeStaticProvider(toolInput: Record<string, unknown>): LLMProvider {
   let turn = 0;
 
   return {
-    name: 'mock-fork-dispatch-provider',
+    name: 'mock-agentdef-fallback-provider',
     async *chat(_messages: Message[], _options: ChatOptions): AsyncGenerator<StreamEvent> {
       if (turn === 0) {
         yield* taskToolUseEvents(toolId, toolInput);
@@ -85,8 +88,19 @@ function makeStaticProvider(toolInput: Record<string, unknown>): LLMProvider {
       turn++;
     },
     async listModels() {
-      return [{ value: 'mock-model', displayName: 'Mock', description: 'fork dispatch test' }];
+      return [{ value: 'mock-model', displayName: 'Mock', description: 'agentdef fallback test' }];
     },
+  };
+}
+
+/** Minimal AgentDefinition with just the fields needed for these tests. */
+function makeAgentDef(overrides: Partial<AgentDefinition> = {}): AgentDefinition {
+  return {
+    name: 'fork-agent',
+    description: 'Test agent with isolation/background defaults',
+    prompt: 'You are a test agent.',
+    tools: [],
+    ...overrides,
   };
 }
 
@@ -99,19 +113,14 @@ let executeInBackgroundSpy: Mock<any>;
 let executeSpy: Mock<any>;
 
 function installSpies() {
-  // executeForked: return a resolved agentId + outputFile so the caller can
-  // build the JSON response without hitting the filesystem.
   executeForkedSpy = spyOn(AgentExecutor.prototype, 'executeForked').mockImplementation(
     async () => ({ agentId: `fork-${randomUUID()}`, outputFile: '/tmp/fake.output' }),
   );
 
-  // executeInBackground: return immediately with a fake agentId + outputFile.
   executeInBackgroundSpy = spyOn(AgentExecutor.prototype, 'executeInBackground').mockImplementation(
     async () => ({ agentId: `bg-${randomUUID()}`, outputFile: '/tmp/fake-bg.output' }),
   );
 
-  // execute: return a minimal session-like result so foreground dispatch works.
-  // The session object must satisfy AgentSession — required fields only.
   executeSpy = spyOn(AgentExecutor.prototype, 'execute').mockImplementation(
     async () => {
       const agentId = `fg-${randomUUID()}`;
@@ -120,7 +129,7 @@ function installSpies() {
         result: 'foreground result',
         session: {
           agentId,
-          agentType: 'general-purpose',
+          agentType: 'fork-agent',
           state: 'completed' as const,
           startedAt: new Date().toISOString(),
           model: 'mock-model',
@@ -128,7 +137,15 @@ function installSpies() {
           durationMs: 1,
           totalToolUseCount: 0,
           totalTokens: 10,
-          usage: { input_tokens: 10, output_tokens: 0, cache_creation_input_tokens: null, cache_read_input_tokens: null, server_tool_use: null, service_tier: null, cache_creation: null },
+          usage: {
+            input_tokens: 10,
+            output_tokens: 0,
+            cache_creation_input_tokens: null,
+            cache_read_input_tokens: null,
+            server_tool_use: null,
+            service_tier: null,
+            cache_creation: null,
+          },
         },
       };
     },
@@ -149,55 +166,24 @@ afterEach(() => {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('fork isolation dispatch priority (R8.4 fix)', () => {
-  it('isolation=fork routes to executeForked even when run_in_background=true', async () => {
-    const tmp = makeTempDir('open-agent-fork-priority-');
+describe('AgentDefinition fallback for isolation and allowBackgroundExecution (R11)', () => {
+  it('Fix 1: agentDef.isolation=fork with no isolation in tool input routes to executeForked', async () => {
+    const tmp = makeTempDir('open-agent-r11-agentdef-isolation-');
     installSpies();
 
     try {
-      const q = query('test fork priority', {
+      const q = query('test agentdef isolation fallback', {
         cwd: tmp.dir,
         model: 'mock-model',
         provider: makeStaticProvider({
-          description: 'test fork task',
-          prompt: 'Do something isolated.',
-          subagent_type: 'general-purpose',
-          isolation: 'fork',
-          run_in_background: true,   // <-- combined with fork
+          description: 'fork via agent def',
+          prompt: 'Run with agent-def isolation.',
+          subagent_type: 'fork-agent',
+          // No isolation field — should fall back to agentDef.isolation = 'fork'
         }),
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-      } as any);
-
-      // Run to completion (two turns: tool-use then final reply)
-      await drainQuery(q);
-
-      // Fork must have been used, not background
-      expect(executeForkedSpy).toHaveBeenCalledTimes(1);
-      expect(executeInBackgroundSpy).toHaveBeenCalledTimes(0);
-      expect(executeSpy).toHaveBeenCalledTimes(0);
-
-      q.close();
-    } finally {
-      tmp.cleanup();
-    }
-  });
-
-  it('isolation=fork without background also routes to executeForked', async () => {
-    const tmp = makeTempDir('open-agent-fork-noback-');
-    installSpies();
-
-    try {
-      const q = query('test fork no background', {
-        cwd: tmp.dir,
-        model: 'mock-model',
-        provider: makeStaticProvider({
-          description: 'fork no bg',
-          prompt: 'Isolated foreground run.',
-          subagent_type: 'general-purpose',
-          isolation: 'fork',
-          run_in_background: false,
-        }),
+        agents: {
+          'fork-agent': makeAgentDef({ isolation: 'fork' }),
+        },
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
       } as any);
@@ -214,21 +200,23 @@ describe('fork isolation dispatch priority (R8.4 fix)', () => {
     }
   });
 
-  it('run_in_background=true without fork routes to executeInBackground', async () => {
-    const tmp = makeTempDir('open-agent-bg-only-');
+  it('Fix 2: agentDef.allowBackgroundExecution=true with no run_in_background routes to executeInBackground', async () => {
+    const tmp = makeTempDir('open-agent-r11-agentdef-bg-');
     installSpies();
 
     try {
-      const q = query('test background no fork', {
+      const q = query('test agentdef allowBackgroundExecution fallback', {
         cwd: tmp.dir,
         model: 'mock-model',
         provider: makeStaticProvider({
-          description: 'background task',
-          prompt: 'Run in background.',
-          subagent_type: 'general-purpose',
-          run_in_background: true,
-          // no isolation field
+          description: 'background via agent def',
+          prompt: 'Run with agent-def background default.',
+          subagent_type: 'fork-agent',
+          // No run_in_background field — should fall back to agentDef.allowBackgroundExecution
         }),
+        agents: {
+          'fork-agent': makeAgentDef({ allowBackgroundExecution: true }),
+        },
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
       } as any);
@@ -245,40 +233,33 @@ describe('fork isolation dispatch priority (R8.4 fix)', () => {
     }
   });
 
-  it('no isolation no background routes to execute (foreground)', async () => {
-    const tmp = makeTempDir('open-agent-fg-only-');
+  it('Fix 3: explicit run_in_background=false overrides agentDef.allowBackgroundExecution=true', async () => {
+    const tmp = makeTempDir('open-agent-r11-explicit-override-');
     installSpies();
 
-    // Use a custom agent that declares neither isolation nor allowBackgroundExecution,
-    // so neither R11 fallback fires.  The built-in 'general-purpose' agent has
-    // allowBackgroundExecution: true and would route to executeInBackground via the
-    // R11 fallback — that would be correct behaviour but not what this test is for.
-    const foregroundOnlyAgent: AgentDefinition = {
-      description: 'Foreground-only agent with no isolation or background defaults',
-      prompt: 'You are a foreground-only test agent.',
-      tools: [],
-    };
-
     try {
-      const q = query('test foreground dispatch', {
+      const q = query('test explicit override of agentdef background', {
         cwd: tmp.dir,
         model: 'mock-model',
         provider: makeStaticProvider({
-          description: 'foreground task',
-          prompt: 'Run in foreground.',
-          subagent_type: 'foreground-only',
-          // no isolation, no run_in_background
+          description: 'explicit foreground override',
+          prompt: 'Caller forces foreground despite agent def.',
+          subagent_type: 'fork-agent',
+          run_in_background: false, // explicit false must override agentDef.allowBackgroundExecution: true
         }),
-        agents: { 'foreground-only': foregroundOnlyAgent },
+        agents: {
+          'fork-agent': makeAgentDef({ allowBackgroundExecution: true }),
+        },
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
       } as any);
 
       await drainQuery(q);
 
+      // Foreground execute() must have been called, NOT background
       expect(executeSpy).toHaveBeenCalledTimes(1);
-      expect(executeForkedSpy).toHaveBeenCalledTimes(0);
       expect(executeInBackgroundSpy).toHaveBeenCalledTimes(0);
+      expect(executeForkedSpy).toHaveBeenCalledTimes(0);
 
       q.close();
     } finally {
