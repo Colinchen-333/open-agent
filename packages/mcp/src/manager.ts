@@ -19,6 +19,7 @@ import type { McpServerConnection, McpToolInfo, McpResourceInfo, McpPromptInfo, 
 import { normalizeMcpToolInfo } from './tool-info';
 import { McpServerState } from './server-state';
 import { ElicitationManager, type ElicitationAdapter, type ElicitationRequest } from './elicitation';
+import { McpHealthMonitor } from './health-monitor.js';
 
 function isAuthError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -117,6 +118,8 @@ export class McpManager {
   private serverState = new McpServerState();
   /** Elicitation protocol handler — routes server input-requests to the UI adapter. */
   private elicitationManager = new ElicitationManager();
+  /** Periodic health checker for connected MCP servers. */
+  private healthMonitor: McpHealthMonitor;
 
   constructor(options?: McpManagerOptions) {
     if (options?.policyBlockedServers) {
@@ -124,6 +127,24 @@ export class McpManager {
         this.serverState.policyBlock(name);
       }
     }
+
+    this.healthMonitor = new McpHealthMonitor(async (serverName) => {
+      const t0 = performance.now();
+      try {
+        const conn = this.connections.get(serverName);
+        if (!conn || conn.status !== 'connected') {
+          return { ok: false, latencyMs: Math.round(performance.now() - t0), error: 'not connected' };
+        }
+        // Ping by listing tools (lightweight operation)
+        const client = this.clients.get(serverName);
+        if (client) {
+          await client.listTools();
+        }
+        return { ok: true, latencyMs: Math.round(performance.now() - t0) };
+      } catch (err: any) {
+        return { ok: false, latencyMs: Math.round(performance.now() - t0), error: err.message };
+      }
+    });
   }
 
   // ── Server lifecycle ──────────────────────────────────────────────────────
@@ -200,6 +221,12 @@ export class McpManager {
     }
 
     this.connections.set(name, connection);
+
+    // Start health monitoring for successfully connected servers.
+    if (connection.status === 'connected') {
+      this.healthMonitor.monitor(name);
+    }
+
     return connection;
   }
 
@@ -272,6 +299,7 @@ export class McpManager {
    * Disconnect and remove a server by name.
    */
   async removeServer(name: string): Promise<void> {
+    this.healthMonitor.unmonitor(name);
     const client = this.clients.get(name);
     if (client) {
       try {
@@ -406,6 +434,7 @@ export class McpManager {
    * Disconnect all servers (graceful shutdown).
    */
   async disconnectAll(): Promise<void> {
+    this.healthMonitor.stopAll();
     for (const name of [...this.clients.keys()]) {
       await this.removeServer(name);
     }
@@ -425,6 +454,14 @@ export class McpManager {
   getServerStatus(): McpServerConnection[] {
     return this.getStatus();
   }
+
+  // ── Health monitoring ─────────────────────────────────────────────────────
+
+  /** Return health status for a specific monitored server, or null if not monitored. */
+  getServerHealth(name: string) { return this.healthMonitor.getStatus(name); }
+
+  /** Return health statuses for all monitored servers. */
+  getAllServerHealth() { return this.healthMonitor.getAllStatuses(); }
 
   // ── Tool discovery ────────────────────────────────────────────────────────
 
