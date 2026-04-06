@@ -27,6 +27,52 @@ export interface McpResourceInfo {
   server: string;
 }
 
+export interface McpPromptInfo {
+  name: string;
+  description?: string;
+  arguments?: Array<{
+    name: string;
+    description?: string;
+    required?: boolean;
+  }>;
+  serverName: string;
+}
+
+export interface McpPromptMessage {
+  role: 'user' | 'assistant';
+  content: {
+    type: 'text';
+    text: string;
+  };
+}
+
+/** Sampling request from MCP server → client */
+export interface McpSamplingRequest {
+  messages: McpPromptMessage[];
+  modelPreferences?: {
+    hints?: Array<{ name?: string }>;
+    costPriority?: number;
+    speedPriority?: number;
+    intelligencePriority?: number;
+  };
+  systemPrompt?: string;
+  includeContext?: 'none' | 'thisServer' | 'allServers';
+  temperature?: number;
+  maxTokens: number;
+  stopSequences?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface McpSamplingResponse {
+  role: 'assistant';
+  content: {
+    type: 'text';
+    text: string;
+  };
+  model: string;
+  stopReason?: 'endTurn' | 'stopSequence' | 'maxTokens';
+}
+
 export interface McpServerConnection {
   name: string;
   config: McpServerConfig;
@@ -34,6 +80,7 @@ export interface McpServerConnection {
   status: 'connected' | 'connecting' | 'failed' | 'needs-auth' | 'error' | 'pending' | 'disabled' | 'disconnected';
   tools: McpToolInfo[];
   resources?: McpResourceInfo[];
+  prompts?: McpPromptInfo[];
   error?: string;
   serverInfo?: { name: string; version: string };
   /** Whether the server has been explicitly disabled by the user */

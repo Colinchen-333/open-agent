@@ -18,6 +18,8 @@ export type {
   ElicitationResponse,
   ElicitationAdapter,
 } from './elicitation';
+export { createSamplingHandler } from './sampling';
+export type { SamplingHandler } from './sampling';
 export { parseMcpToolName, buildMcpToolName, isMcpToolName } from './normalization';
 export {
   parseMcpResourceRef,

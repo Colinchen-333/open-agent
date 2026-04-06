@@ -1,4 +1,4 @@
-import type { McpToolInfo, McpResourceInfo } from './types';
+import type { McpToolInfo, McpResourceInfo, McpPromptInfo, McpPromptMessage } from './types';
 import { normalizeMcpToolInfo } from './tool-info';
 
 /**
@@ -90,6 +90,35 @@ export class McpHttpClient {
 
   async readResource(uri: string): Promise<any> {
     return this.rpc('resources/read', { uri });
+  }
+
+  async listPrompts(): Promise<McpPromptInfo[]> {
+    try {
+      const result = await this.rpc('prompts/list');
+      return (result?.prompts ?? []).map((p: any) => ({
+        name: p.name,
+        description: p.description,
+        arguments: p.arguments,
+        serverName: this.serverName,
+      }));
+    } catch {
+      return []; // Server may not support prompts
+    }
+  }
+
+  async getPrompt(name: string, args?: Record<string, string>): Promise<McpPromptMessage[]> {
+    try {
+      const result = await this.rpc('prompts/get', { name, arguments: args });
+      return (result?.messages ?? []).map((m: any) => ({
+        role: m.role as 'user' | 'assistant',
+        content: {
+          type: 'text' as const,
+          text: typeof m.content === 'object' && 'text' in m.content ? m.content.text : String(m.content),
+        },
+      }));
+    } catch {
+      return [];
+    }
   }
 
   // HTTP clients don't hold a persistent connection — nothing to close.

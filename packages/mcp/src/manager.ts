@@ -12,7 +12,7 @@ import {
 import { McpStdioClient } from './stdio-transport';
 import { McpHttpClient } from './http-transport';
 import { McpSseClient } from './sse-transport';
-import type { McpServerConnection, McpToolInfo, McpResourceInfo } from './types';
+import type { McpServerConnection, McpToolInfo, McpResourceInfo, McpPromptInfo, McpPromptMessage } from './types';
 import { normalizeMcpToolInfo } from './tool-info';
 import { McpServerState } from './server-state';
 import { ElicitationManager, type ElicitationAdapter, type ElicitationRequest } from './elicitation';
@@ -446,6 +446,61 @@ export class McpManager {
     const client = this.clients.get(serverName);
     if (!client) throw new Error(`MCP server '${serverName}' not connected`);
     return client.callTool(toolName, args);
+  }
+
+  // ── Prompt discovery ──────────────────────────────────────────────────────
+
+  /**
+   * List prompts from a specific connected server.
+   * Returns an empty array if the server is not connected or does not support prompts.
+   */
+  async listPrompts(serverName: string): Promise<McpPromptInfo[]> {
+    const conn = this.connections.get(serverName);
+    if (!conn || conn.status !== 'connected') return [];
+
+    const client = this.clients.get(serverName);
+    if (!client) return []; // SDK-type servers don't expose prompts
+
+    try {
+      const prompts = await client.listPrompts();
+      return prompts.map(p => ({ ...p, serverName }));
+    } catch {
+      return []; // Server may not support prompts
+    }
+  }
+
+  /**
+   * Get a specific prompt from a server, optionally with arguments.
+   * Returns an empty array if the server is not connected or the prompt is not found.
+   */
+  async getPrompt(serverName: string, name: string, args?: Record<string, string>): Promise<McpPromptMessage[]> {
+    const conn = this.connections.get(serverName);
+    if (!conn || conn.status !== 'connected') return [];
+
+    const client = this.clients.get(serverName);
+    if (!client) return [];
+
+    try {
+      return await client.getPrompt(name, args);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Return all prompts from all connected servers with `mcp__<serverName>__` namespacing.
+   * Prompt names are prefixed to match the tool namespacing convention.
+   */
+  async getAllPrompts(): Promise<McpPromptInfo[]> {
+    const all: McpPromptInfo[] = [];
+    for (const [name, conn] of this.connections) {
+      if (conn.status !== 'connected') continue;
+      const prompts = await this.listPrompts(name);
+      for (const p of prompts) {
+        all.push({ ...p, name: `mcp__${name}__${p.name}`, serverName: name });
+      }
+    }
+    return all;
   }
 
   // ── Resource access ───────────────────────────────────────────────────────

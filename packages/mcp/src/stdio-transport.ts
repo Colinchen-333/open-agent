@@ -1,6 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import type { McpToolInfo, McpResourceInfo } from './types';
+import type { McpToolInfo, McpResourceInfo, McpPromptInfo, McpPromptMessage } from './types';
 import { normalizeMcpToolInfo } from './tool-info';
 
 export class McpStdioClient {
@@ -61,6 +61,35 @@ export class McpStdioClient {
   async readResource(uri: string): Promise<any> {
     const result = await this.client.readResource({ uri });
     return result;
+  }
+
+  async listPrompts(): Promise<McpPromptInfo[]> {
+    try {
+      const result = await this.client.listPrompts();
+      return (result.prompts || []).map(p => ({
+        name: p.name,
+        description: p.description,
+        arguments: p.arguments,
+        serverName: this.serverName,
+      }));
+    } catch {
+      return []; // Server may not support prompts
+    }
+  }
+
+  async getPrompt(name: string, args?: Record<string, string>): Promise<McpPromptMessage[]> {
+    try {
+      const result = await this.client.getPrompt({ name, arguments: args });
+      return (result.messages ?? []).map(m => ({
+        role: m.role as 'user' | 'assistant',
+        content: {
+          type: 'text' as const,
+          text: typeof m.content === 'object' && 'text' in m.content ? (m.content as any).text : String(m.content),
+        },
+      }));
+    } catch {
+      return [];
+    }
   }
 
   async disconnect(): Promise<void> {
