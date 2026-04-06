@@ -91,6 +91,7 @@ export * from './sandbox/darwin-profile.js';
 export * from './sandbox/darwin-runner.js';
 export {
   buildBwrapCommand,
+  buildNetworkFilterEnv,
   isBwrapAvailable,
   sandboxConfigToLinux,
   type LinuxSandboxConfig,

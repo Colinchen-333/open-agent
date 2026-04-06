@@ -14,6 +14,8 @@ export interface LinuxSandboxConfig {
   cwd: string;
   /** Allow network access (default: false → unshare network namespace) */
   allowNetwork?: boolean;
+  /** Domain-level network filtering configuration */
+  networkConfig?: SandboxNetworkConfig;
   /** Additional environment variables to pass through */
   env?: Record<string, string>;
   /** Timeout in seconds for the command */
@@ -142,6 +144,14 @@ export function buildBwrapCommand(
     args.push('--setenv', 'TERM', process.env.TERM);
   }
 
+  // Domain-level network filter env vars (consumed by in-sandbox proxy/DNS)
+  if (config.networkConfig) {
+    const filterEnv = buildNetworkFilterEnv(config.networkConfig);
+    for (const [key, value] of Object.entries(filterEnv)) {
+      args.push('--setenv', key, value);
+    }
+  }
+
   // Die with parent — clean up if the parent process exits
   args.push('--die-with-parent');
 
@@ -156,6 +166,7 @@ export function buildBwrapCommand(
  */
 export interface SandboxNetworkConfig {
   allowedDomains?: string[];
+  deniedDomains?: string[];
   allowUnixSockets?: string[];
   allowAllUnixSockets?: boolean;
   allowLocalBinding?: boolean;
@@ -175,25 +186,53 @@ export interface SandboxConfig {
 }
 
 /**
+ * Generate environment variables for domain-based network filtering.
+ * Since bwrap operates at namespace level (not domain level), we set
+ * env vars that a proxy or DNS filter inside the sandbox can consume.
+ *
+ * Returns key-value pairs to add via --setenv in the bwrap command.
+ */
+export function buildNetworkFilterEnv(config: SandboxNetworkConfig): Record<string, string> {
+  const env: Record<string, string> = {};
+  if (config.allowedDomains?.length) {
+    env['SANDBOX_ALLOWED_DOMAINS'] = config.allowedDomains.join(',');
+  }
+  if (config.deniedDomains?.length) {
+    env['SANDBOX_DENIED_DOMAINS'] = config.deniedDomains.join(',');
+  }
+  if (config.allowLocalBinding) {
+    env['SANDBOX_ALLOW_LOCAL_BINDING'] = '1';
+  }
+  if (config.allowAllUnixSockets) {
+    env['SANDBOX_ALLOW_ALL_UNIX_SOCKETS'] = '1';
+  } else if (config.allowUnixSockets?.length) {
+    env['SANDBOX_ALLOWED_UNIX_SOCKETS'] = config.allowUnixSockets.join(',');
+  }
+  return env;
+}
+
+/**
  * Convert a high-level SandboxConfig to a LinuxSandboxConfig for bwrap.
  */
 export function sandboxConfigToLinux(
   config: SandboxConfig,
   cwd: string,
 ): LinuxSandboxConfig {
+  const hasNetwork = config.network != null
+    ? !!(
+        config.network.allowedDomains?.length ||
+        config.network.allowAllUnixSockets ||
+        config.network.allowLocalBinding
+      )
+    : false;
+
   return {
     cwd,
     allowRead: config.filesystem?.allowRead,
     allowWrite: config.filesystem?.allowWrite,
     denyRead: config.filesystem?.denyRead,
-    allowNetwork:
-      config.network != null
-        ? !!(
-            config.network.allowedDomains?.length ||
-            config.network.allowAllUnixSockets ||
-            config.network.allowLocalBinding
-          )
-        : false,
+    allowNetwork: hasNetwork,
+    networkConfig: config.network,
     allowUnixSockets: config.network?.allowUnixSockets,
     env: {},
   };

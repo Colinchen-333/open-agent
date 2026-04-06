@@ -21,6 +21,8 @@ describe('safe-tool whitelist', () => {
     );
     expect(decision?.approved).toBe(true);
     expect(decision?.rationale).toContain('safe-tool whitelist');
+    expect(decision?.stage).toBe('whitelist');
+    expect(decision?.durationMs).toBe(0);
     expect(llmCalled).toBe(false);
   });
 
@@ -171,6 +173,8 @@ describe('readOnly annotation', () => {
     );
     expect(decision?.approved).toBe(true);
     expect(decision?.rationale).toContain('read-only tool annotation');
+    expect(decision?.stage).toBe('annotation');
+    expect(decision?.durationMs).toBe(0);
     expect(llmCalled).toBe(false);
   });
 
@@ -229,6 +233,9 @@ describe('LLM classifier', () => {
     );
     expect(decision?.approved).toBe(true);
     expect(decision?.rationale).toContain('LLM classifier approved');
+    expect(decision?.stage).toBe('llm');
+    expect(decision?.durationMs).toBeGreaterThanOrEqual(0);
+    expect(decision?.rawLlmResponse).toBe('APPROVE');
   });
 
   test('mock LLM returns "BLOCK" → denied', async () => {
@@ -240,6 +247,8 @@ describe('LLM classifier', () => {
     );
     expect(decision?.approved).toBe(false);
     expect(decision?.rationale).toContain('LLM classifier blocked');
+    expect(decision?.stage).toBe('llm');
+    expect(decision?.rawLlmResponse).toBe('BLOCK');
   });
 
   test('mock LLM returns multiline "BLOCK\\nReason: destructive" → denied with reason', async () => {

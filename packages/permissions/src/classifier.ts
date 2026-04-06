@@ -44,6 +44,14 @@ export interface ClassifierContext {
 export interface ClassifierDecision {
   approved: boolean;
   rationale: string;
+  /** Which stage made the decision */
+  stage: 'whitelist' | 'annotation' | 'llm' | 'fallback';
+  /** Classifier wall-clock time in ms */
+  durationMs: number;
+  /** Raw LLM response (only for stage='llm') */
+  rawLlmResponse?: string;
+  /** Tool category from annotations/capability */
+  toolCategory?: string;
 }
 
 export interface LLMClassifierProvider {
@@ -78,12 +86,23 @@ export async function classifyPermissionRequest(
 
   // ── Stage 0: Safe-tool whitelist (fast path, no LLM) ──
   if (SAFE_AUTO_APPROVE_TOOLS.has(request.toolName)) {
-    return { approved: true, rationale: `safe-tool whitelist: ${request.toolName}` };
+    return {
+      approved: true,
+      rationale: `safe-tool whitelist: ${request.toolName}`,
+      stage: 'whitelist',
+      durationMs: 0,
+    };
   }
 
   // ── Stage 1: Annotation-based auto-approve ──
   if (request.annotations?.readOnly === true) {
-    return { approved: true, rationale: 'read-only tool annotation' };
+    return {
+      approved: true,
+      rationale: 'read-only tool annotation',
+      stage: 'annotation',
+      durationMs: 0,
+      toolCategory: request.metadata?.capability?.category,
+    };
   }
 
   // ── Stage 2: LLM classifier (the real decision engine) ──
@@ -145,8 +164,11 @@ Rules:
 Respond with exactly one word on the first line: APPROVE or BLOCK
 Then optionally a brief reason on the second line.`;
 
+  const toolCategory = request.metadata?.capability?.category;
+  const t0 = performance.now();
   try {
     const response = await context.llmProvider!.classify(prompt);
+    const durationMs = Math.round(performance.now() - t0);
     const lines = response.trim().split('\n');
     const firstLine = lines[0]?.trim().toUpperCase() ?? '';
     const reason = lines.slice(1).join(' ').trim() || '';
@@ -154,10 +176,24 @@ Then optionally a brief reason on the second line.`;
     // Word-boundary matching for safety — prevents "DISAPPROVE" matching APPROVE,
     // or "BLOCKADE" matching BLOCK.
     if (/\bBLOCK\b/.test(firstLine)) {
-      return { approved: false, rationale: `LLM classifier blocked: ${reason || request.toolName}` };
+      return {
+        approved: false,
+        rationale: `LLM classifier blocked: ${reason || request.toolName}`,
+        stage: 'llm',
+        durationMs,
+        rawLlmResponse: response,
+        toolCategory,
+      };
     }
     if (/\bAPPROVE\b/.test(firstLine)) {
-      return { approved: true, rationale: `LLM classifier approved: ${reason || request.toolName}` };
+      return {
+        approved: true,
+        rationale: `LLM classifier approved: ${reason || request.toolName}`,
+        stage: 'llm',
+        durationMs,
+        rawLlmResponse: response,
+        toolCategory,
+      };
     }
 
     // Ambiguous response — fail-safe to null (ask user).

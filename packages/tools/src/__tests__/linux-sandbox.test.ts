@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   buildBwrapCommand,
+  buildNetworkFilterEnv,
   sandboxConfigToLinux,
 } from '../sandbox/linux-sandbox';
 
@@ -123,6 +124,79 @@ describe('buildBwrapCommand', () => {
     expect(pathIdx).toBeGreaterThan(-1);
     expect(args[pathIdx - 1]).toBe('--setenv');
   });
+
+  test('injects network filter env vars when allowedDomains specified', () => {
+    const args = buildBwrapCommand('curl example.com', {
+      cwd: '/work',
+      allowNetwork: true,
+      networkConfig: { allowedDomains: ['example.com', 'api.test.com'] },
+    });
+    // Should contain --setenv SANDBOX_ALLOWED_DOMAINS
+    const idx = args.indexOf('SANDBOX_ALLOWED_DOMAINS');
+    expect(idx).toBeGreaterThan(-1);
+    expect(args[idx + 1]).toBe('example.com,api.test.com');
+  });
+
+  test('injects denied domains env var', () => {
+    const args = buildBwrapCommand('curl evil.com', {
+      cwd: '/work',
+      allowNetwork: true,
+      networkConfig: { deniedDomains: ['evil.com'] },
+    });
+    const idx = args.indexOf('SANDBOX_DENIED_DOMAINS');
+    expect(idx).toBeGreaterThan(-1);
+    expect(args[idx + 1]).toBe('evil.com');
+  });
+
+  test('does not inject network filter env vars when no networkConfig', () => {
+    const args = buildBwrapCommand('curl example.com', {
+      cwd: '/work',
+      allowNetwork: true,
+    });
+    expect(args.indexOf('SANDBOX_ALLOWED_DOMAINS')).toBe(-1);
+    expect(args.indexOf('SANDBOX_DENIED_DOMAINS')).toBe(-1);
+  });
+});
+
+describe('buildNetworkFilterEnv', () => {
+  test('generates allowed domains env var', () => {
+    const env = buildNetworkFilterEnv({ allowedDomains: ['a.com', 'b.com'] });
+    expect(env['SANDBOX_ALLOWED_DOMAINS']).toBe('a.com,b.com');
+  });
+
+  test('generates denied domains env var', () => {
+    const env = buildNetworkFilterEnv({ deniedDomains: ['evil.com'] });
+    expect(env['SANDBOX_DENIED_DOMAINS']).toBe('evil.com');
+  });
+
+  test('generates local binding env var', () => {
+    const env = buildNetworkFilterEnv({ allowLocalBinding: true });
+    expect(env['SANDBOX_ALLOW_LOCAL_BINDING']).toBe('1');
+  });
+
+  test('generates all unix sockets env var', () => {
+    const env = buildNetworkFilterEnv({ allowAllUnixSockets: true });
+    expect(env['SANDBOX_ALLOW_ALL_UNIX_SOCKETS']).toBe('1');
+  });
+
+  test('generates specific unix sockets env var', () => {
+    const env = buildNetworkFilterEnv({ allowUnixSockets: ['/var/run/docker.sock'] });
+    expect(env['SANDBOX_ALLOWED_UNIX_SOCKETS']).toBe('/var/run/docker.sock');
+  });
+
+  test('allowAllUnixSockets takes precedence over allowUnixSockets', () => {
+    const env = buildNetworkFilterEnv({
+      allowAllUnixSockets: true,
+      allowUnixSockets: ['/var/run/docker.sock'],
+    });
+    expect(env['SANDBOX_ALLOW_ALL_UNIX_SOCKETS']).toBe('1');
+    expect(env['SANDBOX_ALLOWED_UNIX_SOCKETS']).toBeUndefined();
+  });
+
+  test('empty config produces empty env', () => {
+    const env = buildNetworkFilterEnv({});
+    expect(Object.keys(env)).toHaveLength(0);
+  });
 });
 
 describe('sandboxConfigToLinux', () => {
@@ -140,6 +214,28 @@ describe('sandboxConfigToLinux', () => {
       '/work',
     );
     expect(config.allowNetwork).toBe(true);
+  });
+
+  test('preserves network config with domain lists', () => {
+    const config = sandboxConfigToLinux(
+      {
+        network: {
+          allowedDomains: ['example.com'],
+          deniedDomains: ['evil.com'],
+          allowLocalBinding: true,
+        },
+      },
+      '/work',
+    );
+    expect(config.networkConfig).toBeDefined();
+    expect(config.networkConfig!.allowedDomains).toEqual(['example.com']);
+    expect(config.networkConfig!.deniedDomains).toEqual(['evil.com']);
+    expect(config.networkConfig!.allowLocalBinding).toBe(true);
+  });
+
+  test('networkConfig is undefined when no network section', () => {
+    const config = sandboxConfigToLinux({ enabled: true }, '/work');
+    expect(config.networkConfig).toBeUndefined();
   });
 
   test('passes through filesystem config', () => {
