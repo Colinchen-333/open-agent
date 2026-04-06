@@ -53,14 +53,18 @@ describe('feature flags', () => {
     expect(feature('REACTIVE_COMPACT')).toBe(FEATURE_FLAG_DEFAULTS.REACTIVE_COMPACT);
   });
 
-  test('DARWIN_SANDBOX flag defaults to false', () => {
-    expect(FEATURE_FLAG_DEFAULTS.DARWIN_SANDBOX).toBe(false);
-    expect(feature('DARWIN_SANDBOX')).toBe(false);
+  test('DARWIN_SANDBOX defaults to true on darwin, false elsewhere', () => {
+    const expected = process.platform === 'darwin';
+    expect(FEATURE_FLAG_DEFAULTS.DARWIN_SANDBOX).toBe(expected);
+    expect(feature('DARWIN_SANDBOX')).toBe(expected);
   });
 
-  test('DARWIN_SANDBOX can be enabled via setFeatureDefault', () => {
+  test('DARWIN_SANDBOX can be overridden via setFeatureDefault', () => {
     setFeatureDefault('DARWIN_SANDBOX', true);
     expect(feature('DARWIN_SANDBOX')).toBe(true);
+    clearFeatureOverrides();
+    setFeatureDefault('DARWIN_SANDBOX', false);
+    expect(feature('DARWIN_SANDBOX')).toBe(false);
   });
 
   test('all flags in FEATURE_FLAG_DEFAULTS are valid FeatureFlagName values', () => {

@@ -3,6 +3,7 @@ import {
   buildDarwinSandboxProfile,
   isDarwinSandboxAvailable,
   wrapWithDarwinSandbox,
+  detectDarwinSandboxViolation,
 } from '../sandbox/darwin-runner';
 
 // Re-export from the runner (it re-exports from profile).
@@ -96,5 +97,45 @@ describe('wrapWithDarwinSandbox', () => {
       return;
     }
     await expect(wrapWithDarwinSandbox([])).rejects.toThrow(/non-empty/);
+  });
+});
+
+describe('detectDarwinSandboxViolation', () => {
+  test('catches bare deny file-write message', () => {
+    const result = detectDarwinSandboxViolation('deny file-write-data /etc/passwd');
+    expect(result).not.toBeNull();
+    expect(result).toContain('deny');
+  });
+
+  test('catches Sandbox: process deny message', () => {
+    const result = detectDarwinSandboxViolation('Sandbox: bash(1234) deny(1) file-write-data /etc');
+    expect(result).not.toBeNull();
+    expect(result).toContain('Sandbox');
+  });
+
+  test('returns null on clean stderr', () => {
+    expect(detectDarwinSandboxViolation('normal output here')).toBeNull();
+  });
+
+  test('catches deny file-read message', () => {
+    const result = detectDarwinSandboxViolation('deny file-read-data /root/.ssh/id_rsa');
+    expect(result).not.toBeNull();
+    expect(result).toContain('deny');
+  });
+
+  test('catches deny network message', () => {
+    const result = detectDarwinSandboxViolation('deny network-outbound 1.2.3.4:443');
+    expect(result).not.toBeNull();
+    expect(result).toContain('deny');
+  });
+
+  test('catches Operation not permitted', () => {
+    const result = detectDarwinSandboxViolation('bash: /etc/hosts: Operation not permitted');
+    expect(result).not.toBeNull();
+    expect(result).toContain('Operation not permitted');
+  });
+
+  test('returns null on empty string', () => {
+    expect(detectDarwinSandboxViolation('')).toBeNull();
   });
 });

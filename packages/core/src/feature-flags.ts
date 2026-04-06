@@ -24,7 +24,7 @@ export const FEATURE_FLAG_DEFAULTS: Record<FeatureFlagName, boolean> = {
   FILE_HISTORY: false,          // Round 2 L20
   WORKFLOW_SCRIPTS: false,      // future
   EXIT_PLAN_MODE_V2: false,     // Round 2 L22
-  DARWIN_SANDBOX: false,        // Opt-in; requires macOS sandbox-exec (R4.2)
+  DARWIN_SANDBOX: process.platform === 'darwin',  // ON by default on macOS, OFF elsewhere (R4.2/R5.3)
   REPL_TOOL: false,             // Experimental: inline JS/TS evaluation (R13.2)
 };
 

@@ -17,6 +17,7 @@ import { classifyBashCommand } from './bash-subcommands.js';
 import {
   isDarwinSandboxAvailable,
   wrapWithDarwinSandbox,
+  detectDarwinSandboxViolation,
   type DarwinSandboxRunResult,
 } from './sandbox/darwin-runner.js';
 import { getBackgroundTaskOutputFile } from './background-task-store.js';
@@ -433,9 +434,11 @@ export function createBashTool(deps: BashToolDeps = {}): ToolDefinition {
           wrappedWithSandboxExec,
           exitCode,
           findings: applyMetaPolicyToFindings(
-            collectSandboxFindings(
+            collectSandboxFindingsWithDarwin(
               sandboxPolicy,
-              detectSandboxRuntimeViolation(rawStderr, sandboxPolicy, exitCode),
+              darwinRunResult,
+              rawStderr,
+              exitCode,
             ),
             deps.sandboxMetaPolicy,
           ),
@@ -483,11 +486,11 @@ export function createBashTool(deps: BashToolDeps = {}): ToolDefinition {
         finalCwd,
         outputLength: output.length,
         findings: applyMetaPolicyToFindings(
-          collectSandboxFindings(
+          collectSandboxFindingsWithDarwin(
             sandboxPolicy,
-            finalOutcome === 'success'
-              ? null
-              : detectSandboxRuntimeViolation(rawStderr, sandboxPolicy, exitCode),
+            darwinRunResult,
+            rawStderr,
+            finalOutcome === 'success' ? 0 : exitCode,
           ),
           deps.sandboxMetaPolicy,
         ),
@@ -709,6 +712,49 @@ function collectSandboxFindings(
 ): BashSandboxExecutionFinding[] {
   const findings = [...(policy?.findings ?? [])];
   if (runtimeFinding) findings.push(runtimeFinding);
+  return findings;
+}
+
+/**
+ * Collect sandbox findings for foreground executions that may have used the
+ * Darwin sandbox runner. In addition to the standard policy-level violation
+ * detection, this inspects stderr for sandbox-exec denial messages and appends
+ * a `darwin-sandbox` stage finding when one is found.
+ *
+ * The `filterIgnoredFindings` meta-policy is applied by the caller; this
+ * function only assembles the raw finding list.
+ */
+function collectSandboxFindingsWithDarwin(
+  policy: BashSandboxExecutionPolicy | undefined,
+  darwinResult: DarwinSandboxRunResult | null,
+  stderr: string,
+  exitCode: number | null | undefined,
+): BashSandboxExecutionFinding[] {
+  // Standard policy-based finding (wraps the existing heuristics)
+  const runtimeFinding = (exitCode === 0 || exitCode === null || exitCode === undefined)
+    ? null
+    : detectSandboxRuntimeViolation(stderr, policy, exitCode);
+
+  const findings = collectSandboxFindings(policy, runtimeFinding);
+
+  // Darwin-specific: detect sandbox-exec denial messages in stderr.
+  // These are surfaced even on exit-code 0 (sandbox may deny and log but still
+  // allow the process to continue with a partial result), and also when the
+  // standard heuristic already fired — the darwin-level message is more precise.
+  if (darwinResult !== null && stderr) {
+    const violation = detectDarwinSandboxViolation(stderr);
+    if (violation && !runtimeFinding) {
+      const darwinFinding: BashSandboxExecutionFinding = {
+        stage: 'runtime',
+        scope: 'filesystem',
+        code: 'sandbox_violation',
+        severity: 'error',
+        message: `Darwin sandbox denied operation: ${violation}`,
+      };
+      findings.push(darwinFinding);
+    }
+  }
+
   return findings;
 }
 
