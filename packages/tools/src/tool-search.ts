@@ -132,6 +132,13 @@ export function createToolSearchTool(opts: ToolSearchDeps | ToolSearchRegistry):
       const results = await deps.searchTools(query);
       const limited = results.slice(0, maxResults);
 
+      // Activate discovered tools so they're callable on subsequent turns.
+      // This mirrors Claude Code's behavior where ToolSearch returns full schemas
+      // and the model can use the tools immediately.
+      for (const t of limited) {
+        ctx.activateDeferredTool?.(t.name);
+      }
+
       if (limited.length === 0) {
         return `No matching tools found for "${query}". Try broader keywords or use "select:<tool_name>".`;
       }
