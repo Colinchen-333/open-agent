@@ -37,6 +37,13 @@ export interface PermissionChecker {
           needsWorkspaceWrite?: boolean;
         };
       };
+      /** MCP-aligned tool annotations forwarded from ToolDefinition.annotations. */
+      annotations?: {
+        readOnly?: boolean;
+        destructive?: boolean;
+        idempotent?: boolean;
+        openWorld?: boolean;
+      };
     },
   ): { behavior: 'allow' | 'deny' | 'ask'; reason?: string } | Promise<{ behavior: 'allow' | 'deny' | 'ask'; reason?: string }>;
   addRule(behavior: 'allow' | 'deny' | 'ask', rule: { toolName: string; ruleContent?: string }): void;
@@ -1213,6 +1220,7 @@ export class ConversationLoop {
             input: toolUse.input,
             toolUseId: toolUse.id,
             metadata: permissionMetadata,
+            annotations: tool.annotations,  // propagate tool annotations to classifier
           });
 
           if (decision.behavior === 'deny') {

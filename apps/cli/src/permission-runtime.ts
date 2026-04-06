@@ -51,6 +51,7 @@ export interface CliPermissionRuntime {
     setHookExecutor(executor: Parameters<PermissionEngine['setHookExecutor']>[0]): void;
     setLLMProvider(provider: Parameters<PermissionEngine['setLLMProvider']>[0]): void;
     setRecentUserMessages(messages: string[]): void;
+    registerAllowedPrompts(prompts: Array<{ tool: string; prompt: string }>): void;
   };
   rawPermissionEngine: PermissionEngine;
   refreshFromSettings(): SettingsFile;
@@ -174,6 +175,8 @@ export function createCliPermissionRuntime({
   // the underlying PermissionEngine instance.
   let storedHookExecutor: Parameters<PermissionEngine['setHookExecutor']>[0] | undefined;
   let storedLLMProvider: Parameters<PermissionEngine['setLLMProvider']>[0] | undefined;
+  let storedAllowedPrompts: Array<{ tool: string; prompt: string }> = [];
+  let storedRecentUserMessages: string[] = [];
 
   const getPermissionEngine = (): PermissionEngine => rawPermissionEngine;
 
@@ -191,10 +194,12 @@ export function createCliPermissionRuntime({
     }
   };
 
-  /** Re-wire hookExecutor/llmProvider onto a freshly built engine. */
+  /** Re-wire hookExecutor/llmProvider/allowedPrompts/recentUserMessages onto a freshly built engine. */
   const reapplyRuntimeDependencies = (engine: PermissionEngine): void => {
     if (storedHookExecutor) engine.setHookExecutor(storedHookExecutor);
     if (storedLLMProvider) engine.setLLMProvider(storedLLMProvider);
+    if (storedAllowedPrompts.length > 0) engine.registerAllowedPrompts(storedAllowedPrompts);
+    if (storedRecentUserMessages.length > 0) engine.setRecentUserMessages(storedRecentUserMessages);
   };
 
   const refreshFromSettings = (): SettingsFile => {
@@ -255,7 +260,12 @@ export function createCliPermissionRuntime({
         rawPermissionEngine.setLLMProvider(provider);
       },
       setRecentUserMessages: (messages: string[]) => {
+        storedRecentUserMessages = messages;
         rawPermissionEngine.setRecentUserMessages(messages);
+      },
+      registerAllowedPrompts: (prompts: Array<{ tool: string; prompt: string }>) => {
+        storedAllowedPrompts = [...storedAllowedPrompts, ...prompts];
+        rawPermissionEngine.registerAllowedPrompts(prompts);
       },
     },
     get rawPermissionEngine() {

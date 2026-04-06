@@ -57,12 +57,22 @@ describe('safe-tool whitelist', () => {
     expect(decision?.approved).toBe(true);
   });
 
-  test('TodoWrite → auto-approved without LLM call', async () => {
+  test('TodoWrite → NOT whitelisted (mutates todo list), falls through to LLM/user', async () => {
+    let llmCalled = false;
     const decision = await classifyPermissionRequest(
       { toolName: 'TodoWrite', input: {}, toolUseId: 'wl-6' },
-      {},
+      {
+        llmProvider: {
+          classify: async () => {
+            llmCalled = true;
+            return 'APPROVE';
+          },
+        },
+      },
     );
-    expect(decision?.approved).toBe(true);
+    // TodoWrite is NOT on the whitelist; LLM is called
+    expect(llmCalled).toBe(true);
+    expect(decision?.approved).toBe(true); // LLM approved it
   });
 
   test('AskUserQuestion → auto-approved without LLM call', async () => {
@@ -73,15 +83,66 @@ describe('safe-tool whitelist', () => {
     expect(decision?.approved).toBe(true);
   });
 
-  test('SAFE_AUTO_APPROVE_TOOLS export contains expected members', () => {
+  test('SAFE_AUTO_APPROVE_TOOLS export contains expected read-only members', () => {
+    // Read-only tools that are whitelisted
     expect(SAFE_AUTO_APPROVE_TOOLS.has('Read')).toBe(true);
     expect(SAFE_AUTO_APPROVE_TOOLS.has('Grep')).toBe(true);
     expect(SAFE_AUTO_APPROVE_TOOLS.has('Glob')).toBe(true);
-    expect(SAFE_AUTO_APPROVE_TOOLS.has('TodoWrite')).toBe(true);
-    // Bash is NOT whitelisted — it needs evaluation
+    expect(SAFE_AUTO_APPROVE_TOOLS.has('Sleep')).toBe(true);
+    expect(SAFE_AUTO_APPROVE_TOOLS.has('CronList')).toBe(true);
+    expect(SAFE_AUTO_APPROVE_TOOLS.has('TaskList')).toBe(true);
+    expect(SAFE_AUTO_APPROVE_TOOLS.has('TaskGet')).toBe(true);
+    // MCP tools use their actual registered names
+    expect(SAFE_AUTO_APPROVE_TOOLS.has('ListMcpResourcesTool')).toBe(true);
+    expect(SAFE_AUTO_APPROVE_TOOLS.has('ReadMcpResourceTool')).toBe(true);
+    // OLD wrong names should NOT be in the set
+    expect(SAFE_AUTO_APPROVE_TOOLS.has('ListMcpResources')).toBe(false);
+    expect(SAFE_AUTO_APPROVE_TOOLS.has('ReadMcpResource')).toBe(false);
+
+    // State-changing tools are NOT whitelisted
+    expect(SAFE_AUTO_APPROVE_TOOLS.has('TodoWrite')).toBe(false);
+    expect(SAFE_AUTO_APPROVE_TOOLS.has('TaskCreate')).toBe(false);
+    expect(SAFE_AUTO_APPROVE_TOOLS.has('TaskUpdate')).toBe(false);
+    expect(SAFE_AUTO_APPROVE_TOOLS.has('EnterPlanMode')).toBe(false);
+    expect(SAFE_AUTO_APPROVE_TOOLS.has('ExitPlanMode')).toBe(false);
+    expect(SAFE_AUTO_APPROVE_TOOLS.has('ExitPlanModeV2')).toBe(false);
+    expect(SAFE_AUTO_APPROVE_TOOLS.has('Brief')).toBe(false);
+    // Bash is NOT whitelisted — needs evaluation
     expect(SAFE_AUTO_APPROVE_TOOLS.has('Bash')).toBe(false);
-    // Write is NOT whitelisted — it mutates files
+    // Write is NOT whitelisted — mutates files
     expect(SAFE_AUTO_APPROVE_TOOLS.has('Write')).toBe(false);
+  });
+
+  test('EnterPlanMode → NOT whitelisted (changes permission mode), falls through to LLM', async () => {
+    let llmCalled = false;
+    await classifyPermissionRequest(
+      { toolName: 'EnterPlanMode', input: {}, toolUseId: 'wl-ep' },
+      {
+        llmProvider: {
+          classify: async () => {
+            llmCalled = true;
+            return 'APPROVE';
+          },
+        },
+      },
+    );
+    expect(llmCalled).toBe(true);
+  });
+
+  test('TaskCreate → NOT whitelisted (creates records), falls through to LLM', async () => {
+    let llmCalled = false;
+    await classifyPermissionRequest(
+      { toolName: 'TaskCreate', input: { subject: 'test' }, toolUseId: 'wl-tc' },
+      {
+        llmProvider: {
+          classify: async () => {
+            llmCalled = true;
+            return 'APPROVE';
+          },
+        },
+      },
+    );
+    expect(llmCalled).toBe(true);
   });
 });
 
@@ -417,5 +478,57 @@ describe('stage ordering', () => {
       },
     );
     expect(llmCalled).toBe(true);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Annotations flow-through: verify annotations reach the LLM prompt
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('annotations flow-through to LLM', () => {
+  test('destructive annotation is included in LLM prompt text', async () => {
+    let capturedPrompt = '';
+    await classifyPermissionRequest(
+      {
+        toolName: 'Bash',
+        input: { command: 'rm -rf build/' },
+        toolUseId: 'ann-flow-1',
+        annotations: { destructive: true },
+      },
+      {
+        llmProvider: {
+          classify: async (prompt) => {
+            capturedPrompt = prompt;
+            return 'BLOCK';
+          },
+        },
+      },
+    );
+    // The LLM prompt must include the annotations so the model can factor them in
+    expect(capturedPrompt).toContain('annotations');
+    expect(capturedPrompt).toContain('destructive');
+  });
+
+  test('readOnly annotation short-circuits before LLM (Stage 1 wins)', async () => {
+    let llmCalled = false;
+    const decision = await classifyPermissionRequest(
+      {
+        toolName: 'mcp__docs__search',
+        input: { query: 'API reference' },
+        toolUseId: 'ann-flow-2',
+        annotations: { readOnly: true },
+      },
+      {
+        llmProvider: {
+          classify: async () => {
+            llmCalled = true;
+            return 'BLOCK';
+          },
+        },
+      },
+    );
+    expect(decision?.approved).toBe(true);
+    expect(decision?.rationale).toContain('read-only tool annotation');
+    expect(llmCalled).toBe(false);
   });
 });

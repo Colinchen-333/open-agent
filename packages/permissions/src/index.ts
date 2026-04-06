@@ -10,4 +10,5 @@ export { PermissionEngine } from './engine';
 export { SettingsLoader } from './settings-loader';
 export type { SettingsFile, SettingsPermissions } from './settings-loader';
 export * from './sandbox-meta-policy';
-export * from './llm-classifier';
+// Note: llm-classifier.ts has been removed. LLMClassifierProvider and
+// classifyPermissionRequest are now exported from ./classifier.

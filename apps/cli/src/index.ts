@@ -13,6 +13,7 @@ import {
   createTaskStopTool,
   createEnterPlanModeTool,
   createExitPlanModeTool,
+  createExitPlanModeV2Tool,
   createTaskCreateTool,
   createTaskUpdateTool,
   createTaskGetTool,
@@ -597,6 +598,7 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------
   toolRegistry.register(createEnterPlanModeTool({ engine: cliPermissionRuntime.rawPermissionEngine }));
   toolRegistry.register(createExitPlanModeTool({ engine: cliPermissionRuntime.rawPermissionEngine }));
+  toolRegistry.register(createExitPlanModeV2Tool({ engine: cliPermissionRuntime.rawPermissionEngine }));
 
   // ------------------------------------------------------------------
   // File checkpoint — records file states before Write/Edit operations

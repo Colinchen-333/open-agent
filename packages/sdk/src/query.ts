@@ -1969,6 +1969,8 @@ export function query(
   // Stored so they survive permissionEngine rebuilds triggered by settings refresh.
   let sdkStoredHookExecutor: { run(event: string, input: unknown): Promise<any> } | undefined;
   let sdkStoredLLMProvider: { classify(prompt: string): Promise<string> } | undefined;
+  let sdkStoredAllowedPrompts: Array<{ tool: string; prompt: string }> = [];
+  let sdkStoredRecentUserMessages: string[] = [];
 
   const rebuildPermissionEngine = (settings: SettingsFile | null): PermissionEngine => {
     const nextEngine = new PermissionEngine({
@@ -1987,6 +1989,8 @@ export function query(
     // Re-apply runtime dependencies that survive engine rebuilds.
     if (sdkStoredHookExecutor) nextEngine.setHookExecutor(sdkStoredHookExecutor);
     if (sdkStoredLLMProvider) nextEngine.setLLMProvider(sdkStoredLLMProvider);
+    if (sdkStoredAllowedPrompts.length > 0) nextEngine.registerAllowedPrompts(sdkStoredAllowedPrompts);
+    if (sdkStoredRecentUserMessages.length > 0) nextEngine.setRecentUserMessages(sdkStoredRecentUserMessages);
     currentPermissionMode = nextEngine.getMode();
     return nextEngine;
   };
@@ -2015,6 +2019,7 @@ export function query(
     setHookExecutor?: (executor: { run(event: string, input: unknown): Promise<any> }) => void;
     setLLMProvider?: (provider: { classify(prompt: string): Promise<string> }) => void;
     setRecentUserMessages?: (messages: string[]) => void;
+    registerAllowedPrompts?: (prompts: Array<{ tool: string; prompt: string }>) => void;
   } = permissionEngine as any;
 
   const attachBashSandboxPolicy = (
@@ -2178,7 +2183,12 @@ export function query(
       permissionEngine.setLLMProvider(llmProvider);
     },
     setRecentUserMessages: (messages: string[]) => {
+      sdkStoredRecentUserMessages = messages;
       permissionEngine.setRecentUserMessages(messages);
+    },
+    registerAllowedPrompts: (prompts: Array<{ tool: string; prompt: string }>) => {
+      sdkStoredAllowedPrompts = [...sdkStoredAllowedPrompts, ...prompts];
+      permissionEngine.registerAllowedPrompts(prompts);
     },
   };
 

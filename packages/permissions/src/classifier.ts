@@ -6,13 +6,30 @@ import type { PermissionRequest } from './types';
 // They are all read-only or purely informational — they cannot cause damage,
 // modify state, or exfiltrate data in ways that require gating.
 const SAFE_AUTO_APPROVE_TOOLS = new Set([
+  // ── Read-only filesystem / network ──
   'Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch',
-  'ListMcpResources', 'ReadMcpResource',
-  'TodoWrite', 'TaskCreate', 'TaskList', 'TaskGet', 'TaskUpdate',
-  'EnterPlanMode', 'ExitPlanMode', 'ExitPlanModeV2',
+
+  // ── MCP read-only resources (use actual registered tool names) ──
+  'ListMcpResourcesTool', 'ReadMcpResourceTool',
+
+  // ── Task reads (read-only) ──
+  'TaskList', 'TaskGet',
+
+  // ── Interaction / informational ──
   'AskUserQuestion', 'ToolSearch',
-  'Brief', 'Sleep', 'CronList',
-  'LSP',  // read-only LSP queries
+
+  // ── Side-effect free ──
+  'Sleep', 'CronList',
+
+  // ── Read-only LSP queries ──
+  'LSP',
+
+  // NOT included (state-changing):
+  //   TodoWrite    — mutates the todo list
+  //   TaskCreate   — creates new task records
+  //   TaskUpdate   — mutates task state
+  //   EnterPlanMode / ExitPlanMode / ExitPlanModeV2 — changes permission mode
+  //   Brief        — mutates app state
 ]);
 
 export interface ClassifierContext {
