@@ -2,10 +2,14 @@ import type { HookEvent } from '@open-agent/core';
 import { spawnProcess } from '@open-agent/core';
 import { withCamelCaseAliases } from './camel-case-compat';
 import type {
+  AgentHookDefinition,
+  AnyHookDefinition,
   HookCallbackMatcher,
   HookDefinition,
+  HttpHookDefinition,
   HookInput,
   HookOutput,
+  PromptHookDefinition,
 } from './types';
 
 // Module-level cache for compiled RegExp objects to avoid recompilation per execution.
@@ -31,6 +35,9 @@ const regexpCache = new Map<string, RegExp>();
  */
 export class HookExecutor {
   private shellHooks: Map<HookEvent, Array<{ hook: HookDefinition; sourceId?: string }>> = new Map();
+  private promptHooks: Map<HookEvent, Array<{ hook: PromptHookDefinition; sourceId?: string }>> = new Map();
+  private httpHooks: Map<HookEvent, Array<{ hook: HttpHookDefinition; sourceId?: string }>> = new Map();
+  private agentHooks: Map<HookEvent, Array<{ hook: AgentHookDefinition; sourceId?: string }>> = new Map();
   private callbackHooks: Map<HookEvent, HookCallbackMatcher[]> = new Map();
 
   // -------------------------------------------------------------------------
@@ -44,11 +51,48 @@ export class HookExecutor {
     this.shellHooks.set(event, existing);
   }
 
+  /** Register a prompt-injection hook for the given event. */
+  registerPromptHook(event: HookEvent, hook: PromptHookDefinition, sourceId?: string): void {
+    const existing = this.promptHooks.get(event) ?? [];
+    existing.push({ hook, sourceId });
+    this.promptHooks.set(event, existing);
+  }
+
+  /** Register an HTTP webhook hook for the given event. */
+  registerHttpHook(event: HookEvent, hook: HttpHookDefinition, sourceId?: string): void {
+    const existing = this.httpHooks.get(event) ?? [];
+    existing.push({ hook, sourceId });
+    this.httpHooks.set(event, existing);
+  }
+
+  /** Register an agent-spawn hook for the given event. */
+  registerAgentHook(event: HookEvent, hook: AgentHookDefinition, sourceId?: string): void {
+    const existing = this.agentHooks.get(event) ?? [];
+    existing.push({ hook, sourceId });
+    this.agentHooks.set(event, existing);
+  }
+
   /** Register one or more callback functions for the given event. */
   registerCallbackHook(event: HookEvent, matcher: HookCallbackMatcher): void {
     const existing = this.callbackHooks.get(event) ?? [];
     existing.push(matcher);
     this.callbackHooks.set(event, existing);
+  }
+
+  /**
+   * Register any hook definition by inspecting its `type` discriminant.
+   * Shell hooks (legacy, no `type` field) are routed to `registerShellHook`.
+   */
+  registerHook(event: HookEvent, hook: AnyHookDefinition, sourceId?: string): void {
+    if (!('type' in hook)) {
+      this.registerShellHook(event, hook, sourceId);
+    } else if (hook.type === 'prompt') {
+      this.registerPromptHook(event, hook, sourceId);
+    } else if (hook.type === 'http') {
+      this.registerHttpHook(event, hook, sourceId);
+    } else if (hook.type === 'agent') {
+      this.registerAgentHook(event, hook, sourceId);
+    }
   }
 
   /**
@@ -59,6 +103,22 @@ export class HookExecutor {
     for (const [event, hooks] of Object.entries(config) as [HookEvent, HookDefinition[]][]) {
       for (const hook of hooks) {
         this.registerShellHook(event, hook, sourceId);
+      }
+    }
+  }
+
+  /**
+   * Load any mix of hook definitions from a plain config object of the shape:
+   *   { [event: HookEvent]: AnyHookDefinition[] }
+   * Routes each entry to the correct typed registry based on its `type` field.
+   */
+  loadAnyFromConfig(
+    config: Partial<Record<HookEvent, AnyHookDefinition[]>>,
+    sourceId?: string,
+  ): void {
+    for (const [event, hooks] of Object.entries(config) as [HookEvent, AnyHookDefinition[]][]) {
+      for (const hook of hooks) {
+        this.registerHook(event, hook, sourceId);
       }
     }
   }
@@ -88,6 +148,9 @@ export class HookExecutor {
   getHookSurface(): Array<{ event: HookEvent; count: number; sources: string[] }> {
     const events = new Set<HookEvent>([
       ...this.shellHooks.keys(),
+      ...this.promptHooks.keys(),
+      ...this.httpHooks.keys(),
+      ...this.agentHooks.keys(),
       ...this.callbackHooks.keys(),
     ]);
 
@@ -95,6 +158,9 @@ export class HookExecutor {
       .sort((a, b) => a.localeCompare(b))
       .map((event) => {
         const shellHooks = this.shellHooks.get(event) ?? [];
+        const promptHooks = this.promptHooks.get(event) ?? [];
+        const httpHooks = this.httpHooks.get(event) ?? [];
+        const agentHooks = this.agentHooks.get(event) ?? [];
         const callbackHooks = this.callbackHooks.get(event) ?? [];
         const callbackCount = callbackHooks.reduce((sum, matcher) => sum + matcher.hooks.length, 0);
         const sources = new Set<string>();
@@ -102,13 +168,22 @@ export class HookExecutor {
         for (const entry of shellHooks) {
           sources.add(entry.sourceId ?? 'shell');
         }
+        for (const entry of promptHooks) {
+          sources.add(entry.sourceId ?? 'prompt');
+        }
+        for (const entry of httpHooks) {
+          sources.add(entry.sourceId ?? 'http');
+        }
+        for (const entry of agentHooks) {
+          sources.add(entry.sourceId ?? 'agent');
+        }
         if (callbackCount > 0) {
           sources.add('callback');
         }
 
         return {
           event,
-          count: shellHooks.length + callbackCount,
+          count: shellHooks.length + promptHooks.length + httpHooks.length + agentHooks.length + callbackCount,
           sources: [...sources].sort(),
         };
       });
@@ -159,6 +234,47 @@ export class HookExecutor {
       }
     }
 
+    // -- Prompt hooks ---------------------------------------------------------
+    const promptHooks = this.promptHooks.get(event) ?? [];
+    for (const entry of promptHooks) {
+      const hook = entry.hook;
+      if (hook.matcher && !this.matchesMatcher(hook.matcher, input)) continue;
+      const result = this.executePromptHook(hook, input);
+      results.push(result);
+      if (result.continue === false) {
+        return this.mergeResults(results);
+      }
+    }
+
+    // -- HTTP hooks -----------------------------------------------------------
+    const httpHooks = this.httpHooks.get(event) ?? [];
+    for (const entry of httpHooks) {
+      const hook = entry.hook;
+      if (hook.matcher && !this.matchesMatcher(hook.matcher, input)) continue;
+      const timeoutMs = (hook.timeout ?? 30) * 1000;
+      try {
+        const result = await this.executeHttpHook(hook, input, timeoutMs);
+        results.push(result);
+        if (result.continue === false) {
+          return this.mergeResults(results);
+        }
+      } catch (err) {
+        console.error(`[HookExecutor] HTTP hook failed (${event}, ${hook.url}):`, err);
+      }
+    }
+
+    // -- Agent hooks ----------------------------------------------------------
+    const agentHooks = this.agentHooks.get(event) ?? [];
+    for (const entry of agentHooks) {
+      const hook = entry.hook;
+      if (hook.matcher && !this.matchesMatcher(hook.matcher, input)) continue;
+      const result = this.executeAgentHook(hook, input);
+      results.push(result);
+      if (result.continue === false) {
+        return this.mergeResults(results);
+      }
+    }
+
     // -- Callback hooks -------------------------------------------------------
     const callbackMatchers = this.callbackHooks.get(event) ?? [];
     for (const matcherEntry of callbackMatchers) {
@@ -199,7 +315,7 @@ export class HookExecutor {
    * For tool-related events the matcher is tested against `tool_name`;
    * for all other events an absent matcher always matches.
    */
-  private matchesHook(hook: HookDefinition, input: HookInput): boolean {
+  private matchesHook(hook: AnyHookDefinition, input: HookInput): boolean {
     if (!hook.matcher) return true;
     return this.matchesMatcher(hook.matcher, input);
   }
@@ -354,6 +470,94 @@ export class HookExecutor {
   }
 
   /**
+   * Render a template string, replacing recognised placeholders with values
+   * extracted from `input`.
+   *
+   * Supported placeholders:
+   *   {{toolName}}  — tool_name (tool-related events only; empty string otherwise)
+   *   {{event}}     — hook_event_name
+   *   {{sessionId}} — session_id
+   */
+  private renderTemplate(template: string, input: HookInput): string {
+    const toolName = 'tool_name' in input ? (input as { tool_name: string }).tool_name : '';
+    return template
+      .replace(/\{\{toolName\}\}/g, toolName)
+      .replace(/\{\{event\}\}/g, input.hook_event_name)
+      .replace(/\{\{sessionId\}\}/g, input.session_id);
+  }
+
+  /**
+   * Execute a prompt hook synchronously: render the template and return the
+   * result as `additionalContext` so the conversation loop can inject it into
+   * the system prompt.
+   */
+  private executePromptHook(hook: PromptHookDefinition, input: HookInput): HookOutput {
+    const rendered = this.renderTemplate(hook.template, input);
+    return { continue: true, additionalContext: rendered };
+  }
+
+  /**
+   * POST the serialised HookInput to `hook.url` and parse the response body as
+   * a HookOutput. Non-JSON responses are surfaced as `additionalContext`.
+   * Network or timeout errors are re-thrown so the caller can log and skip.
+   */
+  private async executeHttpHook(
+    hook: HttpHookDefinition,
+    input: HookInput,
+    timeoutMs: number,
+  ): Promise<HookOutput> {
+    const enrichedInput = withCamelCaseAliases(input);
+    const body = JSON.stringify(enrichedInput);
+
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+
+    let responseText: string;
+    try {
+      const response = await fetch(hook.url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...hook.headers,
+        },
+        body,
+        signal: ac.signal,
+      });
+      responseText = await response.text();
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const trimmed = responseText.trim();
+    if (!trimmed) {
+      return { continue: true };
+    }
+
+    try {
+      return JSON.parse(trimmed) as HookOutput;
+    } catch {
+      // Non-JSON response body treated as plain additional context.
+      return { continue: true, additionalContext: trimmed };
+    }
+  }
+
+  /**
+   * Execute an agent hook: render the optional prompt template and surface the
+   * dispatch request via `hookSpecificOutput` so the caller (e.g. the
+   * ConversationLoop) can spawn the named subagent.
+   */
+  private executeAgentHook(hook: AgentHookDefinition, input: HookInput): HookOutput {
+    const renderedPrompt = hook.prompt ? this.renderTemplate(hook.prompt, input) : undefined;
+    return {
+      continue: true,
+      hookSpecificOutput: {
+        agentName: hook.agentName,
+        ...(renderedPrompt !== undefined ? { prompt: renderedPrompt } : {}),
+      },
+    };
+  }
+
+  /**
    * Merge an ordered list of HookOutput objects into a single result.
    *
    * Rules:
@@ -386,6 +590,9 @@ export class HookExecutor {
       }
       if (result.updatedInput !== undefined) {
         merged.updatedInput = { ...merged.updatedInput, ...result.updatedInput };
+      }
+      if (result.hookSpecificOutput !== undefined) {
+        merged.hookSpecificOutput = { ...merged.hookSpecificOutput, ...result.hookSpecificOutput };
       }
     }
 

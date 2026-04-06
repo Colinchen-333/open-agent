@@ -232,6 +232,82 @@ export interface HookDefinition {
 }
 
 /**
+ * Injects static or templated text into the system prompt when this event
+ * fires. The template may reference the following placeholders:
+ *   {{toolName}}  — the name of the tool (tool-related events only)
+ *   {{event}}     — the hook_event_name string
+ *   {{sessionId}} — the session identifier
+ *
+ * The rendered text is returned as `additionalContext` in HookOutput so the
+ * conversation loop can append it to the system prompt.
+ */
+export interface PromptHookDefinition {
+  type: 'prompt';
+  /** Text to inject. Supports {{toolName}}, {{event}}, {{sessionId}} placeholders. */
+  template: string;
+  /**
+   * Optional matcher pattern. Same semantics as HookDefinition.matcher.
+   */
+  matcher?: string;
+  /** Timeout in seconds. Prompt hooks resolve synchronously, so this is unused
+   *  but kept for API symmetry. */
+  timeout?: number;
+}
+
+/**
+ * Sends an HTTP POST request to the given URL when this event fires.
+ * The serialised HookInput is the request body (Content-Type: application/json).
+ * The response body, if valid JSON, is treated as a HookOutput; otherwise the
+ * raw text is attached as `additionalContext`.
+ */
+export interface HttpHookDefinition {
+  type: 'http';
+  /** Endpoint to POST the event payload to. */
+  url: string;
+  /** Additional request headers (e.g. Authorization). */
+  headers?: Record<string, string>;
+  /**
+   * Optional matcher pattern. Same semantics as HookDefinition.matcher.
+   */
+  matcher?: string;
+  /** Timeout in seconds for the HTTP request (default: 30). */
+  timeout?: number;
+}
+
+/**
+ * Spawns a named subagent when this event fires. The caller is responsible
+ * for dispatching the returned `agentName` / `prompt` pair; the executor
+ * surfaces them via `hookSpecificOutput` in the HookOutput.
+ */
+export interface AgentHookDefinition {
+  type: 'agent';
+  /** Name of the agent to spawn (must be registered with the AgentLoader). */
+  agentName: string;
+  /**
+   * Optional prompt to pass to the spawned agent. Supports the same
+   * {{toolName}}, {{event}}, {{sessionId}} placeholders as PromptHookDefinition.
+   */
+  prompt?: string;
+  /**
+   * Optional matcher pattern. Same semantics as HookDefinition.matcher.
+   */
+  matcher?: string;
+  /** Timeout in seconds (unused at dispatch time; kept for API symmetry). */
+  timeout?: number;
+}
+
+/**
+ * Union of all hook definition types that can be registered for an event.
+ * The legacy `HookDefinition` (shell command) is included as the implicit
+ * default (no `type` field needed; presence of `command` identifies it).
+ */
+export type AnyHookDefinition =
+  | HookDefinition
+  | PromptHookDefinition
+  | HttpHookDefinition
+  | AgentHookDefinition;
+
+/**
  * Programmatic hook callback signature.
  * Returning a partial HookOutput (or an empty object) is always valid.
  */
