@@ -123,3 +123,12 @@ export {
 export { TokenAccountant, type TurnUsage, type SessionUsage } from './token-accounting.js';
 export { validateConfig, mergeConfigWithValidation, type ConfigValidationError, type ConfigValidationResult } from './config-validator.js';
 export { truncateToTokenBudget, type TruncationResult } from './context-truncation.js';
+export {
+  recoverFromJsonl,
+  findNewestLeaf,
+  extractChain,
+  filterMainThread,
+  assessHealth,
+  type RecoveryResult,
+  type ConversationHealth,
+} from './conversation-recovery.js';
