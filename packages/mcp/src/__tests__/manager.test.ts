@@ -73,6 +73,7 @@ describe('McpManager SDK servers', () => {
         inputSchema: { type: 'object', properties: {} },
         serverName: 'demo',
         mcpInfo: { serverName: 'demo', toolName: 'inspect' },
+        isMcp: true,
         annotations: {
           readOnly: true,
           openWorld: true,

@@ -199,7 +199,8 @@ describe('OpenAgentRuntime MCP wiring', () => {
 
     const toolSearch = registry.get('ToolSearch');
     const searchResult = await toolSearch!.execute({ query: 'echo' }, {} as any);
-    expect(searchResult).toContain('mcp__demo__echo');
+    const searchJson = typeof searchResult === 'string' ? searchResult : JSON.stringify(searchResult);
+    expect(searchJson).toContain('mcp__demo__echo');
 
     const snapshot = runtime.buildSnapshot();
     expect(snapshot.capabilitySnapshot.presets.map((preset) => preset.name)).toContain('integration');
