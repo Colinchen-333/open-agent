@@ -862,13 +862,13 @@ describe('PermissionEngine', () => {
       }
     });
 
-    test('classifier DENY is enforced: LLM classifier returning DENY produces deny decision', async () => {
+    test('classifier BLOCK is enforced: LLM classifier returning BLOCK produces deny decision', async () => {
       const { setFeatureDefault, clearFeatureOverrides } = await import('@open-agent/core');
       setFeatureDefault('TRANSCRIPT_CLASSIFIER', true);
       try {
         const engine = new PermissionEngine({ mode: 'default' });
-        // Wire an LLM provider that always returns DENY
-        engine.setLLMProvider({ classify: async () => 'DENY' });
+        // Wire an LLM provider that always returns BLOCK (new classifier protocol)
+        engine.setLLMProvider({ classify: async () => 'BLOCK' });
         const result = await engine.evaluate({
           toolName: 'Bash',
           input: { command: 'rm -rf /tmp/test' },
@@ -881,14 +881,14 @@ describe('PermissionEngine', () => {
       }
     });
 
-    test('classifier DENY is not shadowed by explicit allow rule', async () => {
+    test('classifier BLOCK is not shadowed by explicit allow rule', async () => {
       const { setFeatureDefault, clearFeatureOverrides } = await import('@open-agent/core');
       setFeatureDefault('TRANSCRIPT_CLASSIFIER', true);
       try {
         // The classifier runs AFTER alwaysAllow; an allow rule should short-circuit before classifier.
-        // This test verifies that when the classifier runs (no allow rule), DENY is returned.
+        // This test verifies that when the classifier runs (no allow rule), BLOCK is returned.
         const engine = new PermissionEngine({ mode: 'default' });
-        engine.setLLMProvider({ classify: async () => 'DENY' });
+        engine.setLLMProvider({ classify: async () => 'BLOCK' });
         const result = await engine.evaluate({
           toolName: 'Write',
           input: { file_path: '/tmp/test.txt', content: 'x' },

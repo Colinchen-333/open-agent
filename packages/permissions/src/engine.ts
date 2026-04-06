@@ -9,7 +9,7 @@ import type {
 } from './types';
 import { classifyBashCommand, type BashRiskClassification } from './bash-policy.js';
 import { runPipeline, type PipelineContext, type PipelineStage } from './pipeline.js';
-import { classifyPermissionRequest, type ClassifierContext } from './classifier.js';
+import { classifyPermissionRequest, type ClassifierContext, type LLMClassifierProvider } from './classifier.js';
 
 // Read-only tools that are always safe for informational access
 const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion'];
@@ -129,7 +129,7 @@ export class PermissionEngine {
   private hookExecutor?: { run(event: string, input: unknown): Promise<any> };
 
   /** LLM provider for the classifier stage. Set via setLLMProvider(). */
-  private llmProvider?: import('./llm-classifier.js').LLMClassifierProvider;
+  private llmProvider?: LLMClassifierProvider;
 
   /** Session ID forwarded to hook payloads. */
   private sessionId?: string;
@@ -365,41 +365,32 @@ export class PermissionEngine {
    * TRANSCRIPT_CLASSIFIER feature flag is on), the classifier will fall
    * through to the model after the rule-based checks.
    */
-  setLLMProvider(provider: import('./llm-classifier.js').LLMClassifierProvider): void {
+  setLLMProvider(provider: LLMClassifierProvider): void {
     this.llmProvider = provider;
   }
 
   /**
    * Stage 5 — classifier
    *
-   * Rule-based classifier that can auto-approve permission requests based on:
-   *   1. Tool annotations (readOnly → auto-allow)
-   *   2. Semantic match against allowedPrompts registered by ExitPlanModeV2
-   *   3. Recent explicit user approval phrase in the transcript
+   * Claude Code-aligned classifier:
+   *   1. Safe-tool whitelist → instant auto-approve (no LLM)
+   *   2. readOnly annotation → auto-approve
+   *   3. LLM classifier → full safety evaluation with transcript context
    *
    * This stage is feature-gated via the TRANSCRIPT_CLASSIFIER flag (default true).
-   * The classifier is allow-only: it can short-circuit to allow but never to deny.
-   * Denies remain the responsibility of stageAlwaysDeny and stagePrompt.
-   *
-   * Bash commands that are pre-classified as read-only (by stageValidateInput)
-   * are skipped by the LLM fallback — they will be handled by stagePrompt without
-   * requiring an LLM call, which avoids consuming a provider round-trip for safe
-   * commands.
+   * The classifier can short-circuit to either allow or deny based on the LLM
+   * decision; denies from rule-based stages remain the responsibility of
+   * stageAlwaysDeny.
    */
   private async stageClassifier(ctx: PipelineContext): Promise<PermissionDecision | undefined> {
     if (!feature('TRANSCRIPT_CLASSIFIER')) return undefined;
 
-    // Skip the LLM classifier for Bash commands already confirmed read-only —
-    // stagePrompt will auto-allow them without needing a model call.  We still
-    // run the cheaper rule-based checks (allowedPrompts, approval phrases).
-    const bashClass: BashRiskClassification | undefined = (ctx as any).bashClassification;
-    const skipLLM = bashClass?.level === 'read-only';
-
     const decision = await classifyPermissionRequest(ctx.request, {
       recentUserMessages: this.recentUserMessages,
       allowedPrompts: this.getAllowedPrompts(),
-      llmProvider: skipLLM ? undefined : this.llmProvider,
+      llmProvider: this.llmProvider,
     } satisfies ClassifierContext);
+
     if (decision?.approved === true) {
       return { behavior: 'allow', reason: `classifier: ${decision.rationale}` };
     }
