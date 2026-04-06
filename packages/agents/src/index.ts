@@ -23,3 +23,4 @@ export {
   type AgentMailbox,
   type MailboxMessage,
 } from './agent-taxonomy.js';
+export { SwarmDispatcher, type SwarmConfig, type SwarmTask } from './swarm.js';
