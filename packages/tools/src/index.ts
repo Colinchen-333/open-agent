@@ -36,6 +36,14 @@ export {
   classifyBashCommand,
   type BashCommandClassification,
 } from './bash-subcommands.js';
+export {
+  parseForSecurity,
+  isCommandSafeForAutoExec,
+  extractCommandNames,
+  hasSensitiveRedirects,
+  type SimpleCommand,
+  type ParseForSecurityResult,
+} from './bash-ast.js';
 export { createGlobTool } from './glob.js';
 export { createGrepTool } from './grep.js';
 export { createWebFetchTool } from './web-fetch.js';
