@@ -133,3 +133,9 @@ export {
   type RecoveryResult,
   type ConversationHealth,
 } from './conversation-recovery.js';
+export {
+  ShellSessionPool,
+  type ShellSession,
+  type ShellSessionConfig,
+  type CommandResult,
+} from './shell-session.js';
