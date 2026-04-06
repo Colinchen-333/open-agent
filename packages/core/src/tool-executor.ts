@@ -102,6 +102,19 @@ export class StreamingToolExecutor {
         abortSignal: this.abortController.signal,
       };
 
+      // ── validateInput hook — runs before execution ──────────────────────
+      if (tool.validateInput) {
+        const validation = tool.validateInput(tracked.block.input, toolCtx);
+        if (validation && !validation.valid) {
+          tracked.status = 'completed';
+          tracked.result = this.makeErrorResult(
+            tracked.block,
+            `Validation error (${validation.errorCode}): ${validation.errorMessage}`,
+          );
+          return;
+        }
+      }
+
       const result = await Promise.race([
         tool.execute(tracked.block.input, toolCtx),
         this.waitForAbort(),

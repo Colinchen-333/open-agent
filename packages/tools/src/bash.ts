@@ -115,6 +115,12 @@ export function createBashTool(deps: BashToolDeps = {}): ToolDefinition {
     annotations: { destructive: true, openWorld: true },
     searchHint: 'execute shell terminal command run script',
     toAutoClassifierInput: (input: any) => `Bash ${input.command?.slice(0, 300) ?? ''}`,
+    validateInput: (input: any) => {
+      if (!input.command || typeof input.command !== 'string' || input.command.trim() === '') {
+        return { valid: false as const, errorCode: 'EMPTY_COMMAND', errorMessage: 'command must be a non-empty string' };
+      }
+      return null;
+    },
     description:
       'Execute a bash command in the current working directory. Stdout is captured and returned. Output exceeding 30 000 characters is truncated. Working directory persists between commands; shell state (everything else) does not.',
     getToolUseSummary(input: BashInput, _result, isError) {

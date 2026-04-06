@@ -14,6 +14,7 @@ export type {
   ToolDefinition,
   ToolContext,
   FileReadTracker,
+  ValidationResult,
   ToolCapability,
   ToolCapabilityCategory,
   ToolCapabilityExportEntry,

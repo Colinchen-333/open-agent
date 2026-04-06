@@ -1,6 +1,13 @@
 import type { ToolAnnotations } from '@open-agent/core';
 export type { ToolAnnotations };
 
+/** Result of a pre-execution input validation check. */
+export interface ValidationResult {
+  valid: false;
+  errorCode: string;
+  errorMessage: string;
+}
+
 // Tool input types - precisely reproduced from sdk-tools.d.ts
 
 export interface FileReadInput {
@@ -200,6 +207,19 @@ export interface ToolDefinition {
    *  Return 'allow' | 'deny' | 'ask'. If 'deny', the tool call is blocked
    *  without reaching the engine. If 'allow', skips engine (fast path). */
   checkPermissions?: (input: unknown) => 'allow' | 'deny' | 'ask';
+
+  /** Pre-execution input validation. Runs before permissions.
+   *  Return null/undefined for valid input, or a ValidationResult with error. */
+  validateInput?: (input: unknown, context: ToolContext) => ValidationResult | null | undefined;
+
+  /** Convert tool output to Anthropic SDK ToolResultBlockParam format.
+   *  Default behavior (when omitted): { type: 'tool_result', tool_use_id, content: String(output) } */
+  mapToolResultToToolResultBlockParam?: (output: unknown, toolUseId: string) => {
+    type: 'tool_result';
+    tool_use_id: string;
+    content: string | Array<{ type: 'text'; text: string } | { type: 'image'; source: { type: string; data: string; media_type: string } }>;
+    is_error?: boolean;
+  };
 }
 
 export interface ToolContext {
