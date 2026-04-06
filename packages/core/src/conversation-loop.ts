@@ -9,10 +9,11 @@ import { randomUUID } from 'crypto';
 import { basename } from 'path';
 import { SessionManager } from './session-manager.js';
 import { StreamingToolExecutor } from './tool-executor.js';
-import { runCompactPipeline, NOOP_SUMMARIZER, llmAutocompact, shouldTriggerProactiveAutocompact, estimateMessageTokens } from './compact/index.js';
+import { runCompactPipeline, NOOP_SUMMARIZER, llmAutocompact, shouldTriggerProactiveAutocompact, estimateMessageTokens, recordCollapseCommit } from './compact/index.js';
 import type { MessageSummarizer, AutoCompactPolicy, ContextWindowConfig } from './compact/index.js';
 import { fileHistory } from './file-history.js';
 import { feature } from './feature-flags.js';
+import { TokenAccountant } from './token-accounting.js';
 
 /**
  * Minimal interface for permission checking — implemented by PermissionEngine
@@ -331,6 +332,7 @@ export class ConversationLoop {
    * every subsequent turn, making the tool callable by the model.
    */
   private activatedDeferredTools = new Set<string>();
+  private tokenAccountant = new TokenAccountant();
 
   constructor(options: ConversationLoopOptions) {
     this.options = options;
@@ -437,6 +439,9 @@ export class ConversationLoop {
       totalOutputTokens: this._totalOutputTokens,
     };
   }
+
+  /** Return the detailed per-turn token accounting for this session. */
+  getTokenUsage() { return this.tokenAccountant.getSessionUsage(); }
 
   /** Build the base fields required by all hook events. */
   private hookBase(): Record<string, unknown> {
@@ -704,6 +709,7 @@ export class ConversationLoop {
       const toolUseOrder: string[] = [];
       let messageUsage: any = null;
       let stopReason: string | null = null;
+      const turnStartMs = performance.now();
       // Map from content block index to thinking signature, supporting interleaved
       // thinking blocks without overwriting each other.
       const pendingThinkingSignatures = new Map<number, string>();
@@ -998,6 +1004,17 @@ export class ConversationLoop {
         totalOutputTokens += outTok;
         this._totalInputTokens += inTok;
         this._totalOutputTokens += outTok;
+
+        // Record turn in the token accountant for detailed per-turn tracking.
+        this.tokenAccountant.recordTurn({
+          inputTokens: inTok,
+          outputTokens: outTok,
+          cacheReadTokens: messageUsage.cache_read_input_tokens ?? 0,
+          cacheWriteTokens: messageUsage.cache_creation_input_tokens ?? 0,
+          model: this.options.model ?? 'unknown',
+          durationMs: performance.now() - turnStartMs,
+          timestamp: new Date().toISOString(),
+        });
       }
       let _turnCostForStore = 0;
       if (this.options.costCalculator && messageUsage) {
@@ -2013,6 +2030,18 @@ export class ConversationLoop {
     const removedCount = preCount - this.messages.length;
 
     if (compacted) {
+      // Record the collapse in the context-collapse ledger for diagnostics.
+      if (removedCount > 0) {
+        const postTokens = this.estimateTokens();
+        recordCollapseCommit({
+          id: randomUUID(),
+          summary: `auto-compact (${trigger})`,
+          messageCount: removedCount,
+          tokensSaved: Math.max(0, preTokens - postTokens),
+          timestamp: new Date().toISOString(),
+        });
+      }
+
       if (removedCount > 0) {
         yield {
           type: 'tombstone',

@@ -366,8 +366,16 @@ export class SessionManager {
    * Append a message record to the JSONL session file under
    * `<root>/projects/<hash(cwd)>/sessions/<sessionId>.jsonl`.
    * Uses `defaultCwd` when the SessionManager was constructed with `{ cwd }`.
+   *
+   * When `opts.isSidechain` is true the record is tagged with sidechain metadata
+   * so downstream consumers (e.g. transcript replay) can distinguish main-thread
+   * messages from agent sub-conversations.
    */
-  async appendMessage(sessionId: string, record: unknown): Promise<void> {
+  async appendMessage(
+    sessionId: string,
+    record: unknown,
+    opts?: { isSidechain?: boolean; agentId?: string },
+  ): Promise<void> {
     let writer = this.writers.get(sessionId);
     if (!writer) {
       const cwd = this.defaultCwd ?? process.cwd();
@@ -375,7 +383,11 @@ export class SessionManager {
       writer = new SessionJsonlWriter(path);
       this.writers.set(sessionId, writer);
     }
-    await writer.append(record);
+    // Tag the record with sidechain metadata when applicable.
+    const taggedRecord = opts?.isSidechain
+      ? { ...(record as object), isSidechain: true, agentId: opts.agentId }
+      : record;
+    await writer.append(taggedRecord);
   }
 
   /**

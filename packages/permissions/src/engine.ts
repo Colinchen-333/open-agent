@@ -10,6 +10,7 @@ import type {
 import { classifyBashCommand, type BashRiskClassification } from './bash-policy.js';
 import { runPipeline, type PipelineContext, type PipelineStage } from './pipeline.js';
 import { classifyPermissionRequest, type ClassifierContext, type LLMClassifierProvider } from './classifier.js';
+import { getPermanentRules } from './rule-persistence.js';
 
 // Read-only tools that are always safe for informational access
 const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion'];
@@ -152,6 +153,16 @@ export class PermissionEngine {
     this.allowedPaths = config?.allowedPaths ?? [];
     this.deniedPaths = config?.deniedPaths ?? [];
     this.reconcileDangerousAllowRulesForMode();
+
+    // Hydrate permanent rules persisted from prior sessions.
+    try {
+      const saved = getPermanentRules();
+      for (const rule of saved) {
+        this.addRule(rule.behavior, { toolName: rule.toolName, ruleContent: rule.ruleContent });
+      }
+    } catch {
+      // Non-fatal — rule persistence is best-effort.
+    }
   }
 
   /**

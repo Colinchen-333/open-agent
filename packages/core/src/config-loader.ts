@@ -3,6 +3,7 @@ import { readFile, access } from 'node:fs/promises';
 import { join, resolve } from 'path';
 import { homedir } from 'os';
 import type { McpServerConfig } from './types.js';
+import { validateConfig } from './config-validator.js';
 
 // ---------------------------------------------------------------------------
 // loadMemoryPrompt — standalone async export
@@ -248,8 +249,16 @@ export class ConfigLoader {
     for (const src of sources) {
       if (existsSync(src)) {
         try {
-          const parsed = JSON.parse(readFileSync(src, 'utf-8')) as Settings;
-          merged = deepMerge(merged, parsed);
+          const parsed = JSON.parse(readFileSync(src, 'utf-8')) as Record<string, unknown>;
+          // Validate the parsed config and warn about invalid fields.
+          const validation = validateConfig(parsed);
+          if (!validation.valid) {
+            for (const err of validation.errors) {
+              console.warn(`[config] ${src} — ${err.path}: ${err.message}`);
+            }
+          }
+          // Use the cleaned config (invalid fields stripped) for merging.
+          merged = deepMerge(merged, validation.cleaned as Settings);
         } catch {
           // Malformed JSON — silently skip to avoid crashing startup.
         }
